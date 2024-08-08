@@ -66,7 +66,7 @@ server {
     8  . "$HOME/.cargo/env"
     9  sudo vi /etc/nginx/sites-available/default  [SEE NGINX CONFIG BELOW]
    10  cd /var/www/html
-   11  sudo git clone https://github.com/erikherz/moq-js.git [Generic Repo: sudo git clone https://github.com/kixelated/moq-js.git ]
+   11  GENERIC REPO: sudo git clone https://github.com/kixelated/moq-js.git VIVOH.EARTH GUI: sudo git clone https://github.com/erikherz/moq-js.git 
    12  cd moq-js/
    13  sudo npm install
    14 sudo vi web/.env.production
