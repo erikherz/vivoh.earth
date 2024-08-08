@@ -1,5 +1,5 @@
 FIRST SET UP AN API SERVER
-
+```
 1 touch API-VIVOH-EARTH
 2 sudo apt update
 3 sudo apt install redis nginx python3-certbot-nginx
@@ -45,9 +45,9 @@ server {
     include /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 }
-
+```
     NEXT SET UP A RELAY
-    
+  ```  
     1  touch XXX-VIVOH-EARTH
     2  sudo apt update
     3  sudo apt install build-essential pkg-config libssl-dev nginx certbot python3-certbot-nginx npm ffmpeg python3-certbot-dns-cloudflare
@@ -140,6 +140,6 @@ RestartSec=1
 SyslogIdentifier=moq-relay
 [Install]
 WantedBy=multi-user.target
-
+```
 
 ffmpeg -hide_banner -v quiet -stream_loop -1 -re -i af.mp4 -c copy -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame - | RUST_LOG=moq_pub=info /home/ubuntu/moq-rs/target/release/moq-pub --name "REPLACE_WITH_STREAM_NAME" "https://REPLACE_WITH_ORIGIN_DOMAIN.vivoh.earth" "$@"
