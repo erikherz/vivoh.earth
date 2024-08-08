@@ -1,3 +1,7 @@
+Since Luke's https://github.com/kixelated/moq-js and https://github.com/kixelated/moq-rs projects use TeraForm: https://github.com/kixelated/quic.video/tree/main/infra and I wanted to deploy it on VMs with systemctl rather than container, I decided to document the steps I took to get Luke's code running.
+
+Feel free to drop me a line if you have any questions or would like help with it: erik@vivoh.com
+
 FIRST SET UP AN API SERVER 
 [BELOW IS A SIMPLE API SERVER FOR TESTING. VIVOH.EARTH NOW USES CLOUDFLARE WORKERS FOR THE API INSTEAD]
 ```
