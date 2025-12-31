@@ -3,6 +3,19 @@
   "name": "vivoh-earth",
   "main": "src/index.ts",
   "compatibility_date": "2025-01-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "routes": [
+    {
+      "pattern": "vivoh.earth",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.vivoh.earth",
+      "custom_domain": true
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -14,7 +27,12 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["RTSPSession"]
+      "new_sqlite_classes": [
+        "RTSPSession"
+      ]
     }
-  ]
+  ],
+  "observability": {
+    "enabled": true
+  }
 }
