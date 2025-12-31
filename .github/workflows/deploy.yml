@@ -13,12 +13,9 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/checkout@v4
-        # Note: If you have specific build steps, add them here
-        
       - name: Deploy to Cloudflare
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          # This will use the settings in your wrangler.jsonc
+          # ADD THIS LINE:
+          wranglerVersion: 'latest'
