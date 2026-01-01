@@ -65,12 +65,11 @@ export default {
     }
 
     // SPA routes - serve index.html for stream ID paths
-    // Stream IDs are 5-8 lowercase alphanumeric characters (5 new, 5-8 for backwards compat)
+    // Stream IDs are 5 lowercase alphanumeric characters
     const pathWithoutSlash = url.pathname.slice(1);
-    const isStreamId = /^[a-z0-9]{5,8}$/.test(pathWithoutSlash);
+    const isStreamId = /^[a-z0-9]{5}$/.test(pathWithoutSlash);
 
-    // Also support legacy /watch/* URLs
-    if (isStreamId || url.pathname.startsWith("/watch/")) {
+    if (isStreamId) {
       const indexUrl = new URL("/index.html", url.origin);
       return env.ASSETS.fetch(new Request(indexUrl.toString(), {
         method: request.method,

@@ -31,9 +31,9 @@ function generateStreamId(): string {
   return result;
 }
 
-// Check if a string is a valid stream ID (5-8 lowercase alphanumeric for backwards compat)
+// Check if a string is a valid stream ID (5 lowercase alphanumeric)
 function isValidStreamId(str: string): boolean {
-  return /^[a-z0-9]{5,8}$/.test(str);
+  return /^[a-z0-9]{5}$/.test(str);
 }
 
 // Determine current view and stream ID from URL
@@ -41,15 +41,6 @@ function getRouteInfo(): { view: View; streamId: string } {
   const path = window.location.pathname;
 
   // Watch view: /{streamId} (5 char alphanumeric)
-  // Also support legacy /watch/{streamId} URLs
-  if (path.startsWith("/watch/")) {
-    const streamId = path.replace("/watch/", "").split("/")[0];
-    // Redirect to new clean URL
-    window.history.replaceState({}, "", `/${streamId}`);
-    return { view: "watch", streamId: streamId || "" };
-  }
-
-  // Check if path is a stream ID (e.g., /abc12)
   const potentialStreamId = path.slice(1); // Remove leading /
   if (isValidStreamId(potentialStreamId)) {
     return { view: "watch", streamId: potentialStreamId };
