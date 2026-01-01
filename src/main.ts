@@ -131,11 +131,13 @@ async function init() {
 
       // Click the Details button inside hang-support to expand it
       if (wasHidden) {
-        const hangSupport = supportPanel.querySelector("hang-support");
-        if (hangSupport?.shadowRoot) {
-          const detailsBtn = hangSupport.shadowRoot.querySelector("button");
-          if (detailsBtn) detailsBtn.click();
-        }
+        setTimeout(() => {
+          const hangSupport = supportPanel.querySelector("hang-support");
+          if (hangSupport?.shadowRoot) {
+            const detailsBtn = hangSupport.shadowRoot.querySelector("button");
+            if (detailsBtn) detailsBtn.click();
+          }
+        }, 50);
       }
     });
   }
