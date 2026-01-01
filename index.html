@@ -205,35 +205,101 @@
 
         /* Hang component button overrides */
         hang-publish button,
-        hang-watch button {
+        hang-watch button,
+        hang-support button {
             background: #262626;
             border: 1px solid #404040;
             border-radius: 8px;
             padding: 0.5rem 0.75rem;
             color: #e5e5e5;
-            font-size: 1.25rem;
+            font-size: 1rem;
             cursor: pointer;
             transition: all 0.2s ease;
             min-width: 44px;
-            min-height: 44px;
+            min-height: 36px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
+            gap: 0.25rem;
+            font-weight: 500;
         }
         hang-publish button:hover,
-        hang-watch button:hover {
+        hang-watch button:hover,
+        hang-support button:hover {
             background: #363636;
             border-color: #525252;
             transform: translateY(-1px);
         }
         hang-publish button:active,
-        hang-watch button:active {
+        hang-watch button:active,
+        hang-support button:active {
             transform: translateY(0);
         }
-        hang-publish div[style*="Device"],
-        hang-watch div[style*="justify"] {
+        /* Device selector buttons - larger for emoji */
+        hang-publish button[title] {
+            font-size: 1.25rem;
+            min-width: 44px;
+            min-height: 44px;
+        }
+
+        /* Volume slider styling */
+        hang-watch input[type="range"],
+        hang-publish input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            background: transparent;
+            cursor: pointer;
+            width: 100%;
+            max-width: 120px;
+        }
+        hang-watch input[type="range"]::-webkit-slider-runnable-track,
+        hang-publish input[type="range"]::-webkit-slider-runnable-track {
+            background: #404040;
+            height: 6px;
+            border-radius: 3px;
+        }
+        hang-watch input[type="range"]::-webkit-slider-thumb,
+        hang-publish input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            margin-top: -5px;
+            background: #3b82f6;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            border: 2px solid #1d4ed8;
+            transition: all 0.15s ease;
+        }
+        hang-watch input[type="range"]::-webkit-slider-thumb:hover,
+        hang-publish input[type="range"]::-webkit-slider-thumb:hover {
+            background: #60a5fa;
+            transform: scale(1.1);
+        }
+        hang-watch input[type="range"]::-moz-range-track,
+        hang-publish input[type="range"]::-moz-range-track {
+            background: #404040;
+            height: 6px;
+            border-radius: 3px;
+        }
+        hang-watch input[type="range"]::-moz-range-thumb,
+        hang-publish input[type="range"]::-moz-range-thumb {
+            background: #3b82f6;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            border: 2px solid #1d4ed8;
+        }
+
+        /* Status text styling */
+        hang-publish div,
+        hang-watch div,
+        hang-support div {
             color: #a3a3a3;
             font-size: 0.875rem;
+        }
+        hang-support {
+            display: block;
+            color: #e5e5e5;
         }
     </style>
 </head>
