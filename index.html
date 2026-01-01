@@ -48,14 +48,6 @@
             color: #525252;
             font-size: 0.875rem;
         }
-        .support-banner {
-            background: #1c1917;
-            border: 1px solid #44403c;
-            border-radius: 8px;
-            padding: 1rem;
-            margin-bottom: 1.5rem;
-        }
-
         /* Room controls */
         .room-info {
             background: #171717;
@@ -156,6 +148,27 @@
         .btn-google:hover {
             background: #f5f5f5;
         }
+
+        /* Footer */
+        footer a {
+            color: #737373;
+            text-decoration: none;
+        }
+        footer a:hover {
+            color: #a3a3a3;
+            text-decoration: underline;
+        }
+        .support-panel {
+            margin-top: 1rem;
+            background: #171717;
+            border: 1px solid #262626;
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: left;
+        }
+        .support-panel.hidden {
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -179,10 +192,6 @@
             </div>
         </div>
 
-        <div class="support-banner">
-            <hang-support></hang-support>
-        </div>
-
         <div class="grid">
             <section>
                 <h2>Broadcast</h2>
@@ -204,7 +213,10 @@
         </div>
 
         <footer>
-            <p>MoQ Transport | Cloudflare Relay</p>
+            <p>MoQ Transport | Cloudflare Relay | <a href="#" id="support-link">Browser Support</a></p>
+            <div id="support-panel" class="support-panel hidden">
+                <hang-support></hang-support>
+            </div>
         </footer>
     </div>
 </body>
