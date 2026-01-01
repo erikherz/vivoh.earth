@@ -120,6 +120,26 @@ async function init() {
     });
   }
 
+  // Browser support toggle
+  const supportLink = document.getElementById("support-link");
+  const supportPanel = document.getElementById("support-panel");
+  if (supportLink && supportPanel) {
+    supportLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      const wasHidden = supportPanel.classList.contains("hidden");
+      supportPanel.classList.toggle("hidden");
+
+      // Click the Details button inside hang-support to expand it
+      if (wasHidden) {
+        const hangSupport = supportPanel.querySelector("hang-support");
+        if (hangSupport?.shadowRoot) {
+          const detailsBtn = hangSupport.shadowRoot.querySelector("button");
+          if (detailsBtn) detailsBtn.click();
+        }
+      }
+    });
+  }
+
   // Initialize authentication
   await initAuth();
 }

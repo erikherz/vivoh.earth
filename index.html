@@ -158,6 +158,20 @@
             color: #a3a3a3;
             text-decoration: underline;
         }
+        .support-panel {
+            margin-top: 1rem;
+            background: #171717;
+            border: 1px solid #262626;
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: left;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .support-panel.hidden {
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -202,7 +216,10 @@
         </div>
 
         <footer>
-            <p><a href="https://moq.dev/" target="_blank" rel="noopener">MoQ Transport</a> | <a href="https://blog.cloudflare.com/moq/" target="_blank" rel="noopener">Cloudflare Relay</a> | <a href="https://caniuse.com/webtransport" target="_blank" rel="noopener">Browser Support</a></p>
+            <p><a href="https://moq.dev/" target="_blank" rel="noopener">MoQ Transport</a> | <a href="https://blog.cloudflare.com/moq/" target="_blank" rel="noopener">Cloudflare Relay</a> | <a href="#" id="support-link">Browser Support</a></p>
+            <div id="support-panel" class="support-panel hidden">
+                <hang-support></hang-support>
+            </div>
         </footer>
     </div>
 </body>
