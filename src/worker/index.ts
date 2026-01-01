@@ -64,12 +64,13 @@ export default {
       return handleApiRoutes(request, env, url);
     }
 
-    // SPA routes - serve index.html for stream ID paths
+    // SPA routes - serve index.html for stream ID paths and /stats
     // Stream IDs are 5 lowercase alphanumeric characters
     const pathWithoutSlash = url.pathname.slice(1);
     const isStreamId = /^[a-z0-9]{5}$/.test(pathWithoutSlash);
+    const isStatsPage = url.pathname === "/stats";
 
-    if (isStreamId) {
+    if (isStreamId || isStatsPage) {
       const indexUrl = new URL("/index.html", url.origin);
       return env.ASSETS.fetch(new Request(indexUrl.toString(), {
         method: request.method,
@@ -461,6 +462,45 @@ async function handleStatsRoutes(
 ): Promise<Response> {
   const method = request.method;
   const path = url.pathname;
+
+  // GET /api/stats/live - Get live broadcasts and viewers (requires auth)
+  if (method === "GET" && path === "/api/stats/live") {
+    const user = await getAuthenticatedUser(request, env);
+    if (!user) {
+      return Response.json({ error: "Authentication required" }, { status: 401 });
+    }
+
+    // Get active broadcasts (started but not ended)
+    const broadcasts = await env.DB
+      .prepare(`
+        SELECT
+          b.id, b.stream_id, b.started_at,
+          u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url
+        FROM broadcast_events b
+        JOIN users u ON b.user_id = u.id
+        WHERE b.ended_at IS NULL
+        ORDER BY b.started_at DESC
+      `)
+      .all();
+
+    // Get active viewers (started but not ended)
+    const viewers = await env.DB
+      .prepare(`
+        SELECT
+          w.id, w.stream_id, w.started_at,
+          u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url
+        FROM watch_events w
+        LEFT JOIN users u ON w.user_id = u.id
+        WHERE w.ended_at IS NULL
+        ORDER BY w.started_at DESC
+      `)
+      .all();
+
+    return Response.json({
+      broadcasts: broadcasts.results,
+      viewers: viewers.results,
+    });
+  }
 
   // POST /api/stats/broadcast - Start a broadcast (requires auth)
   if (method === "POST" && path === "/api/stats/broadcast") {

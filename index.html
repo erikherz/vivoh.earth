@@ -129,6 +129,91 @@
             cursor: pointer;
             accent-color: #3b82f6;
         }
+
+        /* Stats view */
+        .stats-view {
+            margin-top: 1rem;
+        }
+        .stats-view h2 {
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+            color: #e5e5e5;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .stats-section {
+            background: #171717;
+            border: 1px solid #262626;
+            border-radius: 12px;
+            padding: 1.5rem;
+        }
+        .stats-section h3 {
+            font-size: 1rem;
+            color: #a3a3a3;
+            margin-bottom: 1rem;
+        }
+        .stats-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .stats-table th,
+        .stats-table td {
+            text-align: left;
+            padding: 0.75rem 0.5rem;
+            border-bottom: 1px solid #262626;
+        }
+        .stats-table th {
+            color: #737373;
+            font-weight: 500;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+        }
+        .stats-table td {
+            color: #e5e5e5;
+            font-size: 0.875rem;
+        }
+        .stats-table td a {
+            color: #3b82f6;
+            text-decoration: none;
+            font-family: monospace;
+        }
+        .stats-table td a:hover {
+            text-decoration: underline;
+        }
+        .stats-table .empty {
+            color: #525252;
+            text-align: center;
+            font-style: italic;
+        }
+        .avatar-small {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            vertical-align: middle;
+            margin-right: 0.5rem;
+        }
+        .stats-login-required {
+            text-align: center;
+            padding: 3rem;
+            background: #171717;
+            border: 1px solid #262626;
+            border-radius: 12px;
+        }
+        .stats-login-required h2 {
+            margin-bottom: 0.5rem;
+        }
+        .stats-login-required p {
+            color: #a3a3a3;
+            margin-bottom: 1.5rem;
+        }
+        .stats-login-required .auth-buttons {
+            justify-content: center;
+        }
+
         .share-input {
             flex: 1;
             background: #262626;

@@ -110,3 +110,34 @@ export async function updateStreamSettings(streamId: string, requireAuth: boolea
     // Ignore errors
   }
 }
+
+// Live stats
+export interface LiveBroadcast {
+  id: number;
+  stream_id: string;
+  started_at: string;
+  user_id: number;
+  user_name: string;
+  user_email: string;
+  avatar_url: string;
+}
+
+export interface LiveViewer {
+  id: number;
+  stream_id: string;
+  started_at: string;
+  user_id: number | null;
+  user_name: string | null;
+  user_email: string | null;
+  avatar_url: string | null;
+}
+
+export async function getLiveStats(): Promise<{ broadcasts: LiveBroadcast[]; viewers: LiveViewer[] } | null> {
+  try {
+    const response = await fetch("/api/stats/live");
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}

@@ -15,13 +15,16 @@ import {
   logWatchEnd,
   getStreamSettings,
   updateStreamSettings,
-  type User
+  getLiveStats,
+  type User,
+  type LiveBroadcast,
+  type LiveViewer
 } from "./auth";
 
 const RELAY_URL = "https://relay.cloudflare.mediaoverquic.com";
 const NAMESPACE_PREFIX = "vivoh.earth";
 
-type View = "broadcast" | "watch";
+type View = "broadcast" | "watch" | "stats";
 
 // Generate a random stream ID (5 lowercase alphanumeric characters)
 function generateStreamId(): string {
@@ -41,6 +44,11 @@ function isValidStreamId(str: string): boolean {
 // Determine current view and stream ID from URL
 function getRouteInfo(): { view: View; streamId: string } {
   const path = window.location.pathname;
+
+  // Stats view: /stats
+  if (path === "/stats") {
+    return { view: "stats", streamId: "" };
+  }
 
   // Watch view: /{streamId} (5 char alphanumeric)
   const potentialStreamId = path.slice(1); // Remove leading /
@@ -387,6 +395,132 @@ async function initWatchView(streamId: string, user: User | null) {
   }
 }
 
+// Initialize stats view
+async function initStatsView(user: User | null) {
+  console.log("Vivoh.Earth Stats");
+
+  // Hide broadcast and watch views
+  document.getElementById("broadcast-view")?.classList.add("hidden");
+  document.getElementById("watch-view")?.classList.add("hidden");
+
+  // Hide footer and new stream button
+  const footer = document.querySelector("footer");
+  if (footer) footer.classList.add("hidden");
+  const newStreamBtn = document.getElementById("new-stream-btn");
+  if (newStreamBtn) newStreamBtn.classList.add("hidden");
+
+  // Create stats view container
+  const container = document.querySelector(".container");
+  if (!container) return;
+
+  const statsView = document.createElement("div");
+  statsView.id = "stats-view";
+  statsView.className = "stats-view";
+
+  // Check if logged in
+  if (!user) {
+    statsView.innerHTML = `
+      <div class="stats-login-required">
+        <h2>Sign in Required</h2>
+        <p>Please sign in to view live statistics.</p>
+        <div class="auth-buttons">
+          <button id="stats-login-google" class="btn btn-google">Google</button>
+          <button id="stats-login-microsoft" class="btn btn-microsoft">Microsoft</button>
+          <button id="stats-login-discord" class="btn btn-discord">Discord</button>
+        </div>
+      </div>
+    `;
+    container.appendChild(statsView);
+    document.getElementById("stats-login-google")?.addEventListener("click", loginWithGoogle);
+    document.getElementById("stats-login-microsoft")?.addEventListener("click", loginWithMicrosoft);
+    document.getElementById("stats-login-discord")?.addEventListener("click", loginWithDiscord);
+    return;
+  }
+
+  // Show loading state
+  statsView.innerHTML = `<p>Loading stats...</p>`;
+  container.appendChild(statsView);
+
+  // Fetch and display stats
+  const renderStats = async () => {
+    const stats = await getLiveStats();
+    if (!stats) {
+      statsView.innerHTML = `<p class="error">Failed to load stats</p>`;
+      return;
+    }
+
+    const formatTime = (dateStr: string) => {
+      const date = new Date(dateStr + "Z");
+      return date.toLocaleTimeString();
+    };
+
+    const broadcastRows = stats.broadcasts.length === 0
+      ? `<tr><td colspan="4" class="empty">No active broadcasts</td></tr>`
+      : stats.broadcasts.map((b: LiveBroadcast) => `
+          <tr>
+            <td><a href="/${b.stream_id}" target="_blank">${b.stream_id}</a></td>
+            <td>
+              ${b.avatar_url ? `<img src="${b.avatar_url}" class="avatar-small">` : ""}
+              ${b.user_name || b.user_email}
+            </td>
+            <td>${formatTime(b.started_at)}</td>
+            <td>${stats.viewers.filter((v: LiveViewer) => v.stream_id === b.stream_id).length}</td>
+          </tr>
+        `).join("");
+
+    const viewerRows = stats.viewers.length === 0
+      ? `<tr><td colspan="3" class="empty">No active viewers</td></tr>`
+      : stats.viewers.map((v: LiveViewer) => `
+          <tr>
+            <td><a href="/${v.stream_id}" target="_blank">${v.stream_id}</a></td>
+            <td>
+              ${v.avatar_url ? `<img src="${v.avatar_url}" class="avatar-small">` : ""}
+              ${v.user_name || v.user_email || "Anonymous"}
+            </td>
+            <td>${formatTime(v.started_at)}</td>
+          </tr>
+        `).join("");
+
+    statsView.innerHTML = `
+      <h2>Live Statistics</h2>
+      <div class="stats-grid">
+        <section class="stats-section">
+          <h3>Active Broadcasts (${stats.broadcasts.length})</h3>
+          <table class="stats-table">
+            <thead>
+              <tr>
+                <th>Stream</th>
+                <th>Broadcaster</th>
+                <th>Started</th>
+                <th>Viewers</th>
+              </tr>
+            </thead>
+            <tbody>${broadcastRows}</tbody>
+          </table>
+        </section>
+        <section class="stats-section">
+          <h3>Active Viewers (${stats.viewers.length})</h3>
+          <table class="stats-table">
+            <thead>
+              <tr>
+                <th>Stream</th>
+                <th>Viewer</th>
+                <th>Started</th>
+              </tr>
+            </thead>
+            <tbody>${viewerRows}</tbody>
+          </table>
+        </section>
+      </div>
+      <button id="refresh-stats" class="btn btn-primary">Refresh</button>
+    `;
+
+    document.getElementById("refresh-stats")?.addEventListener("click", renderStats);
+  };
+
+  await renderStats();
+}
+
 // Initialize the app
 async function init() {
   const { view, streamId } = getRouteInfo();
@@ -397,6 +531,8 @@ async function init() {
 
   if (view === "broadcast") {
     initBroadcastView(streamId, user);
+  } else if (view === "stats") {
+    await initStatsView(user);
   } else {
     await initWatchView(streamId, user);
   }
