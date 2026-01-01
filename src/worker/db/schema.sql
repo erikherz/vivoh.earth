@@ -15,3 +15,30 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);
 CREATE INDEX IF NOT EXISTS idx_users_microsoft_id ON users(microsoft_id);
 CREATE INDEX IF NOT EXISTS idx_users_discord_id ON users(discord_id);
+
+-- Broadcast events - logged when a user starts broadcasting
+CREATE TABLE IF NOT EXISTS broadcast_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  stream_id TEXT NOT NULL,
+  started_at TEXT DEFAULT (datetime('now')),
+  ended_at TEXT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_broadcast_events_user_id ON broadcast_events(user_id);
+CREATE INDEX IF NOT EXISTS idx_broadcast_events_stream_id ON broadcast_events(stream_id);
+CREATE INDEX IF NOT EXISTS idx_broadcast_events_started_at ON broadcast_events(started_at);
+
+-- Watch events - logged when someone watches a stream
+CREATE TABLE IF NOT EXISTS watch_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  stream_id TEXT NOT NULL,
+  started_at TEXT DEFAULT (datetime('now')),
+  ended_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_watch_events_user_id ON watch_events(user_id);
+CREATE INDEX IF NOT EXISTS idx_watch_events_stream_id ON watch_events(stream_id);
+CREATE INDEX IF NOT EXISTS idx_watch_events_started_at ON watch_events(started_at);

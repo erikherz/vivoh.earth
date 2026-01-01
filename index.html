@@ -280,6 +280,40 @@
             display: none;
         }
 
+        /* Login required overlay */
+        #login-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(10, 10, 10, 0.95);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 12px;
+            z-index: 10;
+        }
+        .login-required {
+            text-align: center;
+            padding: 2rem;
+        }
+        .login-required h2 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+            color: #e5e5e5;
+        }
+        .login-required p {
+            color: #a3a3a3;
+            margin-bottom: 1.5rem;
+        }
+        .login-required .auth-buttons {
+            justify-content: center;
+        }
+        #broadcast-view {
+            position: relative;
+        }
+
         /* Hang component button overrides */
         hang-publish button,
         hang-watch button,

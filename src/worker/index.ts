@@ -95,6 +95,11 @@ async function handleApiRoutes(
       return handleProviderAuth(request, env, url, "discord");
     }
 
+    // Stats routes
+    if (url.pathname.startsWith("/api/stats/")) {
+      return handleStatsRoutes(request, env, url);
+    }
+
     // Legacy routes (backwards compatibility - default to Google)
     switch (url.pathname) {
       case "/api/auth/login":
@@ -380,4 +385,90 @@ async function upsertUser(db: D1Database, input: UserInput): Promise<User> {
 
 async function getUserById(db: D1Database, id: number): Promise<User | null> {
   return db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first<User>();
+}
+
+// Stats routes handler
+async function handleStatsRoutes(
+  request: Request,
+  env: Env,
+  url: URL
+): Promise<Response> {
+  const method = request.method;
+  const path = url.pathname;
+
+  // POST /api/stats/broadcast - Start a broadcast (requires auth)
+  if (method === "POST" && path === "/api/stats/broadcast") {
+    const user = await getAuthenticatedUser(request, env);
+    if (!user) {
+      return Response.json({ error: "Authentication required" }, { status: 401 });
+    }
+
+    const body = await request.json() as { stream_id: string };
+    if (!body.stream_id) {
+      return Response.json({ error: "stream_id required" }, { status: 400 });
+    }
+
+    const result = await env.DB
+      .prepare("INSERT INTO broadcast_events (user_id, stream_id) VALUES (?, ?) RETURNING id")
+      .bind(user.id, body.stream_id)
+      .first<{ id: number }>();
+
+    return Response.json({ id: result?.id, stream_id: body.stream_id });
+  }
+
+  // POST /api/stats/broadcast/:id/end - End a broadcast
+  const broadcastEndMatch = path.match(/^\/api\/stats\/broadcast\/(\d+)\/end$/);
+  if (method === "POST" && broadcastEndMatch) {
+    const eventId = parseInt(broadcastEndMatch[1]);
+    await env.DB
+      .prepare("UPDATE broadcast_events SET ended_at = datetime('now') WHERE id = ?")
+      .bind(eventId)
+      .run();
+
+    return Response.json({ success: true });
+  }
+
+  // POST /api/stats/watch - Start watching (auth optional)
+  if (method === "POST" && path === "/api/stats/watch") {
+    const user = await getAuthenticatedUser(request, env);
+
+    const body = await request.json() as { stream_id: string };
+    if (!body.stream_id) {
+      return Response.json({ error: "stream_id required" }, { status: 400 });
+    }
+
+    const result = await env.DB
+      .prepare("INSERT INTO watch_events (user_id, stream_id) VALUES (?, ?) RETURNING id")
+      .bind(user?.id ?? null, body.stream_id)
+      .first<{ id: number }>();
+
+    return Response.json({ id: result?.id, stream_id: body.stream_id });
+  }
+
+  // POST /api/stats/watch/:id/end - End watching
+  const watchEndMatch = path.match(/^\/api\/stats\/watch\/(\d+)\/end$/);
+  if (method === "POST" && watchEndMatch) {
+    const eventId = parseInt(watchEndMatch[1]);
+    await env.DB
+      .prepare("UPDATE watch_events SET ended_at = datetime('now') WHERE id = ?")
+      .bind(eventId)
+      .run();
+
+    return Response.json({ success: true });
+  }
+
+  return new Response("Not Found", { status: 404 });
+}
+
+// Helper to get authenticated user from request
+async function getAuthenticatedUser(request: Request, env: Env): Promise<User | null> {
+  const cookieHeader = request.headers.get("Cookie");
+  const sessionToken = getSessionFromCookie(cookieHeader);
+
+  if (!sessionToken) return null;
+
+  const session = await verifySessionToken(sessionToken, env.SESSION_SECRET);
+  if (!session) return null;
+
+  return getUserById(env.DB, session.userId);
 }

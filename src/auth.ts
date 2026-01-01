@@ -40,3 +40,50 @@ export function loginWithDiscord(): void {
 export function logout(): void {
   window.location.href = "/api/auth/logout";
 }
+
+// Stats logging functions
+export async function logBroadcastStart(streamId: string): Promise<number | null> {
+  try {
+    const response = await fetch("/api/stats/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stream_id: streamId }),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.id;
+  } catch {
+    return null;
+  }
+}
+
+export async function logBroadcastEnd(eventId: number): Promise<void> {
+  try {
+    await fetch(`/api/stats/broadcast/${eventId}/end`, { method: "POST" });
+  } catch {
+    // Ignore errors
+  }
+}
+
+export async function logWatchStart(streamId: string): Promise<number | null> {
+  try {
+    const response = await fetch("/api/stats/watch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stream_id: streamId }),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.id;
+  } catch {
+    return null;
+  }
+}
+
+export async function logWatchEnd(eventId: number): Promise<void> {
+  try {
+    await fetch(`/api/stats/watch/${eventId}/end`, { method: "POST" });
+  } catch {
+    // Ignore errors
+  }
+}
