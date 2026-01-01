@@ -42,3 +42,17 @@ CREATE TABLE IF NOT EXISTS watch_events (
 CREATE INDEX IF NOT EXISTS idx_watch_events_user_id ON watch_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_watch_events_stream_id ON watch_events(stream_id);
 CREATE INDEX IF NOT EXISTS idx_watch_events_started_at ON watch_events(started_at);
+
+-- Stream settings - stores per-stream configuration
+CREATE TABLE IF NOT EXISTS streams (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stream_id TEXT UNIQUE NOT NULL,
+  user_id INTEGER NOT NULL,
+  require_auth INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_streams_stream_id ON streams(stream_id);
+CREATE INDEX IF NOT EXISTS idx_streams_user_id ON streams(user_id);

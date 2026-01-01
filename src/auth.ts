@@ -87,3 +87,26 @@ export async function logWatchEnd(eventId: number): Promise<void> {
     // Ignore errors
   }
 }
+
+// Stream settings functions
+export async function getStreamSettings(streamId: string): Promise<{ require_auth: boolean }> {
+  try {
+    const response = await fetch(`/api/streams/${streamId}`);
+    const data = await response.json();
+    return { require_auth: data.require_auth ?? false };
+  } catch {
+    return { require_auth: false };
+  }
+}
+
+export async function updateStreamSettings(streamId: string, requireAuth: boolean): Promise<void> {
+  try {
+    await fetch("/api/streams", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stream_id: streamId, require_auth: requireAuth }),
+    });
+  } catch {
+    // Ignore errors
+  }
+}

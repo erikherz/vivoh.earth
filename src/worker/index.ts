@@ -99,6 +99,11 @@ async function handleApiRoutes(
       return handleProviderAuth(request, env, url, "discord");
     }
 
+    // Stream settings routes
+    if (url.pathname.startsWith("/api/streams")) {
+      return handleStreamRoutes(request, env, url);
+    }
+
     // Stats routes
     if (url.pathname.startsWith("/api/stats/")) {
       return handleStatsRoutes(request, env, url);
@@ -389,6 +394,63 @@ async function upsertUser(db: D1Database, input: UserInput): Promise<User> {
 
 async function getUserById(db: D1Database, id: number): Promise<User | null> {
   return db.prepare("SELECT * FROM users WHERE id = ?").bind(id).first<User>();
+}
+
+// Stream settings routes handler
+async function handleStreamRoutes(
+  request: Request,
+  env: Env,
+  url: URL
+): Promise<Response> {
+  const method = request.method;
+  const path = url.pathname;
+
+  // GET /api/streams/:stream_id - Get stream settings (public)
+  const streamIdMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})$/);
+  if (method === "GET" && streamIdMatch) {
+    const streamId = streamIdMatch[1];
+    const stream = await env.DB
+      .prepare("SELECT require_auth FROM streams WHERE stream_id = ?")
+      .bind(streamId)
+      .first<{ require_auth: number }>();
+
+    return Response.json({
+      stream_id: streamId,
+      require_auth: stream?.require_auth === 1,
+    });
+  }
+
+  // POST /api/streams - Create or update stream settings (requires auth)
+  if (method === "POST" && path === "/api/streams") {
+    const user = await getAuthenticatedUser(request, env);
+    if (!user) {
+      return Response.json({ error: "Authentication required" }, { status: 401 });
+    }
+
+    const body = await request.json() as { stream_id: string; require_auth: boolean };
+    if (!body.stream_id) {
+      return Response.json({ error: "stream_id required" }, { status: 400 });
+    }
+
+    // Upsert stream settings
+    await env.DB
+      .prepare(`
+        INSERT INTO streams (stream_id, user_id, require_auth)
+        VALUES (?, ?, ?)
+        ON CONFLICT(stream_id) DO UPDATE SET
+          require_auth = excluded.require_auth,
+          updated_at = datetime('now')
+      `)
+      .bind(body.stream_id, user.id, body.require_auth ? 1 : 0)
+      .run();
+
+    return Response.json({
+      stream_id: body.stream_id,
+      require_auth: body.require_auth,
+    });
+  }
+
+  return new Response("Not Found", { status: 404 });
 }
 
 // Stats routes handler
