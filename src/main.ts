@@ -454,6 +454,17 @@ async function initStatsView(user: User | null) {
       return date.toLocaleTimeString();
     };
 
+    const formatDuration = (dateStr: string) => {
+      const start = new Date(dateStr + "Z");
+      const now = new Date();
+      const seconds = Math.floor((now.getTime() - start.getTime()) / 1000);
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+      const hours = Math.floor(minutes / 60);
+      return `${hours}h ${minutes % 60}m`;
+    };
+
     const broadcastRows = stats.broadcasts.length === 0
       ? `<tr><td colspan="4" class="empty">No active broadcasts</td></tr>`
       : stats.broadcasts.map((b: LiveBroadcast) => `
@@ -463,7 +474,7 @@ async function initStatsView(user: User | null) {
               ${b.avatar_url ? `<img src="${b.avatar_url}" class="avatar-small">` : ""}
               ${b.user_name || b.user_email}
             </td>
-            <td>${formatTime(b.started_at)}</td>
+            <td>${formatDuration(b.started_at)}</td>
             <td>${stats.viewers.filter((v: LiveViewer) => v.stream_id === b.stream_id).length}</td>
           </tr>
         `).join("");
@@ -477,7 +488,7 @@ async function initStatsView(user: User | null) {
               ${v.avatar_url ? `<img src="${v.avatar_url}" class="avatar-small">` : ""}
               ${v.user_name || v.user_email || "Anonymous"}
             </td>
-            <td>${formatTime(v.started_at)}</td>
+            <td>${formatDuration(v.started_at)}</td>
           </tr>
         `).join("");
 
@@ -491,7 +502,7 @@ async function initStatsView(user: User | null) {
               <tr>
                 <th>Stream</th>
                 <th>Broadcaster</th>
-                <th>Started</th>
+                <th>Duration</th>
                 <th>Viewers</th>
               </tr>
             </thead>
@@ -505,7 +516,7 @@ async function initStatsView(user: User | null) {
               <tr>
                 <th>Stream</th>
                 <th>Viewer</th>
-                <th>Started</th>
+                <th>Duration</th>
               </tr>
             </thead>
             <tbody>${viewerRows}</tbody>
