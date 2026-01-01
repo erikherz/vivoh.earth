@@ -120,16 +120,6 @@ async function init() {
     });
   }
 
-  // Browser support toggle
-  const supportLink = document.getElementById("support-link");
-  const supportPanel = document.getElementById("support-panel");
-  if (supportLink && supportPanel) {
-    supportLink.addEventListener("click", (e) => {
-      e.preventDefault();
-      supportPanel.classList.toggle("hidden");
-    });
-  }
-
   // Initialize authentication
   await initAuth();
 }
