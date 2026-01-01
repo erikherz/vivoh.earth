@@ -64,8 +64,13 @@ export default {
       return handleApiRoutes(request, env, url);
     }
 
-    // SPA routes - serve index.html for /watch/* paths
-    if (url.pathname.startsWith("/watch/")) {
+    // SPA routes - serve index.html for stream ID paths
+    // Stream IDs are 5 lowercase alphanumeric characters
+    const pathWithoutSlash = url.pathname.slice(1);
+    const isStreamId = /^[a-z0-9]{5}$/.test(pathWithoutSlash);
+
+    // Also support legacy /watch/* URLs
+    if (isStreamId || url.pathname.startsWith("/watch/")) {
       const indexUrl = new URL("/index.html", url.origin);
       return env.ASSETS.fetch(new Request(indexUrl.toString(), {
         method: request.method,
