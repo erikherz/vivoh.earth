@@ -64,6 +64,11 @@ export default {
       return handleApiRoutes(request, env, url);
     }
 
+    // SPA routes - serve index.html for /watch/* paths
+    if (url.pathname.startsWith("/watch/")) {
+      return env.ASSETS.fetch(new Request(`${url.origin}/index.html`, request));
+    }
+
     // Fall through to static assets
     return env.ASSETS.fetch(request);
   },

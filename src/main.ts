@@ -8,8 +8,10 @@ import { getCurrentUser, loginWithGoogle, loginWithMicrosoft, loginWithDiscord, 
 const RELAY_URL = "https://relay.cloudflare.mediaoverquic.com";
 const NAMESPACE_PREFIX = "vivoh.earth";
 
-// Generate a random room ID
-function generateRoomId(): string {
+type View = "broadcast" | "watch";
+
+// Generate a random stream ID
+function generateStreamId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let result = "";
   for (let i = 0; i < 8; i++) {
@@ -18,19 +20,28 @@ function generateRoomId(): string {
   return result;
 }
 
-// Get room ID from URL or generate new one
-function getRoomId(): string {
-  const params = new URLSearchParams(window.location.search);
-  let room = params.get("room");
+// Determine current view and stream ID from URL
+function getRouteInfo(): { view: View; streamId: string } {
+  const path = window.location.pathname;
 
-  if (!room) {
-    room = generateRoomId();
+  // Watch view: /watch/{streamId}
+  if (path.startsWith("/watch/")) {
+    const streamId = path.replace("/watch/", "").split("/")[0];
+    return { view: "watch", streamId: streamId || "" };
+  }
+
+  // Broadcast view: / or /?stream=xxx
+  const params = new URLSearchParams(window.location.search);
+  let streamId = params.get("stream");
+
+  if (!streamId) {
+    streamId = generateStreamId();
     // Update URL without reload
-    const newUrl = `${window.location.pathname}?room=${room}`;
+    const newUrl = `${window.location.pathname}?stream=${streamId}`;
     window.history.replaceState({}, "", newUrl);
   }
 
-  return room;
+  return { view: "broadcast", streamId };
 }
 
 // Update the auth UI based on login state
@@ -99,20 +110,23 @@ async function initAuth() {
   updateAuthUI(user);
 }
 
-// Initialize the app
-async function init() {
-  const roomId = getRoomId();
-  const streamName = `${NAMESPACE_PREFIX}/${roomId}`;
-  const shareUrl = `${window.location.origin}?room=${roomId}`;
+// Initialize broadcast view
+function initBroadcastView(streamId: string) {
+  const streamName = `${NAMESPACE_PREFIX}/${streamId}`;
+  const shareUrl = `${window.location.origin}/watch/${streamId}`;
 
-  console.log(`Vivoh.Earth MoQ initialized - Room: ${roomId}`);
+  console.log(`Vivoh.Earth Broadcast - Stream: ${streamId}`);
 
-  // Update the page with room info
-  const roomDisplay = document.getElementById("room-id");
+  // Show broadcast view, hide watch view
+  document.getElementById("broadcast-view")?.classList.remove("hidden");
+  document.getElementById("watch-view")?.classList.add("hidden");
+
+  // Update the page with stream info
+  const streamDisplay = document.getElementById("stream-id");
   const shareLink = document.getElementById("share-link") as HTMLInputElement;
   const copyBtn = document.getElementById("copy-btn");
 
-  if (roomDisplay) roomDisplay.textContent = roomId;
+  if (streamDisplay) streamDisplay.textContent = streamId;
   if (shareLink) shareLink.value = shareUrl;
 
   // Copy button functionality
@@ -132,27 +146,61 @@ async function init() {
     });
   }
 
-  // Set stream name on hang elements
+  // Set stream name on publisher
   const publisher = document.querySelector("hang-publish");
-  const watcher = document.querySelector("hang-watch");
-
   if (publisher) {
     publisher.setAttribute("url", RELAY_URL);
     publisher.setAttribute("name", streamName);
   }
 
+  // New stream button
+  const newStreamBtn = document.getElementById("new-stream-btn");
+  if (newStreamBtn) {
+    newStreamBtn.addEventListener("click", () => {
+      const newStream = generateStreamId();
+      window.location.href = `/?stream=${newStream}`;
+    });
+  }
+}
+
+// Initialize watch view
+function initWatchView(streamId: string) {
+  const streamName = `${NAMESPACE_PREFIX}/${streamId}`;
+
+  console.log(`Vivoh.Earth Watch - Stream: ${streamId}`);
+
+  // Show watch view, hide broadcast view
+  document.getElementById("watch-view")?.classList.remove("hidden");
+  document.getElementById("broadcast-view")?.classList.add("hidden");
+
+  // Hide the New Stream button on watch page
+  const newStreamBtn = document.getElementById("new-stream-btn");
+  if (newStreamBtn) {
+    newStreamBtn.classList.add("hidden");
+  }
+
+  // Update stream ID display
+  const watchStreamId = document.getElementById("watch-stream-id");
+  if (watchStreamId) {
+    watchStreamId.textContent = streamId;
+  }
+
+  // Set stream name on watcher
+  const watcher = document.querySelector("hang-watch");
   if (watcher) {
     watcher.setAttribute("url", RELAY_URL);
     watcher.setAttribute("name", streamName);
   }
+}
 
-  // New room button
-  const newRoomBtn = document.getElementById("new-room-btn");
-  if (newRoomBtn) {
-    newRoomBtn.addEventListener("click", () => {
-      const newRoom = generateRoomId();
-      window.location.href = `?room=${newRoom}`;
-    });
+// Initialize the app
+async function init() {
+  const { view, streamId } = getRouteInfo();
+
+  if (view === "broadcast") {
+    initBroadcastView(streamId);
+  } else {
+    initWatchView(streamId);
   }
 
   // Browser support toggle

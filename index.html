@@ -73,31 +73,51 @@
             color: #525252;
             font-size: 0.875rem;
         }
-        /* Room controls */
-        .room-info {
+        /* View visibility */
+        .hidden { display: none !important; }
+
+        /* Stream controls */
+        .stream-info {
             background: #171717;
             border: 1px solid #262626;
             border-radius: 8px;
             padding: 1rem;
             margin-bottom: 1.5rem;
         }
-        .room-header {
+        .stream-header {
             display: flex;
             align-items: center;
             gap: 0.5rem;
             margin-bottom: 0.75rem;
         }
-        .room-label {
+        .stream-label {
             color: #a3a3a3;
             font-size: 0.875rem;
         }
-        .room-id {
+        .stream-id {
             font-family: monospace;
             font-size: 1rem;
             color: #22c55e;
             background: #052e16;
             padding: 0.25rem 0.5rem;
             border-radius: 4px;
+        }
+
+        /* Watch view styling */
+        #watch-view section {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .watch-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .watch-stream-id {
+            font-family: monospace;
+            font-size: 0.875rem;
+            color: #a3a3a3;
         }
         .share-row {
             display: flex;
@@ -414,33 +434,34 @@
             </div>
             <div class="header-right">
                 <div id="auth-container"></div>
-                <button id="new-room-btn" class="btn btn-primary">
+                <button id="new-stream-btn" class="btn btn-primary">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M12 5v14M5 12h14"/>
                     </svg>
-                    New Room
+                    New Stream
                 </button>
             </div>
         </header>
 
-        <div class="room-info">
-            <div class="room-header">
-                <span class="room-label">Room:</span>
-                <span id="room-id" class="room-id">loading...</span>
+        <!-- Broadcast View (Home) -->
+        <div id="broadcast-view">
+            <div class="stream-info">
+                <div class="stream-header">
+                    <span class="stream-label">Stream:</span>
+                    <span id="stream-id" class="stream-id">loading...</span>
+                </div>
+                <div class="share-row">
+                    <input type="text" id="share-link" class="share-input" readonly>
+                    <button id="copy-btn" class="btn">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                        </svg>
+                        Copy
+                    </button>
+                </div>
             </div>
-            <div class="share-row">
-                <input type="text" id="share-link" class="share-input" readonly>
-                <button id="copy-btn" class="btn">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                    </svg>
-                    Copy
-                </button>
-            </div>
-        </div>
 
-        <div class="grid">
             <section>
                 <h2>Broadcast</h2>
                 <hang-publish
@@ -450,9 +471,15 @@
                     <video slot="preview" muted autoplay playsinline></video>
                 </hang-publish>
             </section>
+        </div>
 
+        <!-- Watch View -->
+        <div id="watch-view" class="hidden">
             <section>
-                <h2>Watch</h2>
+                <div class="watch-header">
+                    <h2>Watching</h2>
+                    <span id="watch-stream-id" class="watch-stream-id"></span>
+                </div>
                 <hang-watch
                     controls>
                     <canvas></canvas>
