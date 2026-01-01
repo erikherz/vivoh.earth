@@ -15,7 +15,14 @@
             padding: 2rem;
         }
         .container { max-width: 1200px; margin: 0 auto; }
-        header { margin-bottom: 2rem; }
+        header {
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
         h1 { font-size: 1.5rem; font-weight: 500; }
         h2 { font-size: 1rem; font-weight: 400; color: #a3a3a3; margin-bottom: 1rem; }
         .grid {
@@ -48,13 +55,90 @@
             padding: 1rem;
             margin-bottom: 1.5rem;
         }
+
+        /* Room controls */
+        .room-info {
+            background: #171717;
+            border: 1px solid #262626;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .room-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+        .room-label {
+            color: #a3a3a3;
+            font-size: 0.875rem;
+        }
+        .room-id {
+            font-family: monospace;
+            font-size: 1rem;
+            color: #22c55e;
+            background: #052e16;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+        }
+        .share-row {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .share-input {
+            flex: 1;
+            background: #262626;
+            border: 1px solid #404040;
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            color: #e5e5e5;
+            font-size: 0.875rem;
+            font-family: monospace;
+        }
+        .share-input:focus {
+            outline: none;
+            border-color: #525252;
+        }
+        .btn {
+            background: #262626;
+            border: 1px solid #404040;
+            border-radius: 6px;
+            padding: 0.5rem 1rem;
+            color: #e5e5e5;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn:hover {
+            background: #363636;
+        }
+        .btn-primary {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+        }
+        .btn-primary:hover {
+            background: #2563eb;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
             <h1>vivoh.earth</h1>
+            <button id="new-room-btn" class="btn btn-primary">+ New Room</button>
         </header>
+
+        <div class="room-info">
+            <div class="room-header">
+                <span class="room-label">Room:</span>
+                <span id="room-id" class="room-id">loading...</span>
+            </div>
+            <div class="share-row">
+                <input type="text" id="share-link" class="share-input" readonly>
+                <button id="copy-btn" class="btn">Copy</button>
+            </div>
+        </div>
 
         <div class="support-banner">
             <hang-support></hang-support>
@@ -64,8 +148,6 @@
             <section>
                 <h2>Broadcast</h2>
                 <hang-publish
-                    url="https://relay.cloudflare.mediaoverquic.com"
-                    name="vivoh.earth/stream-001"
                     audio
                     video
                     controls>
@@ -76,8 +158,6 @@
             <section>
                 <h2>Watch</h2>
                 <hang-watch
-                    url="https://relay.cloudflare.mediaoverquic.com"
-                    name="vivoh.earth/stream-001"
                     controls>
                     <canvas></canvas>
                 </hang-watch>
