@@ -120,13 +120,52 @@
         .btn-primary:hover {
             background: #2563eb;
         }
+
+        /* Auth UI */
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 2px solid #404040;
+        }
+        .user-name {
+            color: #e5e5e5;
+            font-size: 0.875rem;
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .btn-google {
+            display: flex;
+            align-items: center;
+            background: #fff;
+            color: #333;
+            border-color: #ddd;
+        }
+        .btn-google:hover {
+            background: #f5f5f5;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
             <h1>vivoh.earth</h1>
-            <button id="new-room-btn" class="btn btn-primary">+ New Room</button>
+            <div class="header-right">
+                <div id="auth-container"></div>
+                <button id="new-room-btn" class="btn btn-primary">+ New Room</button>
+            </div>
         </header>
 
         <div class="room-info">

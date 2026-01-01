@@ -2,9 +2,18 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "vivoh-earth",
   "compatibility_date": "2025-01-01",
+  "main": "src/worker/index.ts",
   "assets": {
-    "directory": "./dist"
+    "directory": "./dist",
+    "binding": "ASSETS"
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vivoh-earth-db",
+      "database_id": "d59f23d3-8f25-4b1b-aef3-bf3a93a2a58e"
+    }
+  ],
   "routes": [
     {
       "pattern": "vivoh.earth",
