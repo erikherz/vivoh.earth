@@ -180,7 +180,13 @@ function initBroadcastView(streamId: string) {
         }
       });
 
-      deviceContainer.appendChild(audioBtn);
+      // Insert after the first button (camera icon)
+      const buttons = deviceContainer.querySelectorAll("button");
+      if (buttons.length >= 1) {
+        buttons[0].after(audioBtn);
+      } else {
+        deviceContainer.appendChild(audioBtn);
+      }
     };
 
     // Try immediately and also observe for when component renders
