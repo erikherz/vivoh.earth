@@ -202,6 +202,39 @@
         .support-panel.hidden {
             display: none;
         }
+
+        /* Hang component button overrides */
+        hang-publish button,
+        hang-watch button {
+            background: #262626;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 0.5rem 0.75rem;
+            color: #e5e5e5;
+            font-size: 1.25rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            min-width: 44px;
+            min-height: 44px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        hang-publish button:hover,
+        hang-watch button:hover {
+            background: #363636;
+            border-color: #525252;
+            transform: translateY(-1px);
+        }
+        hang-publish button:active,
+        hang-watch button:active {
+            transform: translateY(0);
+        }
+        hang-publish div[style*="Device"],
+        hang-watch div[style*="justify"] {
+            color: #a3a3a3;
+            font-size: 0.875rem;
+        }
     </style>
 </head>
 <body>
