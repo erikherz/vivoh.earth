@@ -164,19 +164,63 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        /* Auth buttons container */
+        .auth-buttons {
+            display: flex;
+            gap: 0.5rem;
+        }
         .btn-google {
-            background: #1f1f1f;
-            border-color: #333;
-            color: #e5e5e5;
-            padding: 0.5rem 1.25rem;
+            background: #fff;
+            border-color: #dadce0;
+            color: #3c4043;
+            padding: 0.5rem 1rem;
         }
         .btn-google:hover {
-            background: #2a2a2a;
-            border-color: #444;
+            background: #f8f9fa;
+            border-color: #dadce0;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }
         .btn-google svg {
             width: 18px;
             height: 18px;
+        }
+        .btn-microsoft {
+            background: #2f2f2f;
+            border-color: #2f2f2f;
+            color: #fff;
+            padding: 0.5rem 1rem;
+        }
+        .btn-microsoft:hover {
+            background: #3f3f3f;
+            border-color: #3f3f3f;
+        }
+        .btn-microsoft svg {
+            width: 18px;
+            height: 18px;
+        }
+        .btn-discord {
+            background: #5865f2;
+            border-color: #5865f2;
+            color: #fff;
+            padding: 0.5rem 1rem;
+        }
+        .btn-discord:hover {
+            background: #4752c4;
+            border-color: #4752c4;
+        }
+        .btn-discord svg {
+            width: 18px;
+            height: 18px;
+        }
+        /* Avatar placeholder for users without avatar */
+        .avatar-placeholder {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.875rem;
         }
 
         /* Footer */
