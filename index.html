@@ -290,7 +290,7 @@
             border: 2px solid #1d4ed8;
         }
 
-        /* Hang component text styling - preserve flex alignment */
+        /* Hang component text styling and alignment */
         hang-publish,
         hang-watch,
         hang-support {
@@ -299,6 +299,13 @@
         }
         hang-support {
             display: block;
+        }
+        /* Ensure internal flex containers are vertically centered */
+        hang-publish > div,
+        hang-watch > div {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
         }
     </style>
 </head>
