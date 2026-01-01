@@ -31,9 +31,9 @@ function generateStreamId(): string {
   return result;
 }
 
-// Check if a string is a valid stream ID (5 lowercase alphanumeric)
+// Check if a string is a valid stream ID (5-8 lowercase alphanumeric for backwards compat)
 function isValidStreamId(str: string): boolean {
-  return /^[a-z0-9]{5}$/.test(str);
+  return /^[a-z0-9]{5,8}$/.test(str);
 }
 
 // Determine current view and stream ID from URL
