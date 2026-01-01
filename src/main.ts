@@ -193,12 +193,6 @@ function initWatchView(streamId: string) {
     newStreamBtn.classList.add("hidden");
   }
 
-  // Update stream ID display
-  const watchStreamId = document.getElementById("watch-stream-id");
-  if (watchStreamId) {
-    watchStreamId.textContent = streamId;
-  }
-
   // Set stream name on watcher
   const watcher = document.querySelector("hang-watch");
   if (watcher) {

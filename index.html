@@ -130,17 +130,6 @@
             max-width: 900px;
             margin: 0 auto;
         }
-        .watch-header {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 1rem;
-        }
-        .watch-stream-id {
-            font-family: monospace;
-            font-size: 0.875rem;
-            color: #a3a3a3;
-        }
         .share-row {
             display: flex;
             gap: 0.5rem;
@@ -521,10 +510,6 @@
         <!-- Watch View -->
         <div id="watch-view" class="hidden">
             <section>
-                <div class="watch-header">
-                    <h2>Watching</h2>
-                    <span id="watch-stream-id" class="watch-stream-id"></span>
-                </div>
                 <hang-watch
                     controls>
                     <canvas></canvas>
