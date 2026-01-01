@@ -394,8 +394,17 @@
         hang-watch > div {
             display: flex;
             align-items: center;
-            justify-content: flex-start;
+            justify-content: flex-start !important;
             gap: 0.5rem;
+        }
+        /* Override hang component's space-between layout */
+        hang-publish,
+        hang-watch {
+            display: block;
+        }
+        hang-publish > div > div,
+        hang-watch > div > div {
+            justify-content: flex-start !important;
         }
     </style>
 </head>
