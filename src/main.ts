@@ -147,10 +147,24 @@ function initBroadcastView(streamId: string) {
   }
 
   // Set stream name on publisher
-  const publisher = document.querySelector("hang-publish");
+  const publisher = document.querySelector("hang-publish") as HTMLElement & { video: boolean; device: string };
   if (publisher) {
     publisher.setAttribute("url", RELAY_URL);
     publisher.setAttribute("name", streamName);
+  }
+
+  // Audio only toggle
+  const audioOnlyBtn = document.getElementById("audio-only-btn");
+  if (audioOnlyBtn && publisher) {
+    let isAudioOnly = false;
+    audioOnlyBtn.addEventListener("click", () => {
+      isAudioOnly = !isAudioOnly;
+      publisher.video = !isAudioOnly;
+      audioOnlyBtn.classList.toggle("active", isAudioOnly);
+      if (isAudioOnly) {
+        publisher.device = "camera";
+      }
+    });
   }
 
   // New stream button
