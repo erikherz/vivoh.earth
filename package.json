@@ -16,6 +16,6 @@
     "wrangler": "^4.54.0"
   },
   "dependencies": {
-    "@kixelated/hang": "^0.7.0"
+    "@kixelated/hang": "^0.3.12"
   }
 }
