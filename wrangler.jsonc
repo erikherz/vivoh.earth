@@ -1,6 +1,18 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "vivoh-earth",
-  "main": "src/index.ts",
-  "compatibility_date": "2025-01-01"
+  "compatibility_date": "2025-01-01",
+  "assets": {
+    "directory": "./dist"
+  },
+  "routes": [
+    {
+      "pattern": "vivoh.earth",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.vivoh.earth",
+      "custom_domain": true
+    }
+  ]
 }

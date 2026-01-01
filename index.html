@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vivoh Earth | MoQ Live</title>
+    <script type="module" src="/src/main.ts"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #0a0a0a;
+            color: #e5e5e5;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        header { margin-bottom: 2rem; }
+        h1 { font-size: 1.5rem; font-weight: 500; }
+        h2 { font-size: 1rem; font-weight: 400; color: #a3a3a3; margin-bottom: 1rem; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 2rem;
+        }
+        section {
+            background: #171717;
+            border-radius: 12px;
+            padding: 1.5rem;
+            border: 1px solid #262626;
+        }
+        video, canvas {
+            width: 100%;
+            aspect-ratio: 16/9;
+            border-radius: 8px;
+            background: #000;
+        }
+        footer {
+            margin-top: 2rem;
+            text-align: center;
+            color: #525252;
+            font-size: 0.875rem;
+        }
+        .support-banner {
+            background: #1c1917;
+            border: 1px solid #44403c;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>vivoh.earth</h1>
+        </header>
+
+        <div class="support-banner">
+            <hang-support></hang-support>
+        </div>
+
+        <div class="grid">
+            <section>
+                <h2>Broadcast</h2>
+                <hang-publish
+                    url="https://relay.cloudflare.mediaoverquic.com"
+                    name="vivoh.earth/stream-001"
+                    audio
+                    video
+                    controls>
+                    <video slot="preview" muted autoplay playsinline></video>
+                </hang-publish>
+            </section>
+
+            <section>
+                <h2>Watch</h2>
+                <hang-watch
+                    url="https://relay.cloudflare.mediaoverquic.com"
+                    name="vivoh.earth/stream-001"
+                    controls>
+                    <canvas></canvas>
+                </hang-watch>
+            </section>
+        </div>
+
+        <footer>
+            <p>MoQ Transport | Cloudflare Relay</p>
+        </footer>
+    </div>
+</body>
+</html>
