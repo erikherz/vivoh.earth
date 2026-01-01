@@ -55,12 +55,14 @@ WebTransport is the browser API that exposes QUIC to JavaScript:
 
 ### Namespace
 
-A namespace is a unique identifier for a broadcast. In vivoh.earth, we use:
+A namespace is a unique identifier for a broadcast. In vivoh.earth v3.0, we use room-based namespaces:
 ```
-vivoh.earth/stream-001
+vivoh.earth/{roomId}
 ```
 
-The relay uses exact string matching - namespaces must match exactly between publisher and subscriber.
+For example: `vivoh.earth/k7x2m9pa`
+
+Each room ID is auto-generated or passed via URL parameter (`?room=xyz`). The relay uses exact string matching - namespaces must match exactly between publisher and subscriber.
 
 ### Track
 
@@ -376,24 +378,28 @@ moqConnection.onobject = (object) => {
 
 ### The hang Library
 
-The `@kixelated/hang` library abstracts all of this:
+The `@kixelated/hang` library abstracts all of this. In vivoh.earth v3.0, we define the elements in HTML and set the `url` and `name` attributes dynamically via JavaScript:
 
 ```html
-<!-- Publishing -->
-<hang-publish
-    url="https://relay.cloudflare.mediaoverquic.com"
-    name="vivoh.earth/stream-001"
-    audio video controls>
+<!-- HTML (attributes set by JavaScript) -->
+<hang-publish audio video controls>
     <video slot="preview" muted autoplay></video>
 </hang-publish>
 
-<!-- Subscribing -->
-<hang-watch
-    url="https://relay.cloudflare.mediaoverquic.com"
-    name="vivoh.earth/stream-001"
-    controls>
+<hang-watch controls>
     <canvas></canvas>
 </hang-watch>
+```
+
+```javascript
+// JavaScript sets the stream name based on room ID
+const roomId = getRoomId();  // from URL or auto-generated
+const streamName = `vivoh.earth/${roomId}`;
+
+document.querySelector("hang-publish").setAttribute("url", RELAY_URL);
+document.querySelector("hang-publish").setAttribute("name", streamName);
+document.querySelector("hang-watch").setAttribute("url", RELAY_URL);
+document.querySelector("hang-watch").setAttribute("name", streamName);
 ```
 
 Under the hood, hang:

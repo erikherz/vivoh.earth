@@ -61,19 +61,17 @@ For Cloudflare's production relay (`relay.cloudflare.mediaoverquic.com`):
 }
 ```
 
-```html
-<hang-publish
-    url="https://relay.cloudflare.mediaoverquic.com"
-    name="your-unique-namespace/stream-name"
-    audio video controls>
-</hang-publish>
+In vivoh.earth v3.0, stream names are set dynamically via JavaScript based on room ID:
 
-<hang-watch
-    url="https://relay.cloudflare.mediaoverquic.com"
-    name="your-unique-namespace/stream-name"
-    controls>
-</hang-watch>
+```javascript
+const roomId = new URLSearchParams(window.location.search).get("room") || generateRoomId();
+const streamName = `vivoh.earth/${roomId}`;
+
+publisher.setAttribute("url", "https://relay.cloudflare.mediaoverquic.com");
+publisher.setAttribute("name", streamName);
 ```
+
+This ensures each session has a unique namespace, preventing conflicts.
 
 ## Browser Support
 
