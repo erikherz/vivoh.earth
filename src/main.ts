@@ -152,10 +152,13 @@ function initBroadcastView(streamId: string) {
     publisher.setAttribute("url", RELAY_URL);
     publisher.setAttribute("name", streamName);
 
-    // Inject audio-only button into device selector
+    // Inject audio-only button into device selector (inside shadow DOM)
     const injectAudioButton = () => {
-      // Find the device selector container (div with the device buttons)
-      const deviceContainer = publisher.querySelector("div > div");
+      const shadowRoot = publisher.shadowRoot;
+      if (!shadowRoot) return;
+
+      // Find the device selector container (first div with buttons)
+      const deviceContainer = shadowRoot.querySelector("div > div");
       if (!deviceContainer || deviceContainer.querySelector(".audio-only-btn")) return;
 
       const audioBtn = document.createElement("button");
@@ -189,10 +192,16 @@ function initBroadcastView(streamId: string) {
       }
     };
 
-    // Try immediately and also observe for when component renders
-    injectAudioButton();
-    const observer = new MutationObserver(() => injectAudioButton());
-    observer.observe(publisher, { childList: true, subtree: true });
+    // Try after component renders and observe shadow root for changes
+    const tryInject = () => {
+      injectAudioButton();
+      if (publisher.shadowRoot) {
+        const observer = new MutationObserver(() => injectAudioButton());
+        observer.observe(publisher.shadowRoot, { childList: true, subtree: true });
+      }
+    };
+    setTimeout(tryInject, 100);
+    setTimeout(tryInject, 500);
   }
 
   // New stream button
