@@ -151,20 +151,42 @@ function initBroadcastView(streamId: string) {
   if (publisher) {
     publisher.setAttribute("url", RELAY_URL);
     publisher.setAttribute("name", streamName);
-  }
 
-  // Audio only toggle
-  const audioOnlyBtn = document.getElementById("audio-only-btn");
-  if (audioOnlyBtn && publisher) {
-    let isAudioOnly = false;
-    audioOnlyBtn.addEventListener("click", () => {
-      isAudioOnly = !isAudioOnly;
-      publisher.video = !isAudioOnly;
-      audioOnlyBtn.classList.toggle("active", isAudioOnly);
-      if (isAudioOnly) {
-        publisher.device = "camera";
-      }
-    });
+    // Inject audio-only button into device selector
+    const injectAudioButton = () => {
+      // Find the device selector container (div with the device buttons)
+      const deviceContainer = publisher.querySelector("div > div");
+      if (!deviceContainer || deviceContainer.querySelector(".audio-only-btn")) return;
+
+      const audioBtn = document.createElement("button");
+      audioBtn.type = "button";
+      audioBtn.title = "Audio Only";
+      audioBtn.className = "audio-only-btn";
+      audioBtn.textContent = "🎤";
+      audioBtn.style.cursor = "pointer";
+      audioBtn.style.opacity = "0.5";
+
+      audioBtn.addEventListener("click", () => {
+        const isActive = audioBtn.style.opacity === "1";
+        if (isActive) {
+          // Turn off audio-only mode
+          publisher.video = true;
+          audioBtn.style.opacity = "0.5";
+        } else {
+          // Turn on audio-only mode
+          publisher.video = false;
+          publisher.device = "camera";
+          audioBtn.style.opacity = "1";
+        }
+      });
+
+      deviceContainer.appendChild(audioBtn);
+    };
+
+    // Try immediately and also observe for when component renders
+    injectAudioButton();
+    const observer = new MutationObserver(() => injectAudioButton());
+    observer.observe(publisher, { childList: true, subtree: true });
   }
 
   // New stream button
