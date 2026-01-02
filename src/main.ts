@@ -1,5 +1,6 @@
 // Safari WebSocket fallback - MUST install before hang components load
-import { install as installWebTransportPolyfill } from "@moq/web-transport-ws";
+// Using our patched version that handles requireUnreliable gracefully
+import { install as installWebTransportPolyfill } from "./webtransport-polyfill";
 
 // Detect Safari - even Safari 17+ with WebTransport has compatibility issues with some relays
 const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
