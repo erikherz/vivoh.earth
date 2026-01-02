@@ -1,4 +1,4 @@
-// Safari WebSocket fallback - must be imported before hang components
+// Safari WebSocket fallback - MUST install before hang components load
 import { install as installWebTransportPolyfill } from "@moq/web-transport-ws";
 
 // Detect Safari - even Safari 17+ with WebTransport has compatibility issues with some relays
@@ -15,10 +15,20 @@ if (needsPolyfill) {
   installWebTransportPolyfill();
 }
 
-// Import hang web components - these self-register as custom elements
-import "@kixelated/hang/publish/element";
-import "@kixelated/hang/watch/element";
-import "@kixelated/hang/support/element";
+// Use Cloudflare relay for WebTransport (Chrome/Firefox)
+// For Safari, the polyfill converts this to WebSocket automatically
+const RELAY_URL = needsPolyfill
+  ? "https://vivoh.earth/moq"  // WebSocket fallback via our container
+  : "https://relay.cloudflare.mediaoverquic.com";  // Native WebTransport
+const NAMESPACE_PREFIX = "vivoh.earth";
+
+// Dynamic imports for hang components - MUST happen after polyfill is installed
+// ES module static imports are hoisted and execute before any code runs
+const loadHangComponents = async () => {
+  await import("@kixelated/hang/publish/element");
+  await import("@kixelated/hang/watch/element");
+  await import("@kixelated/hang/support/element");
+};
 
 import {
   getCurrentUser,
@@ -39,13 +49,6 @@ import {
   type LiveBroadcast,
   type LiveViewer
 } from "./auth";
-
-// Use Cloudflare relay for WebTransport (Chrome/Firefox)
-// For Safari, the polyfill converts this to WebSocket automatically
-const RELAY_URL = needsPolyfill
-  ? "https://vivoh.earth/moq"  // WebSocket fallback via our container
-  : "https://relay.cloudflare.mediaoverquic.com";  // Native WebTransport
-const NAMESPACE_PREFIX = "vivoh.earth";
 
 type View = "broadcast" | "watch" | "stats" | "stream-stats";
 
@@ -700,6 +703,9 @@ async function initStreamStatsView(streamId: string) {
 
 // Initialize the app
 async function init() {
+  // Load hang components dynamically AFTER polyfill is installed
+  await loadHangComponents();
+
   const { view, streamId } = await getRouteInfo();
 
   // Get user first (needed for broadcast auth check)
