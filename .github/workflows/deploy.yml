@@ -20,7 +20,7 @@ jobs:
           cache: 'npm'
 
       - name: Install Dependencies
-        run: npm install --omit=optional
+        run: npm install --ignore-scripts
 
       - name: Build and Deploy
         run: npm run deploy
