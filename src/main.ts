@@ -1,3 +1,14 @@
+// Safari WebSocket fallback - must be imported before hang components
+import { install as installWebTransportPolyfill } from "@moq/web-transport-ws";
+
+// Check if WebTransport is supported (Safari doesn't have it)
+const needsPolyfill = typeof WebTransport === "undefined";
+if (needsPolyfill) {
+  console.log("WebTransport not supported, installing WebSocket polyfill for Safari");
+  // Install polyfill - it will use WebSocket connections instead
+  installWebTransportPolyfill();
+}
+
 // Import hang web components - these self-register as custom elements
 import "@kixelated/hang/publish/element";
 import "@kixelated/hang/watch/element";
@@ -23,7 +34,11 @@ import {
   type LiveViewer
 } from "./auth";
 
-const RELAY_URL = "https://relay.cloudflare.mediaoverquic.com";
+// Use Cloudflare relay for WebTransport (Chrome/Firefox)
+// For Safari, the polyfill converts this to WebSocket automatically
+const RELAY_URL = needsPolyfill
+  ? "https://vivoh.earth/moq"  // WebSocket fallback via our container
+  : "https://relay.cloudflare.mediaoverquic.com";  // Native WebTransport
 const NAMESPACE_PREFIX = "vivoh.earth";
 
 type View = "broadcast" | "watch" | "stats" | "stream-stats";
