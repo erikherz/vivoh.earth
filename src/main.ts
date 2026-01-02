@@ -13,6 +13,7 @@ import {
   logBroadcastEnd,
   logWatchStart,
   logWatchEnd,
+  checkStreamExists,
   getStreamSettings,
   updateStreamSettings,
   getLiveStats,
@@ -27,7 +28,7 @@ const NAMESPACE_PREFIX = "vivoh.earth";
 type View = "broadcast" | "watch" | "stats";
 
 // Generate a random stream ID (5 lowercase alphanumeric characters)
-function generateStreamId(): string {
+function generateRandomId(): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let result = "";
   for (let i = 0; i < 5; i++) {
@@ -36,13 +37,28 @@ function generateStreamId(): string {
   return result;
 }
 
+// Generate a unique stream ID, checking for collisions
+async function generateStreamId(): Promise<string> {
+  const maxAttempts = 10;
+  for (let i = 0; i < maxAttempts; i++) {
+    const id = generateRandomId();
+    const exists = await checkStreamExists(id);
+    if (!exists) {
+      return id;
+    }
+    console.log(`Stream ID ${id} already in use, generating new one...`);
+  }
+  // Fallback: return a random ID even if we couldn't verify uniqueness
+  return generateRandomId();
+}
+
 // Check if a string is a valid stream ID (5 lowercase alphanumeric)
 function isValidStreamId(str: string): boolean {
   return /^[a-z0-9]{5}$/.test(str);
 }
 
 // Determine current view and stream ID from URL
-function getRouteInfo(): { view: View; streamId: string } {
+async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
   const path = window.location.pathname;
 
   // Stats view: /stats
@@ -61,7 +77,7 @@ function getRouteInfo(): { view: View; streamId: string } {
   let streamId = params.get("stream");
 
   if (!streamId) {
-    streamId = generateStreamId();
+    streamId = await generateStreamId();
     // Update URL without reload
     const newUrl = `${window.location.pathname}?stream=${streamId}`;
     window.history.replaceState({}, "", newUrl);
@@ -295,8 +311,8 @@ function initBroadcastView(streamId: string, user: User | null) {
   // New stream button
   const newStreamBtn = document.getElementById("new-stream-btn");
   if (newStreamBtn) {
-    newStreamBtn.addEventListener("click", () => {
-      const newStream = generateStreamId();
+    newStreamBtn.addEventListener("click", async () => {
+      const newStream = await generateStreamId();
       window.location.href = `/?stream=${newStream}`;
     });
   }
@@ -534,7 +550,7 @@ async function initStatsView(user: User | null) {
 
 // Initialize the app
 async function init() {
-  const { view, streamId } = getRouteInfo();
+  const { view, streamId } = await getRouteInfo();
 
   // Get user first (needed for broadcast auth check)
   const user = await getCurrentUser();

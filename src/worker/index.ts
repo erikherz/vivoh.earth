@@ -421,6 +421,21 @@ async function handleStreamRoutes(
     });
   }
 
+  // GET /api/streams/:stream_id/exists - Check if stream ID is in use (has active broadcast)
+  const streamExistsMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/exists$/);
+  if (method === "GET" && streamExistsMatch) {
+    const streamId = streamExistsMatch[1];
+    const activeBroadcast = await env.DB
+      .prepare("SELECT id FROM broadcast_events WHERE stream_id = ? AND ended_at IS NULL LIMIT 1")
+      .bind(streamId)
+      .first<{ id: number }>();
+
+    return Response.json({
+      stream_id: streamId,
+      exists: activeBroadcast !== null,
+    });
+  }
+
   // POST /api/streams - Create or update stream settings (requires auth)
   if (method === "POST" && path === "/api/streams") {
     const user = await getAuthenticatedUser(request, env);

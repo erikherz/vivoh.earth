@@ -89,6 +89,16 @@ export async function logWatchEnd(eventId: number): Promise<void> {
 }
 
 // Stream settings functions
+export async function checkStreamExists(streamId: string): Promise<boolean> {
+  try {
+    const response = await fetch(`/api/streams/${streamId}/exists`);
+    const data = await response.json();
+    return data.exists ?? false;
+  } catch {
+    return false;
+  }
+}
+
 export async function getStreamSettings(streamId: string): Promise<{ require_auth: boolean }> {
   try {
     const response = await fetch(`/api/streams/${streamId}`);
