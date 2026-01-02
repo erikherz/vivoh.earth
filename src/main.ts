@@ -1,10 +1,16 @@
 // Safari WebSocket fallback - must be imported before hang components
 import { install as installWebTransportPolyfill } from "@moq/web-transport-ws";
 
-// Check if WebTransport is supported (Safari doesn't have it)
-const needsPolyfill = typeof WebTransport === "undefined";
+// Detect Safari - even Safari 17+ with WebTransport has compatibility issues with some relays
+const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+
+// Check if we need the polyfill: either no WebTransport or Safari (which has issues)
+const needsPolyfill = typeof WebTransport === "undefined" || isSafari;
 if (needsPolyfill) {
-  console.log("WebTransport not supported, installing WebSocket polyfill for Safari");
+  const reason = typeof WebTransport === "undefined"
+    ? "WebTransport not supported"
+    : "Safari detected (using WebSocket for better compatibility)";
+  console.log(`${reason}, installing WebSocket polyfill`);
   // Install polyfill - it will use WebSocket connections instead
   installWebTransportPolyfill();
 }
