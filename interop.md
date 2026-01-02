@@ -61,17 +61,18 @@ For Cloudflare's production relay (`relay.cloudflare.mediaoverquic.com`):
 }
 ```
 
-In vivoh.earth v3.0, stream names are set dynamically via JavaScript based on room ID:
+Stream names are set dynamically via JavaScript based on 5-character stream IDs:
 
 ```javascript
-const roomId = new URLSearchParams(window.location.search).get("room") || generateRoomId();
-const streamName = `vivoh.earth/${roomId}`;
+// Stream ID comes from URL path (e.g., /ab3x9) or is auto-generated
+const streamId = getStreamIdFromPath() || generateStreamId();
+const streamName = `vivoh.earth/${streamId}`;
 
 publisher.setAttribute("url", "https://relay.cloudflare.mediaoverquic.com");
 publisher.setAttribute("name", streamName);
 ```
 
-This ensures each session has a unique namespace, preventing conflicts.
+This ensures each session has a unique namespace, preventing conflicts. Stream URLs follow the format `https://vivoh.earth/{streamId}` (e.g., `https://vivoh.earth/ab3x9`).
 
 ## Browser Support
 

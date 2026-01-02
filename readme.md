@@ -40,33 +40,33 @@ npm run deploy   # Build and deploy to Cloudflare
 
 ## Usage
 
-### Room-Based Sessions
+### Stream-Based Sessions
 
-Each session uses a unique room ID for stream isolation:
+Each session uses a unique 5-character stream ID for isolation:
 
-- **Visit `vivoh.earth`** → Auto-generates a room (e.g., `?room=k7x2m9pa`)
-- **Share the URL** → Others join the same room to watch
-- **Click "+ New Room"** → Creates a fresh room
+- **Visit `vivoh.earth`** → Auto-generates a stream (e.g., `https://vivoh.earth/ab3x9`)
+- **Share the URL** → Others open the same URL to watch
+- **Click "+ New Stream"** → Creates a fresh stream
 
 ### Broadcasting
 
 1. Open https://vivoh.earth in Chrome
-2. A unique room ID is generated automatically
+2. A unique 5-character stream ID is generated automatically
 3. Click "Start" in the Broadcast section
 4. Allow camera and microphone access
-5. Share the URL with viewers
+5. Share the URL with viewers (e.g., `https://vivoh.earth/ab3x9`)
 
 ### Watching
 
-1. Open the shared URL (e.g., `https://vivoh.earth?room=k7x2m9pa`)
-2. The Watch section connects to that room's stream
+1. Open the shared URL (e.g., `https://vivoh.earth/ab3x9`)
+2. The stream begins playing automatically
 3. Click play if needed
 
 ### Stream Namespace
 
-Streams use the format: `vivoh.earth/{roomId}`
+Streams use the format: `vivoh.earth/{streamId}`
 
-Each room maps to a unique namespace on the Cloudflare relay, preventing conflicts between sessions.
+Each 5-character stream ID maps to a unique namespace on the Cloudflare relay, preventing conflicts between sessions.
 
 ## Documentation
 

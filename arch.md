@@ -55,14 +55,14 @@ WebTransport is the browser API that exposes QUIC to JavaScript:
 
 ### Namespace
 
-A namespace is a unique identifier for a broadcast. In vivoh.earth v3.0, we use room-based namespaces:
+A namespace is a unique identifier for a broadcast. Vivoh.earth uses 5-character stream IDs:
 ```
-vivoh.earth/{roomId}
+vivoh.earth/{streamId}
 ```
 
-For example: `vivoh.earth/k7x2m9pa`
+For example: `vivoh.earth/ab3x9`
 
-Each room ID is auto-generated or passed via URL parameter (`?room=xyz`). The relay uses exact string matching - namespaces must match exactly between publisher and subscriber.
+Each stream ID is a 5-character lowercase alphanumeric string, auto-generated when starting a broadcast. The stream URL is simply `https://vivoh.earth/{streamId}`. The relay uses exact string matching - namespaces must match exactly between publisher and subscriber.
 
 ### Track
 
@@ -146,7 +146,7 @@ When a browser starts broadcasting, the following sequence occurs:
 
 2. **PUBLISH (namespace, track)**
    - Publisher declares intent to send media
-   - Specifies the namespace (e.g., `vivoh.earth/stream-001`)
+   - Specifies the namespace (e.g., `vivoh.earth/ab3x9`)
    - Lists tracks it will publish (audio, video)
 
 3. **PUBLISH_OK**
@@ -378,7 +378,7 @@ moqConnection.onobject = (object) => {
 
 ### The hang Library
 
-The `@kixelated/hang` library abstracts all of this. In vivoh.earth v3.0, we define the elements in HTML and set the `url` and `name` attributes dynamically via JavaScript:
+The `@kixelated/hang` library abstracts all of this. We define the elements in HTML and set the `url` and `name` attributes dynamically via JavaScript:
 
 ```html
 <!-- HTML (attributes set by JavaScript) -->
@@ -392,9 +392,9 @@ The `@kixelated/hang` library abstracts all of this. In vivoh.earth v3.0, we def
 ```
 
 ```javascript
-// JavaScript sets the stream name based on room ID
-const roomId = getRoomId();  // from URL or auto-generated
-const streamName = `vivoh.earth/${roomId}`;
+// JavaScript sets the stream name based on stream ID
+const streamId = getStreamId();  // from URL path or auto-generated (5 chars)
+const streamName = `vivoh.earth/${streamId}`;
 
 document.querySelector("hang-publish").setAttribute("url", RELAY_URL);
 document.querySelector("hang-publish").setAttribute("name", streamName);
