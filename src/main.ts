@@ -44,6 +44,102 @@ const serverStatus: ServerStatus = {
   raceResults: [],
 };
 
+// Browser support tracking
+interface BrowserSupport {
+  webTransport: boolean;
+  webCodecs: boolean;
+  mediaDevices: boolean;
+  isSafari: boolean;
+  browser: string;
+  supported: boolean;
+}
+
+function detectBrowserSupport(): BrowserSupport {
+  const webTransport = typeof WebTransport !== "undefined";
+  const webCodecs = typeof VideoEncoder !== "undefined" && typeof VideoDecoder !== "undefined";
+  const mediaDevices = typeof navigator.mediaDevices?.getUserMedia === "function";
+
+  // Detect browser
+  const ua = navigator.userAgent;
+  let browser = "Unknown";
+  if (/firefox/i.test(ua)) {
+    browser = "Firefox";
+  } else if (/edg/i.test(ua)) {
+    browser = "Edge";
+  } else if (/chrome/i.test(ua)) {
+    browser = "Chrome";
+  } else if (/safari/i.test(ua)) {
+    browser = "Safari";
+  }
+
+  // Supported if we have WebTransport OR Safari (which uses WebSocket fallback)
+  const supported = webTransport || isSafari;
+
+  return {
+    webTransport,
+    webCodecs,
+    mediaDevices,
+    isSafari,
+    browser,
+    supported,
+  };
+}
+
+const browserSupport = detectBrowserSupport();
+
+// Update the browser support panel UI
+function updateBrowserSupportPanel() {
+  const supportPanel = document.getElementById("support-panel");
+  if (!supportPanel) return;
+
+  const statusClass = browserSupport.supported ? "connected" : "disconnected";
+  const statusText = browserSupport.supported ? "Supported" : "Not Supported";
+
+  // Build details HTML
+  const checkmark = (supported: boolean) =>
+    supported
+      ? '<span style="color: #22c55e;">✓</span>'
+      : '<span style="color: #ef4444;">✗</span>';
+
+  const fallbackNote = browserSupport.isSafari && !browserSupport.webTransport
+    ? `<p style="margin-top: 0.5rem; color: #a3a3a3; font-size: 0.85rem;">Safari uses WebSocket fallback for compatibility.</p>`
+    : "";
+
+  const detailsContent = `
+    <p><strong>Browser:</strong> ${browserSupport.browser}</p>
+    <table class="latency-results">
+      <tbody>
+        <tr><td>WebTransport</td><td>${checkmark(browserSupport.webTransport)} ${browserSupport.webTransport ? "Available" : "Not available"}</td></tr>
+        <tr><td>WebCodecs</td><td>${checkmark(browserSupport.webCodecs)} ${browserSupport.webCodecs ? "Available" : "Not available"}</td></tr>
+        <tr><td>Media Devices</td><td>${checkmark(browserSupport.mediaDevices)} ${browserSupport.mediaDevices ? "Available" : "Not available"}</td></tr>
+      </tbody>
+    </table>
+    ${fallbackNote}
+  `;
+
+  supportPanel.innerHTML = `
+    <div class="server-status-summary">
+      <span class="status-indicator ${statusClass}"></span>
+      <span>${statusText}: ${browserSupport.browser}</span>
+      <button class="details-btn" id="support-details-btn">Details</button>
+    </div>
+    <div class="server-details hidden" id="support-details-content">
+      ${detailsContent}
+    </div>
+  `;
+
+  // Add details toggle handler
+  document.getElementById("support-details-btn")?.addEventListener("click", () => {
+    const details = document.getElementById("support-details-content");
+    const btn = document.getElementById("support-details-btn");
+    if (details && btn) {
+      const isHidden = details.classList.contains("hidden");
+      details.classList.toggle("hidden");
+      btn.textContent = isHidden ? "Hide" : "Details";
+    }
+  });
+}
+
 // Race requests to find the lowest-latency relay server
 async function selectBestFallbackRelay(): Promise<string> {
   const testPath = "/announced/_latency_test_"; // Invalid prefix = empty but valid response
@@ -193,7 +289,6 @@ const NAMESPACE_PREFIX = "vivoh.earth";
 const loadHangComponents = async () => {
   await import("@kixelated/hang/publish/element");
   await import("@kixelated/hang/watch/element");
-  await import("@kixelated/hang/support/element");
 };
 
 import {
@@ -878,7 +973,8 @@ async function init() {
     serverStatus.connected = true;
   }
 
-  // Update server status panel
+  // Update status panels
+  updateBrowserSupportPanel();
   updateServerStatusPanel();
 
   // Load hang components dynamically AFTER polyfill is installed
@@ -906,19 +1002,7 @@ async function init() {
   if (supportLink && supportPanel) {
     supportLink.addEventListener("click", (e) => {
       e.preventDefault();
-      const wasHidden = supportPanel.classList.contains("hidden");
       supportPanel.classList.toggle("hidden");
-
-      // Click the Details button inside hang-support to expand it
-      if (wasHidden) {
-        setTimeout(() => {
-          const hangSupport = supportPanel.querySelector("hang-support");
-          if (hangSupport?.shadowRoot) {
-            const detailsBtn = hangSupport.shadowRoot.querySelector("button");
-            if (detailsBtn) detailsBtn.click();
-          }
-        }, 50);
-      }
     });
   }
 
