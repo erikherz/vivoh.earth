@@ -251,95 +251,73 @@ function updateBrowserSupportPanel() {
   const supportPanel = document.getElementById("support-panel");
   if (!supportPanel || !browserSupport) return;
 
-  const statusClass = browserSupport.supported ? "connected" : "disconnected";
-  const statusText = browserSupport.supported ? "Supported" : "Not Supported";
+  // Determine overall status - "Partial" if using polyfill, "Full" if native WebTransport
+  const isPartial = needsPolyfill;
+  const statusClass = browserSupport.supported ? (isPartial ? "partial" : "connected") : "disconnected";
+  const statusText = browserSupport.supported ? (isPartial ? "Partial Support" : "Full Support") : "Not Supported";
 
   // Build details HTML
-  const check = '<span style="color: #22c55e;">✓</span>';
-  const cross = '<span style="color: #ef4444;">✗</span>';
-  const partial = '<span style="color: #eab308;">◐</span>';
-  const unknown = '<span style="color: #737373;">?</span>';
+  const green = '<span class="status-dot green"></span>';
+  const red = '<span class="status-dot red"></span>';
+  const yellow = '<span class="status-dot yellow"></span>';
 
-  const bool = (v: boolean) => v ? `${check} Yes` : `${cross} No`;
-  const captureStatus = (v: "full" | "partial" | "none") => {
-    if (v === "full") return `${check} Full`;
-    if (v === "partial") return `${partial} Partial`;
-    return `${cross} No`;
+  const bool = (v: boolean) => v ? `${green} Yes` : `${red} No`;
+
+  // WebTransport status - show "Polyfill" if we're using the fallback
+  const webTransportStatus = () => {
+    if (needsPolyfill) {
+      return `${yellow} Polyfill`;
+    }
+    return browserSupport.features.webTransport ? `${green} Full` : `${red} No`;
   };
-  const codec = (c: CodecSupport | undefined) => {
-    if (!c) return `${cross} No`;
-    const sw = c.software ? "SW" : "";
-    const hw = c.hardware === true ? "HW" : c.hardware === false ? "" : "";
-    const parts = [sw, hw].filter(Boolean);
-    if (parts.length === 0) return `${cross} No`;
-    // Show hardware status: ? if unknown (Firefox), ✓ if yes, nothing if no
-    const hwIcon = c.hardware === undefined ? ` ${unknown}` : c.hardware ? ` ${check}` : "";
-    return `${check} ${parts.join("+")}${c.hardware === undefined ? " (HW?)" : ""}`;
+
+  const captureStatus = (v: "full" | "partial" | "none") => {
+    if (v === "full") return `${green} Full`;
+    if (v === "partial") return `${yellow} Partial`;
+    return `${red} No`;
+  };
+
+  const codecStatus = (c: CodecSupport | undefined, isFirefox: boolean) => {
+    if (!c || (!c.software && !c.hardware)) return `${red} No`;
+    if (c.hardware === true) return `${green} Hardware`;
+    if (c.hardware === undefined && isFirefox) return `${yellow} Software*`;
+    if (c.software) return `${yellow} Software`;
+    return `${red} No`;
+  };
+
+  const audioCodecStatus = (supported: boolean | undefined) => {
+    if (supported === undefined) return `${red} No`;
+    return supported ? `${green} Yes` : `${red} No`;
   };
 
   const f = browserSupport.features;
+  const isFirefox = browserSupport.isFirefox;
 
-  const fallbackNote = browserSupport.isSafari && !f.webTransport
-    ? `<p style="margin-top: 0.75rem; color: #a3a3a3; font-size: 0.85rem;">Safari uses WebSocket fallback for compatibility.</p>`
-    : "";
-
-  // Audio codec rows
-  const audioEncodingRows = f.audio.encoding
-    ? `<tr><td>  AAC</td><td>${bool(f.audio.encoding.aac)}</td></tr>
-       <tr><td>  Opus</td><td>${bool(f.audio.encoding.opus)}</td></tr>`
-    : "";
-  const audioDecodingRows = f.audio.decoding
-    ? `<tr><td>  AAC</td><td>${bool(f.audio.decoding.aac)}</td></tr>
-       <tr><td>  Opus</td><td>${bool(f.audio.decoding.opus)}</td></tr>`
-    : "";
-
-  // Video codec rows
-  const videoEncodingRows = f.video.encoding
-    ? `<tr><td>  H.264</td><td>${codec(f.video.encoding.h264)}</td></tr>
-       <tr><td>  H.265</td><td>${codec(f.video.encoding.h265)}</td></tr>
-       <tr><td>  VP8</td><td>${codec(f.video.encoding.vp8)}</td></tr>
-       <tr><td>  VP9</td><td>${codec(f.video.encoding.vp9)}</td></tr>
-       <tr><td>  AV1</td><td>${codec(f.video.encoding.av1)}</td></tr>`
-    : "";
-  const videoDecodingRows = f.video.decoding
-    ? `<tr><td>  H.264</td><td>${codec(f.video.decoding.h264)}</td></tr>
-       <tr><td>  H.265</td><td>${codec(f.video.decoding.h265)}</td></tr>
-       <tr><td>  VP8</td><td>${codec(f.video.decoding.vp8)}</td></tr>
-       <tr><td>  VP9</td><td>${codec(f.video.decoding.vp9)}</td></tr>
-       <tr><td>  AV1</td><td>${codec(f.video.decoding.av1)}</td></tr>`
-    : "";
+  // Note for polyfill or Firefox
+  let footerNote = "";
+  if (needsPolyfill) {
+    footerNote = `<p class="support-note">Using WebSocket polyfill for Safari compatibility.</p>`;
+  }
+  if (isFirefox) {
+    footerNote += `<p class="support-note">*Hardware acceleration is <a href="https://github.com/nickeltin/browser-support" target="_blank">undetectable</a> on Firefox.</p>`;
+  }
 
   const detailsContent = `
-    <p><strong>Browser:</strong> ${browserSupport.browser}</p>
     <table class="latency-results">
       <tbody>
-        <tr><td>WebTransport</td><td>${bool(f.webTransport)}</td></tr>
-        <tr><td>Media Devices</td><td>${bool(f.mediaDevices)}</td></tr>
+        <tr><td><strong>WebTransport</strong></td><td>${webTransportStatus()}</td></tr>
+        <tr><td><strong>Rendering</strong></td><td>Audio</td><td>${bool(f.audio.render)}</td></tr>
+        <tr><td></td><td>Video</td><td>${bool(f.video.render)}</td></tr>
+        <tr><td><strong>Decoding</strong></td><td>Opus</td><td>${f.audio.decoding ? audioCodecStatus(f.audio.decoding.opus) : `${red} No`}</td></tr>
+        <tr><td></td><td>AAC</td><td>${f.audio.decoding ? audioCodecStatus(f.audio.decoding.aac) : `${red} No`}</td></tr>
+        <tr><td></td><td>AV1</td><td>${f.video.decoding ? codecStatus(f.video.decoding.av1, isFirefox) : `${red} No`}</td></tr>
+        <tr><td></td><td>H.265</td><td>${f.video.decoding ? codecStatus(f.video.decoding.h265, isFirefox) : `${red} No`}</td></tr>
+        <tr><td></td><td>H.264</td><td>${f.video.decoding ? codecStatus(f.video.decoding.h264, isFirefox) : `${red} No`}</td></tr>
+        <tr><td></td><td>VP9</td><td>${f.video.decoding ? codecStatus(f.video.decoding.vp9, isFirefox) : `${red} No`}</td></tr>
+        <tr><td></td><td>VP8</td><td>${f.video.decoding ? codecStatus(f.video.decoding.vp8, isFirefox) : `${red} No`}</td></tr>
       </tbody>
     </table>
-    <p style="margin-top: 0.75rem;"><strong>Audio</strong></p>
-    <table class="latency-results">
-      <tbody>
-        <tr><td>Capture</td><td>${bool(f.audio.capture)}</td></tr>
-        <tr><td>Encoding</td><td>${f.audio.encoding ? `${check} Yes` : `${cross} No`}</td></tr>
-        ${audioEncodingRows}
-        <tr><td>Decoding</td><td>${f.audio.decoding ? `${check} Yes` : `${cross} No`}</td></tr>
-        ${audioDecodingRows}
-        <tr><td>Render</td><td>${bool(f.audio.render)}</td></tr>
-      </tbody>
-    </table>
-    <p style="margin-top: 0.75rem;"><strong>Video</strong></p>
-    <table class="latency-results">
-      <tbody>
-        <tr><td>Capture</td><td>${captureStatus(f.video.capture)}</td></tr>
-        <tr><td>Encoding</td><td>${f.video.encoding ? `${check} Yes` : `${cross} No`}</td></tr>
-        ${videoEncodingRows}
-        <tr><td>Decoding</td><td>${f.video.decoding ? `${check} Yes` : `${cross} No`}</td></tr>
-        ${videoDecodingRows}
-        <tr><td>Render</td><td>${bool(f.video.render)}</td></tr>
-      </tbody>
-    </table>
-    ${fallbackNote}
+    ${footerNote}
   `;
 
   supportPanel.innerHTML = `
