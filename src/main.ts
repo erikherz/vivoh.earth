@@ -23,13 +23,40 @@ const FALLBACK_RELAYS = [
   "ap-south.vivoh.earth",
 ];
 
+// Server status tracking
+interface RelayResult {
+  domain: string;
+  latency: number | null; // null if failed
+  error?: string;
+}
+
+interface ServerStatus {
+  mode: "websocket" | "webtransport";
+  selectedServer: string;
+  connected: boolean;
+  raceResults: RelayResult[];
+}
+
+const serverStatus: ServerStatus = {
+  mode: needsPolyfill ? "websocket" : "webtransport",
+  selectedServer: "relay.cloudflare.mediaoverquic.com",
+  connected: false,
+  raceResults: [],
+};
+
 // Race requests to find the lowest-latency relay server
 async function selectBestFallbackRelay(): Promise<string> {
   const testPath = "/announced/_latency_test_"; // Invalid prefix = empty but valid response
   const timeout = 5000; // 5 second timeout per server
 
-  // Create a race for each server
-  const racePromises = FALLBACK_RELAYS.map(async (domain) => {
+  // Track all results for the status panel
+  const results: RelayResult[] = FALLBACK_RELAYS.map(domain => ({
+    domain,
+    latency: null,
+  }));
+
+  // Create a promise for each server that resolves with result
+  const racePromises = FALLBACK_RELAYS.map(async (domain, index) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
     const startTime = performance.now();
@@ -37,33 +64,114 @@ async function selectBestFallbackRelay(): Promise<string> {
     try {
       const response = await fetch(`https://${domain}${testPath}`, {
         signal: controller.signal,
-        // Prevent caching to get accurate latency
         cache: "no-store",
       });
       clearTimeout(timeoutId);
 
       if (response.ok) {
         const latency = performance.now() - startTime;
+        results[index].latency = latency;
         console.log(`Relay ${domain} responded in ${latency.toFixed(0)}ms`);
         return { domain, latency };
       }
-      throw new Error(`HTTP ${response.status}`);
+      const error = `HTTP ${response.status}`;
+      results[index].error = error;
+      throw new Error(error);
     } catch (error) {
       clearTimeout(timeoutId);
+      if (!results[index].error) {
+        results[index].error = error instanceof Error ? error.message : "Failed";
+      }
       console.warn(`Relay ${domain} failed:`, error);
-      throw error; // Re-throw so Promise.any ignores this one
+      throw error;
     }
   });
 
+  // Wait a bit for all results to come in (for display purposes)
+  // but use Promise.any to select the winner quickly
+  const winnerPromise = Promise.any(racePromises);
+
+  // Also wait for all to settle (with a shorter timeout for UI)
+  const allSettledPromise = Promise.allSettled(racePromises);
+
   try {
-    // Promise.any returns the first fulfilled promise (ignores rejections)
-    const winner = await Promise.any(racePromises);
+    const winner = await winnerPromise;
     console.log(`Selected relay: ${winner.domain} (${winner.latency.toFixed(0)}ms)`);
+
+    // Wait briefly for other results to populate (for status panel)
+    await Promise.race([
+      allSettledPromise,
+      new Promise(resolve => setTimeout(resolve, 1000)),
+    ]);
+
+    serverStatus.raceResults = results;
+    serverStatus.selectedServer = winner.domain;
+    serverStatus.connected = true;
+
     return winner.domain;
   } catch {
-    // All servers failed, fall back to first one
     console.warn("All relay servers failed latency test, using default");
+    serverStatus.raceResults = results;
+    serverStatus.selectedServer = FALLBACK_RELAYS[0];
+    serverStatus.connected = false;
     return FALLBACK_RELAYS[0];
+  }
+}
+
+// Update the server status panel UI
+function updateServerStatusPanel() {
+  const statusIndicator = document.getElementById("server-status-indicator");
+  const serverName = document.getElementById("server-name");
+  const serverPanel = document.getElementById("server-panel");
+
+  if (statusIndicator) {
+    statusIndicator.className = `status-indicator ${serverStatus.connected ? "connected" : "disconnected"}`;
+  }
+
+  if (serverName) {
+    serverName.textContent = serverStatus.selectedServer;
+  }
+
+  if (serverPanel) {
+    const modeLabel = serverStatus.mode === "websocket" ? "WebSocket (Safari fallback)" : "WebTransport (native)";
+
+    let detailsHtml = `
+      <div class="server-details">
+        <p><strong>Mode:</strong> ${modeLabel}</p>
+        <p><strong>Server:</strong> ${serverStatus.selectedServer}</p>
+        <p><strong>Status:</strong> ${serverStatus.connected ? "Connected" : "Disconnected"}</p>
+    `;
+
+    if (serverStatus.mode === "websocket" && serverStatus.raceResults.length > 0) {
+      detailsHtml += `
+        <p><strong>Latency Test Results:</strong></p>
+        <table class="latency-results">
+          <thead><tr><th>Server</th><th>Latency</th></tr></thead>
+          <tbody>
+      `;
+
+      // Sort by latency (successful first, then failed)
+      const sorted = [...serverStatus.raceResults].sort((a, b) => {
+        if (a.latency === null && b.latency === null) return 0;
+        if (a.latency === null) return 1;
+        if (b.latency === null) return -1;
+        return a.latency - b.latency;
+      });
+
+      for (const result of sorted) {
+        const isSelected = result.domain === serverStatus.selectedServer;
+        const latencyText = result.latency !== null
+          ? `${result.latency.toFixed(0)}ms`
+          : `Failed: ${result.error || "timeout"}`;
+        const rowClass = isSelected ? "selected" : (result.latency === null ? "failed" : "");
+        detailsHtml += `<tr class="${rowClass}"><td>${result.domain}</td><td>${latencyText}</td></tr>`;
+      }
+
+      detailsHtml += `</tbody></table>`;
+    }
+
+    detailsHtml += `</div>`;
+    serverPanel.innerHTML = detailsHtml;
   }
 }
 
@@ -756,7 +864,13 @@ async function init() {
   if (needsPolyfill) {
     const bestRelay = await selectBestFallbackRelay();
     RELAY_URL = `https://${bestRelay}/moq`;
+  } else {
+    // WebTransport mode - assume connected
+    serverStatus.connected = true;
   }
+
+  // Update server status panel
+  updateServerStatusPanel();
 
   // Load hang components dynamically AFTER polyfill is installed
   await loadHangComponents();
@@ -796,6 +910,16 @@ async function init() {
           }
         }, 50);
       }
+    });
+  }
+
+  // Server status toggle
+  const serverLink = document.getElementById("server-link");
+  const serverPanel = document.getElementById("server-panel");
+  if (serverLink && serverPanel) {
+    serverLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      serverPanel.classList.toggle("hidden");
     });
   }
 }

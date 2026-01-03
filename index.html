@@ -473,6 +473,71 @@
             display: none;
         }
 
+        /* Server status panel */
+        .server-panel {
+            margin-top: 1rem;
+            background: #171717;
+            border: 1px solid #262626;
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: left;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .server-panel.hidden {
+            display: none;
+        }
+        .server-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .status-indicator.connected {
+            background: #22c55e;
+            box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+        }
+        .status-indicator.disconnected {
+            background: #ef4444;
+            box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+        }
+        #server-name {
+            color: #a3a3a3;
+            font-size: 0.8rem;
+        }
+        .server-details p {
+            margin-bottom: 0.5rem;
+        }
+        .latency-results {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 0.5rem;
+            font-size: 0.85rem;
+        }
+        .latency-results th,
+        .latency-results td {
+            padding: 0.4rem 0.6rem;
+            text-align: left;
+            border-bottom: 1px solid #262626;
+        }
+        .latency-results th {
+            color: #a3a3a3;
+            font-weight: 500;
+        }
+        .latency-results tr.selected td {
+            color: #22c55e;
+            font-weight: 500;
+        }
+        .latency-results tr.failed td {
+            color: #ef4444;
+        }
+
         /* Login required overlay */
         #login-overlay {
             position: absolute;
@@ -714,10 +779,11 @@
         </div>
 
         <footer>
-            <p><a href="https://moq.dev/" target="_blank" rel="noopener">MoQ</a> | <a href="https://blog.cloudflare.com/moq/" target="_blank" rel="noopener">Cloudflare</a> | <a href="#" id="support-link">Browser Support</a></p>
+            <p><a href="https://moq.dev/" target="_blank" rel="noopener">MoQ</a> | <a href="https://blog.cloudflare.com/moq/" target="_blank" rel="noopener">Cloudflare</a> | <a href="#" id="support-link">Browser Support</a> | <a href="#" id="server-link" class="server-link"><span id="server-status-indicator" class="status-indicator disconnected"></span> <span id="server-name">connecting...</span></a></p>
             <div id="support-panel" class="support-panel hidden">
                 <hang-support></hang-support>
             </div>
+            <div id="server-panel" class="server-panel hidden"></div>
         </footer>
     </div>
 </body>
