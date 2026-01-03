@@ -23,5 +23,11 @@
       "pattern": "www.vivoh.earth",
       "custom_domain": true
     }
+  ],
+  "migrations": [
+    {
+      "tag": "v2",
+      "deleted_classes": ["MoqRelay"]
+    }
   ]
 }
