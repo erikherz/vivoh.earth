@@ -225,8 +225,27 @@ function initBroadcastView(streamId: string, user: User | null) {
       requireAuthCheckbox.checked = settings.require_auth;
     });
 
-    // Save on change
-    requireAuthCheckbox.addEventListener("change", () => {
+    // Save on change - with confirmation for anonymous viewers
+    requireAuthCheckbox.addEventListener("change", async () => {
+      if (requireAuthCheckbox.checked) {
+        // Check for anonymous viewers before enabling auth requirement
+        const data = await getStreamViewers(streamId);
+        const anonymousCount = data?.viewers.filter(v => !v.user_id).length ?? 0;
+
+        if (anonymousCount > 0) {
+          const plural = anonymousCount === 1 ? "viewer is" : "viewers are";
+          const confirmed = confirm(
+            `${anonymousCount} anonymous ${plural} currently watching.\n\nForce them to sign in now?`
+          );
+
+          if (!confirmed) {
+            // Revert checkbox if not confirmed
+            requireAuthCheckbox.checked = false;
+            return;
+          }
+        }
+      }
+
       updateStreamSettings(streamId, requireAuthCheckbox.checked);
     });
   }
@@ -422,6 +441,23 @@ async function initWatchView(streamId: string, user: User | null) {
         logWatchEnd(watchEventId);
       }
     });
+
+    // Poll for auth setting changes (anonymous viewers only)
+    if (!user) {
+      const authCheckInterval = setInterval(async () => {
+        const currentSettings = await getStreamSettings(streamId);
+        if (currentSettings.require_auth) {
+          clearInterval(authCheckInterval);
+          // End the watch event
+          if (watchEventId) {
+            logWatchEnd(watchEventId);
+            watchEventId = null;
+          }
+          // Show login required overlay
+          showWatchLoginRequired();
+        }
+      }, 10000); // Check every 10 seconds
+    }
   }
 }
 
