@@ -361,7 +361,8 @@ async function selectBestFallbackRelay(): Promise<string> {
     const startTime = performance.now();
 
     try {
-      const response = await fetch(`https://${domain}${testPath}`, {
+      // Use HTTP for latency test (relay servers don't serve HTTPS on this endpoint)
+      const response = await fetch(`http://${domain}${testPath}`, {
         signal: controller.signal,
         cache: "no-store",
       });
