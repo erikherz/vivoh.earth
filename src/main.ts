@@ -16,11 +16,59 @@ if (needsPolyfill) {
   installWebTransportPolyfill();
 }
 
-// Use Cloudflare relay for WebTransport (Chrome/Firefox)
-// For Safari, the polyfill converts this to WebSocket automatically
-const RELAY_URL = needsPolyfill
-  ? "https://vivoh.earth/moq"  // WebSocket fallback via our container
-  : "https://relay.cloudflare.mediaoverquic.com";  // Native WebTransport
+// Safari fallback relay servers (WebSocket-enabled)
+const FALLBACK_RELAYS = [
+  "us-central.vivoh.earth",
+  "eu-central.vivoh.earth",
+  "ap-south.vivoh.earth",
+];
+
+// Race requests to find the lowest-latency relay server
+async function selectBestFallbackRelay(): Promise<string> {
+  const testPath = "/announced/_latency_test_"; // Invalid prefix = empty but valid response
+  const timeout = 5000; // 5 second timeout per server
+
+  // Create a race for each server
+  const racePromises = FALLBACK_RELAYS.map(async (domain) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const startTime = performance.now();
+
+    try {
+      const response = await fetch(`https://${domain}${testPath}`, {
+        signal: controller.signal,
+        // Prevent caching to get accurate latency
+        cache: "no-store",
+      });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        const latency = performance.now() - startTime;
+        console.log(`Relay ${domain} responded in ${latency.toFixed(0)}ms`);
+        return { domain, latency };
+      }
+      throw new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      clearTimeout(timeoutId);
+      console.warn(`Relay ${domain} failed:`, error);
+      throw error; // Re-throw so Promise.any ignores this one
+    }
+  });
+
+  try {
+    // Promise.any returns the first fulfilled promise (ignores rejections)
+    const winner = await Promise.any(racePromises);
+    console.log(`Selected relay: ${winner.domain} (${winner.latency.toFixed(0)}ms)`);
+    return winner.domain;
+  } catch {
+    // All servers failed, fall back to first one
+    console.warn("All relay servers failed latency test, using default");
+    return FALLBACK_RELAYS[0];
+  }
+}
+
+// Relay URL - set dynamically for Safari fallback, static for native WebTransport
+let RELAY_URL = "https://relay.cloudflare.mediaoverquic.com"; // Default for Chrome/Firefox
 const NAMESPACE_PREFIX = "vivoh.earth";
 
 // Dynamic imports for hang components - MUST happen after polyfill is installed
@@ -704,6 +752,12 @@ async function initStreamStatsView(streamId: string) {
 
 // Initialize the app
 async function init() {
+  // For Safari/polyfill mode, select the best relay server based on latency
+  if (needsPolyfill) {
+    const bestRelay = await selectBestFallbackRelay();
+    RELAY_URL = `https://${bestRelay}/moq`;
+  }
+
   // Load hang components dynamically AFTER polyfill is installed
   await loadHangComponents();
 
