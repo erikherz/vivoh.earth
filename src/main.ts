@@ -46,19 +46,24 @@ const serverStatus: ServerStatus = {
 
 // Browser support tracking
 interface BrowserSupport {
-  webTransport: boolean;
-  webCodecs: boolean;
-  mediaDevices: boolean;
-  isSafari: boolean;
   browser: string;
+  isSafari: boolean;
   supported: boolean;
+  features: {
+    webTransport: boolean;
+    audioCapture: boolean;
+    audioEncoder: boolean;
+    audioDecoder: boolean;
+    audioRender: boolean;
+    videoCapture: "full" | "partial" | "none";
+    videoEncoder: boolean;
+    videoDecoder: boolean;
+    videoRender: boolean;
+    mediaDevices: boolean;
+  };
 }
 
 function detectBrowserSupport(): BrowserSupport {
-  const webTransport = typeof WebTransport !== "undefined";
-  const webCodecs = typeof VideoEncoder !== "undefined" && typeof VideoDecoder !== "undefined";
-  const mediaDevices = typeof navigator.mediaDevices?.getUserMedia === "function";
-
   // Detect browser
   const ua = navigator.userAgent;
   let browser = "Unknown";
@@ -72,16 +77,49 @@ function detectBrowserSupport(): BrowserSupport {
     browser = "Safari";
   }
 
+  const webTransport = typeof WebTransport !== "undefined";
+
+  // Audio features
+  const audioCapture = typeof AudioWorkletNode !== "undefined";
+  const audioEncoder = typeof AudioEncoder !== "undefined";
+  const audioDecoder = typeof AudioDecoder !== "undefined";
+  const audioRender = typeof AudioContext !== "undefined" && typeof AudioBufferSourceNode !== "undefined";
+
+  // Video features
+  // @ts-expect-error MediaStreamTrackProcessor not in all TS libs
+  const hasMediaStreamTrackProcessor = typeof MediaStreamTrackProcessor !== "undefined";
+  const hasOffscreenCanvas = typeof OffscreenCanvas !== "undefined";
+  const videoCapture: "full" | "partial" | "none" = hasMediaStreamTrackProcessor
+    ? "full"
+    : hasOffscreenCanvas
+      ? "partial"
+      : "none";
+  const videoEncoder = typeof VideoEncoder !== "undefined";
+  const videoDecoder = typeof VideoDecoder !== "undefined";
+  const videoRender = hasOffscreenCanvas && typeof CanvasRenderingContext2D !== "undefined";
+
+  // Media devices
+  const mediaDevices = typeof navigator.mediaDevices?.getUserMedia === "function";
+
   // Supported if we have WebTransport OR Safari (which uses WebSocket fallback)
   const supported = webTransport || isSafari;
 
   return {
-    webTransport,
-    webCodecs,
-    mediaDevices,
-    isSafari,
     browser,
+    isSafari,
     supported,
+    features: {
+      webTransport,
+      audioCapture,
+      audioEncoder,
+      audioDecoder,
+      audioRender,
+      videoCapture,
+      videoEncoder,
+      videoDecoder,
+      videoRender,
+      mediaDevices,
+    },
   };
 }
 
@@ -96,22 +134,47 @@ function updateBrowserSupportPanel() {
   const statusText = browserSupport.supported ? "Supported" : "Not Supported";
 
   // Build details HTML
-  const checkmark = (supported: boolean) =>
-    supported
-      ? '<span style="color: #22c55e;">✓</span>'
-      : '<span style="color: #ef4444;">✗</span>';
+  const check = '<span style="color: #22c55e;">✓</span>';
+  const cross = '<span style="color: #ef4444;">✗</span>';
+  const partial = '<span style="color: #eab308;">◐</span>';
 
-  const fallbackNote = browserSupport.isSafari && !browserSupport.webTransport
-    ? `<p style="margin-top: 0.5rem; color: #a3a3a3; font-size: 0.85rem;">Safari uses WebSocket fallback for compatibility.</p>`
+  const bool = (v: boolean) => v ? `${check} Yes` : `${cross} No`;
+  const capture = (v: "full" | "partial" | "none") => {
+    if (v === "full") return `${check} Full`;
+    if (v === "partial") return `${partial} Partial`;
+    return `${cross} No`;
+  };
+
+  const f = browserSupport.features;
+
+  const fallbackNote = browserSupport.isSafari && !f.webTransport
+    ? `<p style="margin-top: 0.75rem; color: #a3a3a3; font-size: 0.85rem;">Safari uses WebSocket fallback for compatibility.</p>`
     : "";
 
   const detailsContent = `
     <p><strong>Browser:</strong> ${browserSupport.browser}</p>
     <table class="latency-results">
       <tbody>
-        <tr><td>WebTransport</td><td>${checkmark(browserSupport.webTransport)} ${browserSupport.webTransport ? "Available" : "Not available"}</td></tr>
-        <tr><td>WebCodecs</td><td>${checkmark(browserSupport.webCodecs)} ${browserSupport.webCodecs ? "Available" : "Not available"}</td></tr>
-        <tr><td>Media Devices</td><td>${checkmark(browserSupport.mediaDevices)} ${browserSupport.mediaDevices ? "Available" : "Not available"}</td></tr>
+        <tr><td>WebTransport</td><td>${bool(f.webTransport)}</td></tr>
+        <tr><td>Media Devices</td><td>${bool(f.mediaDevices)}</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top: 0.75rem;"><strong>Audio</strong></p>
+    <table class="latency-results">
+      <tbody>
+        <tr><td>Capture (AudioWorklet)</td><td>${bool(f.audioCapture)}</td></tr>
+        <tr><td>Encoder (AudioEncoder)</td><td>${bool(f.audioEncoder)}</td></tr>
+        <tr><td>Decoder (AudioDecoder)</td><td>${bool(f.audioDecoder)}</td></tr>
+        <tr><td>Render (AudioContext)</td><td>${bool(f.audioRender)}</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top: 0.75rem;"><strong>Video</strong></p>
+    <table class="latency-results">
+      <tbody>
+        <tr><td>Capture (MediaStreamTrackProcessor)</td><td>${capture(f.videoCapture)}</td></tr>
+        <tr><td>Encoder (VideoEncoder)</td><td>${bool(f.videoEncoder)}</td></tr>
+        <tr><td>Decoder (VideoDecoder)</td><td>${bool(f.videoDecoder)}</td></tr>
+        <tr><td>Render (OffscreenCanvas)</td><td>${bool(f.videoRender)}</td></tr>
       </tbody>
     </table>
     ${fallbackNote}
