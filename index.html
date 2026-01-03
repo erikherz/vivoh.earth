@@ -596,12 +596,12 @@
         hang-support {
             display: block;
         }
-        /* Ensure internal flex containers are vertically centered and left-aligned */
+        /* Ensure internal flex containers are vertically centered */
         hang-publish > div,
         hang-watch > div {
             display: flex;
             align-items: center;
-            justify-content: flex-start !important;
+            justify-content: center !important;
             gap: 0.5rem;
         }
         /* Override hang component's space-between layout */
@@ -611,7 +611,7 @@
         }
         hang-publish > div > div,
         hang-watch > div > div {
-            justify-content: flex-start !important;
+            justify-content: center !important;
         }
     </style>
 </head>
@@ -701,7 +701,7 @@
         </div>
 
         <footer>
-            <p><a href="https://moq.dev/" target="_blank" rel="noopener">MoQ Transport</a> | <a href="https://blog.cloudflare.com/moq/" target="_blank" rel="noopener">Cloudflare Relay</a> | <a href="#" id="support-link">Browser Support</a></p>
+            <p><a href="https://moq.dev/" target="_blank" rel="noopener">MoQ</a> | <a href="https://blog.cloudflare.com/moq/" target="_blank" rel="noopener">Cloudflare</a> | <a href="#" id="support-link">Browser Support</a></p>
             <div id="support-panel" class="support-panel hidden">
                 <hang-support></hang-support>
             </div>
