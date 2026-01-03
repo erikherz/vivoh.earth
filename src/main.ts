@@ -1195,7 +1195,7 @@ async function init() {
   // For Safari/polyfill mode, select the best relay server based on latency
   if (needsPolyfill) {
     const bestRelay = await selectBestFallbackRelay();
-    RELAY_URL = `https://${bestRelay}/moq`;
+    RELAY_URL = `https://${bestRelay}`;
   } else {
     // WebTransport mode - assume connected
     serverStatus.connected = true;
