@@ -45,29 +45,112 @@ const serverStatus: ServerStatus = {
 };
 
 // Browser support tracking
+interface CodecSupport {
+  software: boolean;
+  hardware?: boolean; // undefined means unknown (Firefox)
+}
+
 interface BrowserSupport {
   browser: string;
+  isFirefox: boolean;
   isSafari: boolean;
   supported: boolean;
   features: {
     webTransport: boolean;
-    audioCapture: boolean;
-    audioEncoder: boolean;
-    audioDecoder: boolean;
-    audioRender: boolean;
-    videoCapture: "full" | "partial" | "none";
-    videoEncoder: boolean;
-    videoDecoder: boolean;
-    videoRender: boolean;
     mediaDevices: boolean;
+    audio: {
+      capture: boolean;
+      render: boolean;
+      encoding?: { aac: boolean; opus: boolean };
+      decoding?: { aac: boolean; opus: boolean };
+    };
+    video: {
+      capture: "full" | "partial" | "none";
+      render: boolean;
+      encoding?: { h264: CodecSupport; h265: CodecSupport; vp8: CodecSupport; vp9: CodecSupport; av1: CodecSupport };
+      decoding?: { h264: CodecSupport; h265: CodecSupport; vp8: CodecSupport; vp9: CodecSupport; av1: CodecSupport };
+    };
   };
 }
 
-function detectBrowserSupport(): BrowserSupport {
+const CODECS: Record<string, string> = {
+  aac: "mp4a.40.2",
+  opus: "opus",
+  av1: "av01.0.08M.08",
+  h264: "avc1.640028",
+  h265: "hev1.1.6.L93.B0",
+  vp9: "vp09.00.10.08",
+  vp8: "vp8",
+};
+
+async function checkAudioEncoder(codec: string): Promise<boolean> {
+  try {
+    const res = await AudioEncoder.isConfigSupported({
+      codec: CODECS[codec],
+      numberOfChannels: 2,
+      sampleRate: 48000,
+    });
+    return res.supported === true;
+  } catch { return false; }
+}
+
+async function checkAudioDecoder(codec: string): Promise<boolean> {
+  try {
+    const res = await AudioDecoder.isConfigSupported({
+      codec: CODECS[codec],
+      numberOfChannels: 2,
+      sampleRate: 48000,
+    });
+    return res.supported === true;
+  } catch { return false; }
+}
+
+async function checkVideoEncoder(codec: string, isFirefox: boolean): Promise<CodecSupport> {
+  try {
+    const software = await VideoEncoder.isConfigSupported({
+      codec: CODECS[codec],
+      width: 1280,
+      height: 720,
+      hardwareAcceleration: "prefer-software",
+    });
+    const hardware = await VideoEncoder.isConfigSupported({
+      codec: CODECS[codec],
+      width: 1280,
+      height: 720,
+      hardwareAcceleration: "prefer-hardware",
+    });
+    const unknownHw = isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
+    return {
+      software: software.supported === true,
+      hardware: unknownHw ? undefined : hardware.supported === true,
+    };
+  } catch { return { software: false }; }
+}
+
+async function checkVideoDecoder(codec: string, isFirefox: boolean): Promise<CodecSupport> {
+  try {
+    const software = await VideoDecoder.isConfigSupported({
+      codec: CODECS[codec],
+      hardwareAcceleration: "prefer-software",
+    });
+    const hardware = await VideoDecoder.isConfigSupported({
+      codec: CODECS[codec],
+      hardwareAcceleration: "prefer-hardware",
+    });
+    const unknownHw = isFirefox || hardware.config?.hardwareAcceleration !== "prefer-hardware";
+    return {
+      software: software.supported === true,
+      hardware: unknownHw ? undefined : hardware.supported === true,
+    };
+  } catch { return { software: false }; }
+}
+
+async function detectBrowserSupport(): Promise<BrowserSupport> {
   // Detect browser
   const ua = navigator.userAgent;
   let browser = "Unknown";
-  if (/firefox/i.test(ua)) {
+  const isFirefox = /firefox/i.test(ua);
+  if (isFirefox) {
     browser = "Firefox";
   } else if (/edg/i.test(ua)) {
     browser = "Edge";
@@ -78,12 +161,27 @@ function detectBrowserSupport(): BrowserSupport {
   }
 
   const webTransport = typeof WebTransport !== "undefined";
+  const mediaDevices = typeof navigator.mediaDevices?.getUserMedia === "function";
 
   // Audio features
   const audioCapture = typeof AudioWorkletNode !== "undefined";
-  const audioEncoder = typeof AudioEncoder !== "undefined";
-  const audioDecoder = typeof AudioDecoder !== "undefined";
   const audioRender = typeof AudioContext !== "undefined" && typeof AudioBufferSourceNode !== "undefined";
+
+  let audioEncoding: { aac: boolean; opus: boolean } | undefined;
+  let audioDecoding: { aac: boolean; opus: boolean } | undefined;
+
+  if (typeof AudioEncoder !== "undefined") {
+    audioEncoding = {
+      aac: await checkAudioEncoder("aac"),
+      opus: await checkAudioEncoder("opus"),
+    };
+  }
+  if (typeof AudioDecoder !== "undefined") {
+    audioDecoding = {
+      aac: await checkAudioDecoder("aac"),
+      opus: await checkAudioDecoder("opus"),
+    };
+  }
 
   // Video features
   // @ts-expect-error MediaStreamTrackProcessor not in all TS libs
@@ -94,41 +192,63 @@ function detectBrowserSupport(): BrowserSupport {
     : hasOffscreenCanvas
       ? "partial"
       : "none";
-  const videoEncoder = typeof VideoEncoder !== "undefined";
-  const videoDecoder = typeof VideoDecoder !== "undefined";
   const videoRender = hasOffscreenCanvas && typeof CanvasRenderingContext2D !== "undefined";
 
-  // Media devices
-  const mediaDevices = typeof navigator.mediaDevices?.getUserMedia === "function";
+  let videoEncoding: BrowserSupport["features"]["video"]["encoding"];
+  let videoDecoding: BrowserSupport["features"]["video"]["decoding"];
+
+  if (typeof VideoEncoder !== "undefined") {
+    videoEncoding = {
+      h264: await checkVideoEncoder("h264", isFirefox),
+      h265: await checkVideoEncoder("h265", isFirefox),
+      vp8: await checkVideoEncoder("vp8", isFirefox),
+      vp9: await checkVideoEncoder("vp9", isFirefox),
+      av1: await checkVideoEncoder("av1", isFirefox),
+    };
+  }
+  if (typeof VideoDecoder !== "undefined") {
+    videoDecoding = {
+      h264: await checkVideoDecoder("h264", isFirefox),
+      h265: await checkVideoDecoder("h265", isFirefox),
+      vp8: await checkVideoDecoder("vp8", isFirefox),
+      vp9: await checkVideoDecoder("vp9", isFirefox),
+      av1: await checkVideoDecoder("av1", isFirefox),
+    };
+  }
 
   // Supported if we have WebTransport OR Safari (which uses WebSocket fallback)
   const supported = webTransport || isSafari;
 
   return {
     browser,
+    isFirefox,
     isSafari,
     supported,
     features: {
       webTransport,
-      audioCapture,
-      audioEncoder,
-      audioDecoder,
-      audioRender,
-      videoCapture,
-      videoEncoder,
-      videoDecoder,
-      videoRender,
       mediaDevices,
+      audio: {
+        capture: audioCapture,
+        render: audioRender,
+        encoding: audioEncoding,
+        decoding: audioDecoding,
+      },
+      video: {
+        capture: videoCapture,
+        render: videoRender,
+        encoding: videoEncoding,
+        decoding: videoDecoding,
+      },
     },
   };
 }
 
-const browserSupport = detectBrowserSupport();
+let browserSupport: BrowserSupport;
 
 // Update the browser support panel UI
 function updateBrowserSupportPanel() {
   const supportPanel = document.getElementById("support-panel");
-  if (!supportPanel) return;
+  if (!supportPanel || !browserSupport) return;
 
   const statusClass = browserSupport.supported ? "connected" : "disconnected";
   const statusText = browserSupport.supported ? "Supported" : "Not Supported";
@@ -137,18 +257,55 @@ function updateBrowserSupportPanel() {
   const check = '<span style="color: #22c55e;">✓</span>';
   const cross = '<span style="color: #ef4444;">✗</span>';
   const partial = '<span style="color: #eab308;">◐</span>';
+  const unknown = '<span style="color: #737373;">?</span>';
 
   const bool = (v: boolean) => v ? `${check} Yes` : `${cross} No`;
-  const capture = (v: "full" | "partial" | "none") => {
+  const captureStatus = (v: "full" | "partial" | "none") => {
     if (v === "full") return `${check} Full`;
     if (v === "partial") return `${partial} Partial`;
     return `${cross} No`;
+  };
+  const codec = (c: CodecSupport | undefined) => {
+    if (!c) return `${cross} No`;
+    const sw = c.software ? "SW" : "";
+    const hw = c.hardware === true ? "HW" : c.hardware === false ? "" : "";
+    const parts = [sw, hw].filter(Boolean);
+    if (parts.length === 0) return `${cross} No`;
+    // Show hardware status: ? if unknown (Firefox), ✓ if yes, nothing if no
+    const hwIcon = c.hardware === undefined ? ` ${unknown}` : c.hardware ? ` ${check}` : "";
+    return `${check} ${parts.join("+")}${c.hardware === undefined ? " (HW?)" : ""}`;
   };
 
   const f = browserSupport.features;
 
   const fallbackNote = browserSupport.isSafari && !f.webTransport
     ? `<p style="margin-top: 0.75rem; color: #a3a3a3; font-size: 0.85rem;">Safari uses WebSocket fallback for compatibility.</p>`
+    : "";
+
+  // Audio codec rows
+  const audioEncodingRows = f.audio.encoding
+    ? `<tr><td>  AAC</td><td>${bool(f.audio.encoding.aac)}</td></tr>
+       <tr><td>  Opus</td><td>${bool(f.audio.encoding.opus)}</td></tr>`
+    : "";
+  const audioDecodingRows = f.audio.decoding
+    ? `<tr><td>  AAC</td><td>${bool(f.audio.decoding.aac)}</td></tr>
+       <tr><td>  Opus</td><td>${bool(f.audio.decoding.opus)}</td></tr>`
+    : "";
+
+  // Video codec rows
+  const videoEncodingRows = f.video.encoding
+    ? `<tr><td>  H.264</td><td>${codec(f.video.encoding.h264)}</td></tr>
+       <tr><td>  H.265</td><td>${codec(f.video.encoding.h265)}</td></tr>
+       <tr><td>  VP8</td><td>${codec(f.video.encoding.vp8)}</td></tr>
+       <tr><td>  VP9</td><td>${codec(f.video.encoding.vp9)}</td></tr>
+       <tr><td>  AV1</td><td>${codec(f.video.encoding.av1)}</td></tr>`
+    : "";
+  const videoDecodingRows = f.video.decoding
+    ? `<tr><td>  H.264</td><td>${codec(f.video.decoding.h264)}</td></tr>
+       <tr><td>  H.265</td><td>${codec(f.video.decoding.h265)}</td></tr>
+       <tr><td>  VP8</td><td>${codec(f.video.decoding.vp8)}</td></tr>
+       <tr><td>  VP9</td><td>${codec(f.video.decoding.vp9)}</td></tr>
+       <tr><td>  AV1</td><td>${codec(f.video.decoding.av1)}</td></tr>`
     : "";
 
   const detailsContent = `
@@ -162,19 +319,23 @@ function updateBrowserSupportPanel() {
     <p style="margin-top: 0.75rem;"><strong>Audio</strong></p>
     <table class="latency-results">
       <tbody>
-        <tr><td>Capture (AudioWorklet)</td><td>${bool(f.audioCapture)}</td></tr>
-        <tr><td>Encoder (AudioEncoder)</td><td>${bool(f.audioEncoder)}</td></tr>
-        <tr><td>Decoder (AudioDecoder)</td><td>${bool(f.audioDecoder)}</td></tr>
-        <tr><td>Render (AudioContext)</td><td>${bool(f.audioRender)}</td></tr>
+        <tr><td>Capture</td><td>${bool(f.audio.capture)}</td></tr>
+        <tr><td>Encoding</td><td>${f.audio.encoding ? `${check} Yes` : `${cross} No`}</td></tr>
+        ${audioEncodingRows}
+        <tr><td>Decoding</td><td>${f.audio.decoding ? `${check} Yes` : `${cross} No`}</td></tr>
+        ${audioDecodingRows}
+        <tr><td>Render</td><td>${bool(f.audio.render)}</td></tr>
       </tbody>
     </table>
     <p style="margin-top: 0.75rem;"><strong>Video</strong></p>
     <table class="latency-results">
       <tbody>
-        <tr><td>Capture (MediaStreamTrackProcessor)</td><td>${capture(f.videoCapture)}</td></tr>
-        <tr><td>Encoder (VideoEncoder)</td><td>${bool(f.videoEncoder)}</td></tr>
-        <tr><td>Decoder (VideoDecoder)</td><td>${bool(f.videoDecoder)}</td></tr>
-        <tr><td>Render (OffscreenCanvas)</td><td>${bool(f.videoRender)}</td></tr>
+        <tr><td>Capture</td><td>${captureStatus(f.video.capture)}</td></tr>
+        <tr><td>Encoding</td><td>${f.video.encoding ? `${check} Yes` : `${cross} No`}</td></tr>
+        ${videoEncodingRows}
+        <tr><td>Decoding</td><td>${f.video.decoding ? `${check} Yes` : `${cross} No`}</td></tr>
+        ${videoDecodingRows}
+        <tr><td>Render</td><td>${bool(f.video.render)}</td></tr>
       </tbody>
     </table>
     ${fallbackNote}
@@ -1027,6 +1188,9 @@ async function initStreamStatsView(streamId: string) {
 
 // Initialize the app
 async function init() {
+  // Detect browser support (async for codec checks)
+  browserSupport = await detectBrowserSupport();
+
   // For Safari/polyfill mode, select the best relay server based on latency
   if (needsPolyfill) {
     const bestRelay = await selectBestFallbackRelay();
