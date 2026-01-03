@@ -126,6 +126,18 @@
         .require-auth-toggle:hover {
             color: #e5e5e5;
         }
+        .viewers-link {
+            font-weight: 600;
+            background: linear-gradient(135deg, #60a5fa 0%, #34d399 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-decoration: none;
+        }
+        .viewers-link:hover {
+            text-decoration: underline;
+            text-decoration-color: #60a5fa;
+        }
         .require-auth-toggle input[type="checkbox"] {
             width: 18px;
             height: 18px;
@@ -141,6 +153,18 @@
             font-size: 1.5rem;
             margin-bottom: 1.5rem;
             color: #e5e5e5;
+        }
+        .stats-view h2 .stream-link {
+            background: linear-gradient(135deg, #60a5fa 0%, #34d399 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-decoration: none;
+            font-family: monospace;
+        }
+        .stats-view h2 .stream-link:hover {
+            text-decoration: underline;
+            text-decoration-color: #60a5fa;
         }
         .stats-grid {
             display: grid;
@@ -607,7 +631,7 @@
                 </div>
                 <label class="require-auth-toggle">
                     <input type="checkbox" id="require-auth-checkbox">
-                    <span>Require viewers to sign in</span>
+                    <span>Require <a href="#" id="viewers-link" class="viewers-link">viewers</a> to sign in</span>
                 </label>
             </div>
 

@@ -151,3 +151,13 @@ export async function getLiveStats(): Promise<{ broadcasts: LiveBroadcast[]; vie
     return null;
   }
 }
+
+export async function getStreamViewers(streamId: string): Promise<{ stream_id: string; viewers: LiveViewer[] } | null> {
+  try {
+    const response = await fetch(`/api/stats/stream/${streamId}/viewers`);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}

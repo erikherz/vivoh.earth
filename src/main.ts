@@ -17,6 +17,7 @@ import {
   getStreamSettings,
   updateStreamSettings,
   getLiveStats,
+  getStreamViewers,
   type User,
   type LiveBroadcast,
   type LiveViewer
@@ -25,7 +26,7 @@ import {
 const RELAY_URL = "https://relay.cloudflare.mediaoverquic.com";
 const NAMESPACE_PREFIX = "vivoh.earth";
 
-type View = "broadcast" | "watch" | "stats";
+type View = "broadcast" | "watch" | "stats" | "stream-stats";
 
 // Generate a random stream ID (5 lowercase alphanumeric characters)
 function generateRandomId(): string {
@@ -64,6 +65,12 @@ async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
   // Stats view: /stats
   if (path === "/stats") {
     return { view: "stats", streamId: "" };
+  }
+
+  // Stream-specific stats view: /{streamId}/stats
+  const streamStatsMatch = path.match(/^\/([a-z0-9]{5})\/stats$/);
+  if (streamStatsMatch) {
+    return { view: "stream-stats", streamId: streamStatsMatch[1] };
   }
 
   // Watch view: /{streamId} (5 char alphanumeric)
@@ -224,6 +231,16 @@ function initBroadcastView(streamId: string, user: User | null) {
     // Save on change
     requireAuthCheckbox.addEventListener("change", () => {
       updateStreamSettings(streamId, requireAuthCheckbox.checked);
+    });
+  }
+
+  // Set viewers link to stream stats page
+  const viewersLink = document.getElementById("viewers-link") as HTMLAnchorElement;
+  if (viewersLink) {
+    viewersLink.href = `/${streamId}/stats`;
+    // Prevent link click from toggling the checkbox
+    viewersLink.addEventListener("click", (e) => {
+      e.stopPropagation();
     });
   }
 
@@ -548,6 +565,86 @@ async function initStatsView(user: User | null) {
   await renderStats();
 }
 
+// Initialize stream-specific stats view (viewers only)
+async function initStreamStatsView(streamId: string) {
+  console.log(`Vivoh.Earth Stream Stats - Stream: ${streamId}`);
+
+  // Hide broadcast and watch views
+  document.getElementById("broadcast-view")?.classList.add("hidden");
+  document.getElementById("watch-view")?.classList.add("hidden");
+
+  // Hide footer and new stream button
+  const footer = document.querySelector("footer");
+  if (footer) footer.classList.add("hidden");
+  const newStreamBtn = document.getElementById("new-stream-btn");
+  if (newStreamBtn) newStreamBtn.classList.add("hidden");
+
+  // Create stats view container
+  const container = document.querySelector(".container");
+  if (!container) return;
+
+  const statsView = document.createElement("div");
+  statsView.id = "stream-stats-view";
+  statsView.className = "stats-view";
+
+  // Show loading state
+  statsView.innerHTML = `<p>Loading viewers...</p>`;
+  container.appendChild(statsView);
+
+  // Fetch and display viewers
+  const renderViewers = async () => {
+    const data = await getStreamViewers(streamId);
+    if (!data) {
+      statsView.innerHTML = `<p class="error">Failed to load viewers</p>`;
+      return;
+    }
+
+    const formatDuration = (dateStr: string) => {
+      const start = new Date(dateStr + "Z");
+      const now = new Date();
+      const seconds = Math.floor((now.getTime() - start.getTime()) / 1000);
+      if (seconds < 60) return `${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+      const hours = Math.floor(minutes / 60);
+      return `${hours}h ${minutes % 60}m`;
+    };
+
+    const viewerRows = data.viewers.length === 0
+      ? `<tr><td colspan="2" class="empty">No active viewers</td></tr>`
+      : data.viewers.map((v: LiveViewer) => `
+          <tr>
+            <td>
+              ${v.avatar_url ? `<img src="${v.avatar_url}" class="avatar-small">` : ""}
+              ${v.user_name || v.user_email || "Anonymous"}
+            </td>
+            <td>${formatDuration(v.started_at)}</td>
+          </tr>
+        `).join("");
+
+    statsView.innerHTML = `
+      <h2>Viewers for <a href="/${streamId}" class="stream-link">${streamId}</a></h2>
+      <section class="stats-section">
+        <h3>Active Viewers (${data.viewers.length})</h3>
+        <table class="stats-table">
+          <thead>
+            <tr>
+              <th>Viewer</th>
+              <th>Watching for</th>
+            </tr>
+          </thead>
+          <tbody>${viewerRows}</tbody>
+        </table>
+      </section>
+      <button id="refresh-stream-stats" class="btn btn-primary">Refresh</button>
+    `;
+
+    document.getElementById("refresh-stream-stats")?.addEventListener("click", renderViewers);
+  };
+
+  await renderViewers();
+}
+
 // Initialize the app
 async function init() {
   const { view, streamId } = await getRouteInfo();
@@ -560,6 +657,8 @@ async function init() {
     initBroadcastView(streamId, user);
   } else if (view === "stats") {
     await initStatsView(user);
+  } else if (view === "stream-stats") {
+    await initStreamStatsView(streamId);
   } else {
     await initWatchView(streamId, user);
   }

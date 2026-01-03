@@ -64,13 +64,14 @@ export default {
       return handleApiRoutes(request, env, url);
     }
 
-    // SPA routes - serve index.html for stream ID paths and /stats
+    // SPA routes - serve index.html for stream ID paths, /stats, and /{stream}/stats
     // Stream IDs are 5 lowercase alphanumeric characters
     const pathWithoutSlash = url.pathname.slice(1);
     const isStreamId = /^[a-z0-9]{5}$/.test(pathWithoutSlash);
     const isStatsPage = url.pathname === "/stats";
+    const isStreamStatsPage = /^\/[a-z0-9]{5}\/stats$/.test(url.pathname);
 
-    if (isStreamId || isStatsPage) {
+    if (isStreamId || isStatsPage || isStreamStatsPage) {
       const indexUrl = new URL("/index.html", url.origin);
       return env.ASSETS.fetch(new Request(indexUrl.toString(), {
         method: request.method,
@@ -477,6 +478,30 @@ async function handleStatsRoutes(
 ): Promise<Response> {
   const method = request.method;
   const path = url.pathname;
+
+  // GET /api/stats/stream/:stream_id/viewers - Get viewers for a specific stream (public)
+  const streamViewersMatch = path.match(/^\/api\/stats\/stream\/([a-z0-9]{5})\/viewers$/);
+  if (method === "GET" && streamViewersMatch) {
+    const streamId = streamViewersMatch[1];
+
+    const viewers = await env.DB
+      .prepare(`
+        SELECT
+          w.id, w.stream_id, w.started_at,
+          u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url
+        FROM watch_events w
+        LEFT JOIN users u ON w.user_id = u.id
+        WHERE w.ended_at IS NULL AND w.stream_id = ?
+        ORDER BY w.started_at DESC
+      `)
+      .bind(streamId)
+      .all();
+
+    return Response.json({
+      stream_id: streamId,
+      viewers: viewers.results,
+    });
+  }
 
   // GET /api/stats/live - Get live broadcasts and viewers (requires auth)
   if (method === "GET" && path === "/api/stats/live") {
