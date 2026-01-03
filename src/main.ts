@@ -146,7 +146,7 @@ async function checkVideoDecoder(codec: string, isFirefox: boolean): Promise<Cod
 }
 
 async function detectBrowserSupport(): Promise<BrowserSupport> {
-  // Detect browser
+  // Detect browser - use consistent detection with global isSafari
   const ua = navigator.userAgent;
   let browser = "Unknown";
   const isFirefox = /firefox/i.test(ua);
@@ -156,7 +156,8 @@ async function detectBrowserSupport(): Promise<BrowserSupport> {
     browser = "Edge";
   } else if (/chrome/i.test(ua)) {
     browser = "Chrome";
-  } else if (/safari/i.test(ua)) {
+  } else if (isSafari) {
+    // Use global isSafari which has proper negative lookahead for Chrome/Android
     browser = "Safari";
   }
 
