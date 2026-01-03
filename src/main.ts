@@ -12,8 +12,9 @@ if (needsPolyfill) {
     ? "WebTransport not supported"
     : "Safari detected (using WebSocket for better compatibility)";
   console.log(`${reason}, installing WebSocket polyfill`);
-  // Install polyfill - it will use WebSocket connections instead
-  installWebTransportPolyfill();
+  // Install polyfill - use force=true for Safari since it has native WebTransport
+  // but with compatibility issues that require using WebSocket instead
+  installWebTransportPolyfill(isSafari);
 }
 
 // Safari fallback relay servers (WebSocket-enabled)

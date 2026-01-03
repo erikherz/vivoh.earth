@@ -19,8 +19,9 @@ function createPatchedWebTransport() {
 }
 
 // Install the patched polyfill
-export function install(): boolean {
-  if ("WebTransport" in globalThis) {
+// Use force=true to override native WebTransport (e.g., for Safari compatibility issues)
+export function install(force = false): boolean {
+  if (!force && "WebTransport" in globalThis) {
     return false;
   }
   // biome-ignore lint/suspicious/noExplicitAny: polyfill
