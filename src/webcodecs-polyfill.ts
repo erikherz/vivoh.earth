@@ -62,9 +62,24 @@ export async function install(): Promise<boolean> {
       document.head.appendChild(script);
     });
 
-    // Load the polyfill - it will use the LibAV we just loaded
+    // The script sets LibAVFactory - we need to create a wrapper object
+    // that the polyfill expects (with a .LibAV function)
+    // biome-ignore lint/suspicious/noExplicitAny: polyfill global
+    const LibAVFactory = (globalThis as any).LibAVFactory;
+    if (!LibAVFactory) {
+      throw new Error("LibAVFactory not found after loading script");
+    }
+
+    // Create the wrapper object the polyfill expects
+    const LibAVWrapper = {
+      base: libavBase,
+      LibAV: LibAVFactory,
+    };
+
+    // Load the polyfill with our LibAV wrapper
     await LibAVWebCodecs.load({
       polyfill: true,
+      LibAV: LibAVWrapper,
       libavOptions: {
         noworker: true, // Workers can't be loaded cross-origin
       },
