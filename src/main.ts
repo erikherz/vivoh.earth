@@ -345,7 +345,7 @@ function updateBrowserSupportPanel() {
 
 // Race requests to find the lowest-latency relay server
 async function selectBestFallbackRelay(): Promise<string> {
-  const testPath = "/announced/_latency_test_"; // Invalid prefix = empty but valid response
+  const testPath = "/fingerprint";
   const timeout = 5000; // 5 second timeout per server
 
   // Track all results for the status panel
