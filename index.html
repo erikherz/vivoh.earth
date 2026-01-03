@@ -83,14 +83,18 @@
             background: #171717;
             border: 1px solid #262626;
             border-radius: 8px;
-            padding: 1rem;
+            padding: 0.75rem 1rem;
             margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.75rem;
         }
         .stream-header {
             display: flex;
             align-items: center;
             gap: 0.5rem;
-            margin-bottom: 0.75rem;
         }
         .stream-label {
             color: #a3a3a3;
@@ -104,21 +108,37 @@
             padding: 0.25rem 0.5rem;
             border-radius: 4px;
         }
+        .copy-icon-btn {
+            background: none;
+            border: none;
+            color: #a3a3a3;
+            cursor: pointer;
+            padding: 0.25rem;
+            display: flex;
+            align-items: center;
+            border-radius: 4px;
+        }
+        .copy-icon-btn:hover {
+            color: #e5e5e5;
+            background: #262626;
+        }
+        .copy-icon-btn svg {
+            width: 16px;
+            height: 16px;
+        }
+        .copy-icon-btn.copied {
+            color: #22c55e;
+        }
 
         /* Watch view styling */
         #watch-view section {
             max-width: 900px;
             margin: 0 auto;
         }
-        .share-row {
-            display: flex;
-            gap: 0.5rem;
-        }
         .require-auth-toggle {
             display: flex;
             align-items: center;
             gap: 0.5rem;
-            margin-top: 0.75rem;
             cursor: pointer;
             font-size: 0.875rem;
             color: #a3a3a3;
@@ -637,15 +657,11 @@
                 <div class="stream-header">
                     <span class="stream-label">Stream:</span>
                     <span id="stream-id" class="stream-id">loading...</span>
-                </div>
-                <div class="share-row">
-                    <input type="text" id="share-link" class="share-input" readonly>
-                    <button id="copy-btn" class="btn">
+                    <button id="copy-btn" class="copy-icon-btn" title="Copy share link">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
                             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                         </svg>
-                        Copy
                     </button>
                 </div>
                 <label class="require-auth-toggle">
