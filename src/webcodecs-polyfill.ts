@@ -48,10 +48,21 @@ export async function install(): Promise<boolean> {
     // The WASM files are ~1.5MB and served from /vendor/libav-opus/
     // This is vendored for stability - won't break if upstream changes
     const libavBase = "/vendor/libav-opus";
+    const libavScript = "libav-6.8.8.0-opus-af.wasm.js";
+
+    // Load the LibAV script - it will set up globalThis.LibAV
     // biome-ignore lint/suspicious/noExplicitAny: polyfill global
     (globalThis as any).LibAV = { base: libavBase };
 
-    // Load the polyfill - it will use the LibAV we just set up
+    await new Promise<void>((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = `${libavBase}/${libavScript}`;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("Failed to load LibAV script"));
+      document.head.appendChild(script);
+    });
+
+    // Load the polyfill - it will use the LibAV we just loaded
     await LibAVWebCodecs.load({
       polyfill: true,
       libavOptions: {
