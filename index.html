@@ -139,10 +139,29 @@
             text-decoration-color: #60a5fa;
         }
         .require-auth-toggle input[type="checkbox"] {
-            width: 18px;
-            height: 18px;
+            appearance: none;
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            background: #a3a3a3;
             cursor: pointer;
-            accent-color: #3b82f6;
+            position: relative;
+            flex-shrink: 0;
+        }
+        .require-auth-toggle input[type="checkbox"]:checked {
+            background: #60a5fa;
+        }
+        .require-auth-toggle input[type="checkbox"]:checked::after {
+            content: '';
+            position: absolute;
+            left: 5px;
+            top: 2px;
+            width: 4px;
+            height: 8px;
+            border: solid white;
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
         }
 
         /* Stats view */
@@ -631,7 +650,7 @@
                 </div>
                 <label class="require-auth-toggle">
                     <input type="checkbox" id="require-auth-checkbox">
-                    <span>Require <a href="#" id="viewers-link" class="viewers-link">viewers</a> to sign in</span>
+                    <span><a href="#" id="viewers-link" class="viewers-link">Viewers</a> must sign in</span>
                 </label>
             </div>
 
