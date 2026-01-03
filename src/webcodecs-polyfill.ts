@@ -48,8 +48,9 @@ export async function install(): Promise<boolean> {
     // The WASM files are ~1.5MB and served from /vendor/libav-opus/
     // This is vendored for stability - won't break if upstream changes
     // Using 6.7.7 to match polyfill compatibility (6.8.x has API changes)
+    // IMPORTANT: Use the .js entry point, not .wasm.js (which lacks static methods)
     const libavBase = "/vendor/libav-opus";
-    const libavScript = "libav-6.7.7.1.1-opus-af.wasm.js";
+    const libavScript = "libav-6.7.7.1.1-opus-af.js";
 
     // Load the LibAV script - it will set up globalThis.LibAV
     // biome-ignore lint/suspicious/noExplicitAny: polyfill global
