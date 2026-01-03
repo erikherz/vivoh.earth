@@ -1,6 +1,8 @@
 // Safari WebSocket fallback - MUST install before hang components load
 // Using our patched version that handles requireUnreliable gracefully
 import { install as installWebTransportPolyfill } from "./webtransport-polyfill";
+// WebCodecs polyfill for Opus audio encoding on Safari
+import { install as installWebCodecsPolyfill } from "./webcodecs-polyfill";
 
 // Detect Safari - even Safari 17+ with WebTransport has compatibility issues with some relays
 const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
@@ -488,9 +490,13 @@ function updateServerStatusPanel() {
 let RELAY_URL = "https://relay.cloudflare.mediaoverquic.com"; // Default for Chrome/Firefox
 const NAMESPACE_PREFIX = "vivoh.earth";
 
-// Dynamic imports for hang components - MUST happen after polyfill is installed
+// Dynamic imports for hang components - MUST happen after polyfills are installed
 // ES module static imports are hoisted and execute before any code runs
 const loadHangComponents = async () => {
+  // Install WebCodecs polyfill for Opus audio encoding (Safari)
+  // This must complete before hang components try to use AudioEncoder
+  await installWebCodecsPolyfill();
+
   await import("@kixelated/hang/publish/element");
   await import("@kixelated/hang/watch/element");
 };
