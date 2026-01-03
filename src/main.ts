@@ -19,6 +19,21 @@ if (needsPolyfill) {
   installWebTransportPolyfill(isSafari);
 }
 
+// Safari audio track fix - Safari doesn't return channelCount in getSettings()
+// which causes the hang library to fail with "expected number" error
+if (isSafari) {
+  const originalGetSettings = MediaStreamTrack.prototype.getSettings;
+  MediaStreamTrack.prototype.getSettings = function () {
+    const settings = originalGetSettings.call(this);
+    // Add default channelCount for audio tracks if missing
+    if (this.kind === "audio" && settings.channelCount === undefined) {
+      settings.channelCount = 1; // Mono default, Safari typically captures mono
+    }
+    return settings;
+  };
+  console.log("Safari: Patched MediaStreamTrack.getSettings for channelCount");
+}
+
 // Safari fallback relay servers (WebSocket-enabled)
 const FALLBACK_RELAYS = [
   "us-central.vivoh.earth",
