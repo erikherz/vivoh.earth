@@ -488,10 +488,10 @@
         .server-panel.hidden {
             display: none;
         }
-        .server-link {
-            display: inline-flex;
+        .server-status-summary {
+            display: flex;
             align-items: center;
-            gap: 0.4rem;
+            gap: 0.5rem;
         }
         .status-indicator {
             width: 8px;
@@ -507,9 +507,27 @@
             background: #ef4444;
             box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
         }
-        #server-name {
+        .server-panel .details-btn {
+            background: none;
+            border: 1px solid #404040;
             color: #a3a3a3;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
             font-size: 0.8rem;
+            margin-left: auto;
+        }
+        .server-panel .details-btn:hover {
+            background: #262626;
+            color: #e5e5e5;
+        }
+        .server-details {
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid #262626;
+        }
+        .server-details.hidden {
+            display: none;
         }
         .server-details p {
             margin-bottom: 0.5rem;
@@ -779,7 +797,7 @@
         </div>
 
         <footer>
-            <p><a href="https://moq.dev/" target="_blank" rel="noopener">MoQ</a> | <a href="https://blog.cloudflare.com/moq/" target="_blank" rel="noopener">Cloudflare</a> | <a href="#" id="support-link">Browser Support</a> | <a href="#" id="server-link" class="server-link"><span id="server-status-indicator" class="status-indicator disconnected"></span> <span id="server-name">connecting...</span></a></p>
+            <p><a href="https://moq.dev/" target="_blank" rel="noopener">MoQ</a> | <a href="https://blog.cloudflare.com/moq/" target="_blank" rel="noopener">Cloudflare</a> | <a href="#" id="support-link">Browser Support</a> | <a href="#" id="server-link">Server Status</a></p>
             <div id="support-panel" class="support-panel hidden">
                 <hang-support></hang-support>
             </div>

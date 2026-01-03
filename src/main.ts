@@ -120,59 +120,68 @@ async function selectBestFallbackRelay(): Promise<string> {
 
 // Update the server status panel UI
 function updateServerStatusPanel() {
-  const statusIndicator = document.getElementById("server-status-indicator");
-  const serverName = document.getElementById("server-name");
   const serverPanel = document.getElementById("server-panel");
+  if (!serverPanel) return;
 
-  if (statusIndicator) {
-    statusIndicator.className = `status-indicator ${serverStatus.connected ? "connected" : "disconnected"}`;
-  }
+  const statusClass = serverStatus.connected ? "connected" : "disconnected";
+  const statusText = serverStatus.connected ? "Connected" : "Disconnected";
+  const modeLabel = serverStatus.mode === "websocket" ? "WebSocket (Safari fallback)" : "WebTransport (native)";
 
-  if (serverName) {
-    serverName.textContent = serverStatus.selectedServer;
-  }
+  // Build details HTML
+  let detailsContent = `
+    <p><strong>Mode:</strong> ${modeLabel}</p>
+    <p><strong>Server:</strong> ${serverStatus.selectedServer}</p>
+  `;
 
-  if (serverPanel) {
-    const modeLabel = serverStatus.mode === "websocket" ? "WebSocket (Safari fallback)" : "WebTransport (native)";
-
-    let detailsHtml = `
-      <div class="server-details">
-        <p><strong>Mode:</strong> ${modeLabel}</p>
-        <p><strong>Server:</strong> ${serverStatus.selectedServer}</p>
-        <p><strong>Status:</strong> ${serverStatus.connected ? "Connected" : "Disconnected"}</p>
+  if (serverStatus.mode === "websocket" && serverStatus.raceResults.length > 0) {
+    detailsContent += `
+      <p><strong>Latency Test Results:</strong></p>
+      <table class="latency-results">
+        <thead><tr><th>Server</th><th>Latency</th></tr></thead>
+        <tbody>
     `;
 
-    if (serverStatus.mode === "websocket" && serverStatus.raceResults.length > 0) {
-      detailsHtml += `
-        <p><strong>Latency Test Results:</strong></p>
-        <table class="latency-results">
-          <thead><tr><th>Server</th><th>Latency</th></tr></thead>
-          <tbody>
-      `;
+    // Sort by latency (successful first, then failed)
+    const sorted = [...serverStatus.raceResults].sort((a, b) => {
+      if (a.latency === null && b.latency === null) return 0;
+      if (a.latency === null) return 1;
+      if (b.latency === null) return -1;
+      return a.latency - b.latency;
+    });
 
-      // Sort by latency (successful first, then failed)
-      const sorted = [...serverStatus.raceResults].sort((a, b) => {
-        if (a.latency === null && b.latency === null) return 0;
-        if (a.latency === null) return 1;
-        if (b.latency === null) return -1;
-        return a.latency - b.latency;
-      });
-
-      for (const result of sorted) {
-        const isSelected = result.domain === serverStatus.selectedServer;
-        const latencyText = result.latency !== null
-          ? `${result.latency.toFixed(0)}ms`
-          : `Failed: ${result.error || "timeout"}`;
-        const rowClass = isSelected ? "selected" : (result.latency === null ? "failed" : "");
-        detailsHtml += `<tr class="${rowClass}"><td>${result.domain}</td><td>${latencyText}</td></tr>`;
-      }
-
-      detailsHtml += `</tbody></table>`;
+    for (const result of sorted) {
+      const isSelected = result.domain === serverStatus.selectedServer;
+      const latencyText = result.latency !== null
+        ? `${result.latency.toFixed(0)}ms`
+        : `Failed: ${result.error || "timeout"}`;
+      const rowClass = isSelected ? "selected" : (result.latency === null ? "failed" : "");
+      detailsContent += `<tr class="${rowClass}"><td>${result.domain}</td><td>${latencyText}</td></tr>`;
     }
 
-    detailsHtml += `</div>`;
-    serverPanel.innerHTML = detailsHtml;
+    detailsContent += `</tbody></table>`;
   }
+
+  serverPanel.innerHTML = `
+    <div class="server-status-summary">
+      <span class="status-indicator ${statusClass}"></span>
+      <span>${statusText}: ${serverStatus.selectedServer}</span>
+      <button class="details-btn" id="server-details-btn">Details</button>
+    </div>
+    <div class="server-details hidden" id="server-details-content">
+      ${detailsContent}
+    </div>
+  `;
+
+  // Add details toggle handler
+  document.getElementById("server-details-btn")?.addEventListener("click", () => {
+    const details = document.getElementById("server-details-content");
+    const btn = document.getElementById("server-details-btn");
+    if (details && btn) {
+      const isHidden = details.classList.contains("hidden");
+      details.classList.toggle("hidden");
+      btn.textContent = isHidden ? "Hide" : "Details";
+    }
+  });
 }
 
 // Relay URL - set dynamically for Safari fallback, static for native WebTransport
