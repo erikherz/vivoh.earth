@@ -501,9 +501,8 @@ function updateServerStatusPanel() {
   });
 }
 
-// Relay URL - all browsers use our relay servers for consistency
-// This ensures the relay knows about all streams (for cross-browser playback)
-let RELAY_URL = "https://us-central.vivoh.earth"; // Default, updated by latency test
+// Relay URL - set dynamically for Safari fallback, static for native WebTransport
+let RELAY_URL = "https://relay.cloudflare.mediaoverquic.com"; // Default for Chrome/Firefox
 const NAMESPACE_PREFIX = "vivoh.earth";
 
 // Dynamic imports for hang components - MUST happen after polyfills are installed
@@ -1193,10 +1192,14 @@ async function init() {
   // Detect browser support (async for codec checks)
   browserSupport = await detectBrowserSupport();
 
-  // Select the best relay server based on latency (for all browsers)
-  // This ensures all clients use the same relay, enabling cross-browser playback
-  const bestRelay = await selectBestFallbackRelay();
-  RELAY_URL = `https://${bestRelay}`;
+  // For Safari/polyfill mode, select the best relay server based on latency
+  if (needsPolyfill) {
+    const bestRelay = await selectBestFallbackRelay();
+    RELAY_URL = `https://${bestRelay}`;
+  } else {
+    // WebTransport mode - assume connected
+    serverStatus.connected = true;
+  }
 
   // Update status panels
   updateBrowserSupportPanel();
