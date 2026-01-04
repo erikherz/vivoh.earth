@@ -538,7 +538,7 @@ import {
   type LiveViewer
 } from "./auth";
 
-type View = "broadcast" | "watch" | "stats" | "stream-stats";
+type View = "broadcast" | "watch" | "stats" | "stats-map" | "stream-stats" | "stream-stats-map";
 
 // Generate a random stream ID (5 lowercase alphanumeric characters)
 function generateRandomId(): string {
@@ -574,9 +574,20 @@ function isValidStreamId(str: string): boolean {
 async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
   const path = window.location.pathname;
 
+  // Stats map view: /stats/map
+  if (path === "/stats/map") {
+    return { view: "stats-map", streamId: "" };
+  }
+
   // Stats view: /stats
   if (path === "/stats") {
     return { view: "stats", streamId: "" };
+  }
+
+  // Stream-specific stats map view: /{streamId}/stats/map
+  const streamStatsMapMatch = path.match(/^\/([a-z0-9]{5})\/stats\/map$/);
+  if (streamStatsMapMatch) {
+    return { view: "stream-stats-map", streamId: streamStatsMapMatch[1] };
   }
 
   // Stream-specific stats view: /{streamId}/stats
@@ -1290,6 +1301,208 @@ async function initStreamStatsView(streamId: string) {
   await renderViewers();
 }
 
+// Initialize stats map view (all viewers on a map)
+async function initStatsMapView(user: User | null) {
+  console.log("Vivoh.Earth Stats Map");
+
+  // Hide broadcast and watch views
+  document.getElementById("broadcast-view")?.classList.add("hidden");
+  document.getElementById("watch-view")?.classList.add("hidden");
+
+  // Hide footer and new stream button
+  const footer = document.querySelector("footer");
+  if (footer) footer.classList.add("hidden");
+  const newStreamBtn = document.getElementById("new-stream-btn");
+  if (newStreamBtn) newStreamBtn.classList.add("hidden");
+
+  // Create map view container
+  const container = document.querySelector(".container");
+  if (!container) return;
+
+  const mapView = document.createElement("div");
+  mapView.id = "stats-map-view";
+  mapView.className = "stats-view";
+
+  // Check if logged in
+  if (!user) {
+    mapView.innerHTML = `
+      <div class="stats-login-required">
+        <h2>Sign in Required</h2>
+        <p>Please sign in to view the live map.</p>
+        <div class="auth-buttons">
+          <button id="map-login-google" class="btn btn-google">Google</button>
+          <button id="map-login-microsoft" class="btn btn-microsoft">Microsoft</button>
+          <button id="map-login-discord" class="btn btn-discord">Discord</button>
+        </div>
+      </div>
+    `;
+    container.appendChild(mapView);
+    document.getElementById("map-login-google")?.addEventListener("click", loginWithGoogle);
+    document.getElementById("map-login-microsoft")?.addEventListener("click", loginWithMicrosoft);
+    document.getElementById("map-login-discord")?.addEventListener("click", loginWithDiscord);
+    return;
+  }
+
+  mapView.innerHTML = `
+    <h2>Live Viewer Map</h2>
+    <p><a href="/stats">&larr; Back to Stats</a></p>
+    <div id="leaflet-map" style="height: 500px; border-radius: 8px; margin-top: 1rem;"></div>
+    <button id="refresh-map" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
+  `;
+  container.appendChild(mapView);
+
+  const renderMap = async () => {
+    const stats = await getLiveStats();
+    if (!stats) return;
+
+    const mapEl = document.getElementById("leaflet-map");
+    if (!mapEl) return;
+
+    // Clear existing map
+    mapEl.innerHTML = "";
+
+    // @ts-expect-error Leaflet loaded from CDN
+    const map = L.map("leaflet-map").setView([20, 0], 2);
+
+    // @ts-expect-error Leaflet loaded from CDN
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
+
+    // Add viewer markers (blue)
+    stats.viewers.forEach((v: LiveViewer) => {
+      if (v.geo_latitude && v.geo_longitude) {
+        const lat = parseFloat(v.geo_latitude);
+        const lng = parseFloat(v.geo_longitude);
+        const name = v.user_name || v.user_email || "Anonymous";
+        const location = [v.geo_city, v.geo_region, v.geo_country].filter(Boolean).join(", ");
+        // @ts-expect-error Leaflet loaded from CDN
+        L.marker([lat, lng], {
+          // @ts-expect-error Leaflet loaded from CDN
+          icon: L.divIcon({
+            className: "viewer-marker",
+            html: `<div style="background: #3b82f6; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>`,
+            iconSize: [12, 12],
+            iconAnchor: [6, 6]
+          })
+        })
+          .addTo(map)
+          .bindPopup(`<strong>${name}</strong><br>Watching: ${v.stream_id}<br>${location}`);
+      }
+    });
+
+    // Add broadcaster markers (red)
+    stats.broadcasts.forEach((b: LiveBroadcast) => {
+      if (b.geo_latitude && b.geo_longitude) {
+        const lat = parseFloat(b.geo_latitude);
+        const lng = parseFloat(b.geo_longitude);
+        const name = b.user_name || b.user_email;
+        const location = [b.geo_city, b.geo_region, b.geo_country].filter(Boolean).join(", ");
+        // @ts-expect-error Leaflet loaded from CDN
+        L.marker([lat, lng], {
+          // @ts-expect-error Leaflet loaded from CDN
+          icon: L.divIcon({
+            className: "broadcaster-marker",
+            html: `<div style="background: #ef4444; width: 16px; height: 16px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>`,
+            iconSize: [16, 16],
+            iconAnchor: [8, 8]
+          })
+        })
+          .addTo(map)
+          .bindPopup(`<strong>${name}</strong> (Broadcaster)<br>Stream: ${b.stream_id}<br>${location}`);
+      }
+    });
+  };
+
+  await renderMap();
+  document.getElementById("refresh-map")?.addEventListener("click", renderMap);
+}
+
+// Initialize stream-specific stats map view (viewers for one stream on a map)
+async function initStreamStatsMapView(streamId: string) {
+  console.log(`Vivoh.Earth Stream Stats Map - Stream: ${streamId}`);
+
+  // Hide broadcast and watch views
+  document.getElementById("broadcast-view")?.classList.add("hidden");
+  document.getElementById("watch-view")?.classList.add("hidden");
+
+  // Hide footer and new stream button
+  const footer = document.querySelector("footer");
+  if (footer) footer.classList.add("hidden");
+  const newStreamBtn = document.getElementById("new-stream-btn");
+  if (newStreamBtn) newStreamBtn.classList.add("hidden");
+
+  // Create map view container
+  const container = document.querySelector(".container");
+  if (!container) return;
+
+  const mapView = document.createElement("div");
+  mapView.id = "stream-stats-map-view";
+  mapView.className = "stats-view";
+
+  mapView.innerHTML = `
+    <h2>Viewer Map for <a href="/${streamId}" class="stream-link">${streamId}</a></h2>
+    <p><a href="/${streamId}/stats">&larr; Back to Viewers</a></p>
+    <div id="leaflet-map" style="height: 500px; border-radius: 8px; margin-top: 1rem;"></div>
+    <button id="refresh-stream-map" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
+  `;
+  container.appendChild(mapView);
+
+  const renderMap = async () => {
+    const data = await getStreamViewers(streamId);
+    if (!data) return;
+
+    const mapEl = document.getElementById("leaflet-map");
+    if (!mapEl) return;
+
+    // Clear existing map
+    mapEl.innerHTML = "";
+
+    // @ts-expect-error Leaflet loaded from CDN
+    const map = L.map("leaflet-map").setView([20, 0], 2);
+
+    // @ts-expect-error Leaflet loaded from CDN
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
+
+    // Add viewer markers
+    data.viewers.forEach((v: LiveViewer) => {
+      if (v.geo_latitude && v.geo_longitude) {
+        const lat = parseFloat(v.geo_latitude);
+        const lng = parseFloat(v.geo_longitude);
+        const name = v.user_name || v.user_email || "Anonymous";
+        const location = [v.geo_city, v.geo_region, v.geo_country].filter(Boolean).join(", ");
+        // @ts-expect-error Leaflet loaded from CDN
+        L.marker([lat, lng], {
+          // @ts-expect-error Leaflet loaded from CDN
+          icon: L.divIcon({
+            className: "viewer-marker",
+            html: `<div style="background: #3b82f6; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>`,
+            iconSize: [12, 12],
+            iconAnchor: [6, 6]
+          })
+        })
+          .addTo(map)
+          .bindPopup(`<strong>${name}</strong><br>${location}`);
+      }
+    });
+
+    // Fit bounds if there are markers
+    const viewersWithGeo = data.viewers.filter((v: LiveViewer) => v.geo_latitude && v.geo_longitude);
+    if (viewersWithGeo.length > 0) {
+      // @ts-expect-error Leaflet loaded from CDN
+      const bounds = L.latLngBounds(
+        viewersWithGeo.map((v: LiveViewer) => [parseFloat(v.geo_latitude!), parseFloat(v.geo_longitude!)])
+      );
+      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 10 });
+    }
+  };
+
+  await renderMap();
+  document.getElementById("refresh-stream-map")?.addEventListener("click", renderMap);
+}
+
 // Initialize the app
 async function init() {
   // Detect browser support (async for codec checks)
@@ -1321,8 +1534,12 @@ async function init() {
     initBroadcastView(streamId, user);
   } else if (view === "stats") {
     await initStatsView(user);
+  } else if (view === "stats-map") {
+    await initStatsMapView(user);
   } else if (view === "stream-stats") {
     await initStreamStatsView(streamId);
+  } else if (view === "stream-stats-map") {
+    await initStreamStatsMapView(streamId);
   } else {
     await initWatchView(streamId, user);
   }

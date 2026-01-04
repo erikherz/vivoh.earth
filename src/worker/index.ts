@@ -69,9 +69,11 @@ export default {
     const pathWithoutSlash = url.pathname.slice(1);
     const isStreamId = /^[a-z0-9]{5}$/.test(pathWithoutSlash);
     const isStatsPage = url.pathname === "/stats";
+    const isStatsMapPage = url.pathname === "/stats/map";
     const isStreamStatsPage = /^\/[a-z0-9]{5}\/stats$/.test(url.pathname);
+    const isStreamStatsMapPage = /^\/[a-z0-9]{5}\/stats\/map$/.test(url.pathname);
 
-    if (isStreamId || isStatsPage || isStreamStatsPage) {
+    if (isStreamId || isStatsPage || isStatsMapPage || isStreamStatsPage || isStreamStatsMapPage) {
       const indexUrl = new URL("/index.html", url.origin);
       return env.ASSETS.fetch(new Request(indexUrl.toString(), {
         method: request.method,
