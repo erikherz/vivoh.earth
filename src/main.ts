@@ -1514,7 +1514,7 @@ async function initStreamStatsMapView(streamId: string) {
       const bounds = L.latLngBounds(
         viewersWithGeo.map((v: LiveViewer) => [parseFloat(v.geo_latitude!), parseFloat(v.geo_longitude!)])
       );
-      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 10 });
+      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 4 });
     }
   };
 
