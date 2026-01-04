@@ -1276,7 +1276,13 @@ async function initStreamStatsView(streamId: string) {
 
     statsView.innerHTML = `
       <h2>Viewers for <a href="/${streamId}" class="stream-link">${streamId}</a></h2>
-      <p><a href="/${streamId}/stats/map">View Map &rarr;</a></p>
+      <p><a href="/${streamId}/stats/map" class="view-toggle" title="View Map">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20">
+          <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/>
+          <line x1="8" y1="2" x2="8" y2="18"/>
+          <line x1="16" y1="6" x2="16" y2="22"/>
+        </svg>
+      </a></p>
       <section class="stats-section">
         <h3>Active Viewers (${data.viewers.length})</h3>
         <table class="stats-table">
@@ -1448,7 +1454,14 @@ async function initStreamStatsMapView(streamId: string) {
 
   mapView.innerHTML = `
     <h2>Viewer Map for <a href="/${streamId}" class="stream-link">${streamId}</a></h2>
-    <p><a href="/${streamId}/stats">&larr; View Table</a></p>
+    <p><a href="/${streamId}/stats" class="view-toggle" title="View Table">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+        <line x1="3" y1="9" x2="21" y2="9"/>
+        <line x1="3" y1="15" x2="21" y2="15"/>
+        <line x1="9" y1="3" x2="9" y2="21"/>
+      </svg>
+    </a></p>
     <div id="leaflet-map" style="height: 500px; border-radius: 8px; margin-top: 1rem;"></div>
     <button id="refresh-stream-map" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
   `;
