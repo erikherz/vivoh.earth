@@ -518,6 +518,7 @@ const loadHangComponents = async () => {
 
 import {
   getCurrentUser,
+  countryToFlag,
   loginWithGoogle,
   loginWithMicrosoft,
   loginWithDiscord,
@@ -532,6 +533,7 @@ import {
   getLiveStats,
   getStreamViewers,
   type User,
+  type Geo,
   type LiveBroadcast,
   type LiveViewer
 } from "./auth";
@@ -604,7 +606,7 @@ async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
 }
 
 // Update the auth UI based on login state
-function updateAuthUI(user: User | null) {
+function updateAuthUI(user: User | null, geo: Geo | null) {
   const authContainer = document.getElementById("auth-container");
   const newStreamBtn = document.getElementById("new-stream-btn");
 
@@ -625,10 +627,26 @@ function updateAuthUI(user: User | null) {
     ? `<img src="${user.avatar_url}" alt="${user.name}" class="avatar">`
     : `<div class="avatar avatar-placeholder">${user.name.charAt(0).toUpperCase()}</div>`;
 
+  const flag = countryToFlag(geo?.country ?? null);
+  const hasCoords = geo?.latitude && geo?.longitude;
+
+  // Build location tooltip content
+  const locationParts: string[] = [];
+  if (geo?.city) locationParts.push(geo.city);
+  if (geo?.region) locationParts.push(geo.region);
+  if (geo?.postalCode) locationParts.push(geo.postalCode);
+  if (geo?.country) locationParts.push(geo.country);
+
+  let flagHtml = "";
+  if (flag) {
+    const clickable = hasCoords ? "clickable" : "";
+    flagHtml = `<span class="user-flag ${clickable}" id="user-flag">${flag}</span>`;
+  }
+
   authContainer.innerHTML = `
     <div class="user-info">
       ${avatarHtml}
-      <span class="user-name">${user.name}</span>
+      <span class="user-name">${user.name}</span>${flagHtml}
       <button id="logout-btn" class="btn btn-icon" title="Sign Out">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -637,8 +655,41 @@ function updateAuthUI(user: User | null) {
         </svg>
       </button>
     </div>
+    ${flag ? `<div class="geo-tooltip" id="geo-tooltip">
+      <div class="geo-tooltip-content">
+        ${geo?.city ? `<div class="geo-row"><span class="geo-label">City</span><span class="geo-value">${geo.city}</span></div>` : ""}
+        ${geo?.region ? `<div class="geo-row"><span class="geo-label">Region</span><span class="geo-value">${geo.region}</span></div>` : ""}
+        ${geo?.postalCode ? `<div class="geo-row"><span class="geo-label">Postal</span><span class="geo-value">${geo.postalCode}</span></div>` : ""}
+        ${geo?.country ? `<div class="geo-row"><span class="geo-label">Country</span><span class="geo-value">${geo.country}</span></div>` : ""}
+        ${geo?.continent ? `<div class="geo-row"><span class="geo-label">Continent</span><span class="geo-value">${geo.continent}</span></div>` : ""}
+        ${geo?.timezone ? `<div class="geo-row"><span class="geo-label">Timezone</span><span class="geo-value">${geo.timezone}</span></div>` : ""}
+        ${hasCoords ? `<div class="geo-row"><span class="geo-label">Coords</span><span class="geo-value">${geo.latitude}, ${geo.longitude}</span></div>` : ""}
+        ${hasCoords ? `<div class="geo-action">Click flag to open in Google Maps</div>` : ""}
+      </div>
+    </div>` : ""}
   `;
+
   document.getElementById("logout-btn")?.addEventListener("click", logout);
+
+  // Flag hover and click handlers
+  const flagEl = document.getElementById("user-flag");
+  const tooltipEl = document.getElementById("geo-tooltip");
+
+  if (flagEl && tooltipEl) {
+    flagEl.addEventListener("mouseenter", () => {
+      tooltipEl.classList.add("visible");
+    });
+    flagEl.addEventListener("mouseleave", () => {
+      tooltipEl.classList.remove("visible");
+    });
+
+    if (hasCoords) {
+      flagEl.addEventListener("click", () => {
+        const mapsUrl = `https://www.google.com/maps?q=${geo.latitude},${geo.longitude}`;
+        window.open(mapsUrl, "_blank");
+      });
+    }
+  }
 }
 
 // Show login required overlay for broadcast
@@ -1211,8 +1262,8 @@ async function init() {
   const { view, streamId } = await getRouteInfo();
 
   // Get user first (needed for broadcast auth check)
-  const user = await getCurrentUser();
-  updateAuthUI(user);
+  const { user, geo } = await getCurrentUser();
+  updateAuthUI(user, geo);
 
   if (view === "broadcast") {
     initBroadcastView(streamId, user);

@@ -7,16 +7,38 @@ export interface User {
   avatar_url: string;
 }
 
+export interface Geo {
+  country: string | null;
+  city: string | null;
+  region: string | null;
+  postalCode: string | null;
+  latitude: string | null;
+  longitude: string | null;
+  timezone: string | null;
+  continent: string | null;
+}
+
 export type Provider = "google" | "microsoft" | "discord";
 
-export async function getCurrentUser(): Promise<User | null> {
+export async function getCurrentUser(): Promise<{ user: User | null; geo: Geo | null }> {
   try {
     const response = await fetch("/api/auth/me");
     const data = await response.json();
-    return data.user;
+    return { user: data.user, geo: data.geo };
   } catch {
-    return null;
+    return { user: null, geo: null };
   }
+}
+
+// Convert ISO 3166-1 Alpha 2 country code to flag emoji
+export function countryToFlag(countryCode: string | null): string {
+  if (!countryCode || countryCode.length !== 2) return "";
+  // Regional indicator symbols: A=🇦 (U+1F1E6), B=🇧 (U+1F1E7), etc.
+  const codePoints = countryCode
+    .toUpperCase()
+    .split("")
+    .map((char) => 0x1f1e6 + char.charCodeAt(0) - 65);
+  return String.fromCodePoint(...codePoints);
 }
 
 // Generic login - defaults to Google for backwards compatibility

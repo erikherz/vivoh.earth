@@ -29,6 +29,8 @@
             display: flex;
             align-items: center;
             gap: 0.75rem;
+            text-decoration: none;
+            cursor: pointer;
         }
         .logo-icon {
             width: 42px;
@@ -390,6 +392,64 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        .user-flag {
+            font-size: 1.25rem;
+            line-height: 1;
+            cursor: default;
+        }
+        .user-flag.clickable {
+            cursor: pointer;
+            transition: transform 0.15s ease;
+        }
+        .user-flag.clickable:hover {
+            transform: scale(1.2);
+        }
+        .geo-tooltip {
+            position: absolute;
+            top: 100%;
+            right: 0;
+            margin-top: 0.5rem;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s ease, visibility 0.2s ease;
+            z-index: 1000;
+        }
+        .geo-tooltip.visible {
+            opacity: 1;
+            visibility: visible;
+        }
+        .geo-tooltip-content {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 0.75rem;
+            min-width: 200px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        }
+        .geo-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.25rem 0;
+            font-size: 0.8rem;
+        }
+        .geo-label {
+            color: #888;
+        }
+        .geo-value {
+            color: #e5e5e5;
+            font-weight: 500;
+        }
+        .geo-action {
+            margin-top: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid #333;
+            font-size: 0.75rem;
+            color: #3b82f6;
+            text-align: center;
+        }
+        #auth-container {
+            position: relative;
+        }
         /* Auth buttons container */
         .auth-buttons {
             display: flex;
@@ -735,7 +795,7 @@
 <body>
     <div class="container">
         <header>
-            <div class="logo">
+            <a href="/" class="logo">
                 <svg class="logo-icon" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <!-- Ocean base -->
                     <circle cx="50" cy="50" r="48" fill="url(#oceanGradient)"/>
@@ -765,7 +825,7 @@
                     </defs>
                 </svg>
                 <h1>vivoh<span class="dot">.</span>earth</h1>
-            </div>
+            </a>
             <div class="header-right">
                 <div id="auth-container"></div>
                 <button id="new-stream-btn" class="btn btn-icon btn-primary hidden" title="New Stream">
