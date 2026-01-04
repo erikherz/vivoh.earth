@@ -502,7 +502,8 @@ async function handleStatsRoutes(
       .prepare(`
         SELECT
           w.id, w.stream_id, w.started_at,
-          u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url
+          u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url,
+          w.geo_country, w.geo_city, w.geo_region, w.geo_latitude, w.geo_longitude, w.geo_timezone
         FROM watch_events w
         LEFT JOIN users u ON w.user_id = u.id
         WHERE w.ended_at IS NULL AND w.stream_id = ?
@@ -529,7 +530,8 @@ async function handleStatsRoutes(
       .prepare(`
         SELECT
           b.id, b.stream_id, b.started_at,
-          u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url
+          u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url,
+          b.geo_country, b.geo_city, b.geo_region, b.geo_latitude, b.geo_longitude, b.geo_timezone
         FROM broadcast_events b
         JOIN users u ON b.user_id = u.id
         WHERE b.ended_at IS NULL
@@ -542,7 +544,8 @@ async function handleStatsRoutes(
       .prepare(`
         SELECT
           w.id, w.stream_id, w.started_at,
-          u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url
+          u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url,
+          w.geo_country, w.geo_city, w.geo_region, w.geo_latitude, w.geo_longitude, w.geo_timezone
         FROM watch_events w
         LEFT JOIN users u ON w.user_id = u.id
         WHERE w.ended_at IS NULL
@@ -568,9 +571,14 @@ async function handleStatsRoutes(
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
 
+    const geo = getGeoFromRequest(request);
     const result = await env.DB
-      .prepare("INSERT INTO broadcast_events (user_id, stream_id) VALUES (?, ?) RETURNING id")
-      .bind(user.id, body.stream_id)
+      .prepare(`
+        INSERT INTO broadcast_events (user_id, stream_id, geo_country, geo_city, geo_region, geo_latitude, geo_longitude, geo_timezone)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+      `)
+      .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone)
       .first<{ id: number }>();
 
     return Response.json({ id: result?.id, stream_id: body.stream_id });
@@ -597,9 +605,14 @@ async function handleStatsRoutes(
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
 
+    const geo = getGeoFromRequest(request);
     const result = await env.DB
-      .prepare("INSERT INTO watch_events (user_id, stream_id) VALUES (?, ?) RETURNING id")
-      .bind(user?.id ?? null, body.stream_id)
+      .prepare(`
+        INSERT INTO watch_events (user_id, stream_id, geo_country, geo_city, geo_region, geo_latitude, geo_longitude, geo_timezone)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id
+      `)
+      .bind(user?.id ?? null, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone)
       .first<{ id: number }>();
 
     return Response.json({ id: result?.id, stream_id: body.stream_id });
@@ -631,4 +644,26 @@ async function getAuthenticatedUser(request: Request, env: Env): Promise<User | 
   if (!session) return null;
 
   return getUserById(env.DB, session.userId);
+}
+
+// Helper to extract geolocation from Cloudflare request
+interface GeoData {
+  country: string | null;
+  city: string | null;
+  region: string | null;
+  latitude: string | null;
+  longitude: string | null;
+  timezone: string | null;
+}
+
+function getGeoFromRequest(request: Request): GeoData {
+  const cf = (request as Request & { cf?: IncomingRequestCfProperties }).cf;
+  return {
+    country: cf?.country || null,
+    city: cf?.city || null,
+    region: cf?.region || null,
+    latitude: cf?.latitude?.toString() || null,
+    longitude: cf?.longitude?.toString() || null,
+    timezone: cf?.timezone || null,
+  };
 }

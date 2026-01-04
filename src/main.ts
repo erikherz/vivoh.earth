@@ -1091,8 +1091,23 @@ async function initStatsView(user: User | null) {
       return `${hours}h ${minutes % 60}m`;
     };
 
+    const renderGeoFlag = (geo: { geo_country: string | null; geo_city: string | null; geo_region: string | null; geo_latitude: string | null; geo_longitude: string | null; geo_timezone: string | null }, id: string) => {
+      const flag = countryToFlag(geo.geo_country);
+      if (!flag) return "";
+      const hasCoords = geo.geo_latitude && geo.geo_longitude;
+      const mapsUrl = hasCoords ? `https://www.google.com/maps?q=${geo.geo_latitude},${geo.geo_longitude}` : null;
+      const tooltip = [
+        geo.geo_city,
+        geo.geo_region,
+        geo.geo_country,
+        geo.geo_timezone,
+        hasCoords ? `${geo.geo_latitude}, ${geo.geo_longitude}` : null
+      ].filter(Boolean).join(" | ");
+      return `<span class="stats-flag ${hasCoords ? 'clickable' : ''}" data-id="${id}" data-url="${mapsUrl || ''}" title="${tooltip}">${flag}</span>`;
+    };
+
     const broadcastRows = stats.broadcasts.length === 0
-      ? `<tr><td colspan="4" class="empty">No active broadcasts</td></tr>`
+      ? `<tr><td colspan="5" class="empty">No active broadcasts</td></tr>`
       : stats.broadcasts.map((b: LiveBroadcast) => `
           <tr>
             <td><a href="/${b.stream_id}" target="_blank">${b.stream_id}</a></td>
@@ -1100,13 +1115,14 @@ async function initStatsView(user: User | null) {
               ${b.avatar_url ? `<img src="${b.avatar_url}" class="avatar-small">` : ""}
               ${b.user_name || b.user_email}
             </td>
+            <td>${renderGeoFlag(b, `b-${b.id}`)}</td>
             <td>${formatDuration(b.started_at)}</td>
             <td>${stats.viewers.filter((v: LiveViewer) => v.stream_id === b.stream_id).length}</td>
           </tr>
         `).join("");
 
     const viewerRows = stats.viewers.length === 0
-      ? `<tr><td colspan="3" class="empty">No active viewers</td></tr>`
+      ? `<tr><td colspan="4" class="empty">No active viewers</td></tr>`
       : stats.viewers.map((v: LiveViewer) => `
           <tr>
             <td><a href="/${v.stream_id}" target="_blank">${v.stream_id}</a></td>
@@ -1114,6 +1130,7 @@ async function initStatsView(user: User | null) {
               ${v.avatar_url ? `<img src="${v.avatar_url}" class="avatar-small">` : ""}
               ${v.user_name || v.user_email || "Anonymous"}
             </td>
+            <td>${renderGeoFlag(v, `v-${v.id}`)}</td>
             <td>${formatDuration(v.started_at)}</td>
           </tr>
         `).join("");
@@ -1128,6 +1145,7 @@ async function initStatsView(user: User | null) {
               <tr>
                 <th>Stream</th>
                 <th>Broadcaster</th>
+                <th>Location</th>
                 <th>Duration</th>
                 <th>Viewers</th>
               </tr>
@@ -1142,6 +1160,7 @@ async function initStatsView(user: User | null) {
               <tr>
                 <th>Stream</th>
                 <th>Viewer</th>
+                <th>Location</th>
                 <th>Duration</th>
               </tr>
             </thead>
@@ -1151,6 +1170,14 @@ async function initStatsView(user: User | null) {
       </div>
       <button id="refresh-stats" class="btn btn-primary">Refresh</button>
     `;
+
+    // Add click handlers for flags
+    statsView.querySelectorAll(".stats-flag.clickable").forEach((el) => {
+      el.addEventListener("click", () => {
+        const url = (el as HTMLElement).dataset.url;
+        if (url) window.open(url, "_blank");
+      });
+    });
 
     document.getElementById("refresh-stats")?.addEventListener("click", renderStats);
   };
@@ -1203,14 +1230,30 @@ async function initStreamStatsView(streamId: string) {
       return `${hours}h ${minutes % 60}m`;
     };
 
+    const renderGeoFlag = (geo: { geo_country: string | null; geo_city: string | null; geo_region: string | null; geo_latitude: string | null; geo_longitude: string | null; geo_timezone: string | null }, id: string) => {
+      const flag = countryToFlag(geo.geo_country);
+      if (!flag) return "";
+      const hasCoords = geo.geo_latitude && geo.geo_longitude;
+      const mapsUrl = hasCoords ? `https://www.google.com/maps?q=${geo.geo_latitude},${geo.geo_longitude}` : null;
+      const tooltip = [
+        geo.geo_city,
+        geo.geo_region,
+        geo.geo_country,
+        geo.geo_timezone,
+        hasCoords ? `${geo.geo_latitude}, ${geo.geo_longitude}` : null
+      ].filter(Boolean).join(" | ");
+      return `<span class="stats-flag ${hasCoords ? 'clickable' : ''}" data-id="${id}" data-url="${mapsUrl || ''}" title="${tooltip}">${flag}</span>`;
+    };
+
     const viewerRows = data.viewers.length === 0
-      ? `<tr><td colspan="2" class="empty">No active viewers</td></tr>`
+      ? `<tr><td colspan="3" class="empty">No active viewers</td></tr>`
       : data.viewers.map((v: LiveViewer) => `
           <tr>
             <td>
               ${v.avatar_url ? `<img src="${v.avatar_url}" class="avatar-small">` : ""}
               ${v.user_name || v.user_email || "Anonymous"}
             </td>
+            <td>${renderGeoFlag(v, `v-${v.id}`)}</td>
             <td>${formatDuration(v.started_at)}</td>
           </tr>
         `).join("");
@@ -1223,6 +1266,7 @@ async function initStreamStatsView(streamId: string) {
           <thead>
             <tr>
               <th>Viewer</th>
+              <th>Location</th>
               <th>Watching for</th>
             </tr>
           </thead>
@@ -1231,6 +1275,14 @@ async function initStreamStatsView(streamId: string) {
       </section>
       <button id="refresh-stream-stats" class="btn btn-primary">Refresh</button>
     `;
+
+    // Add click handlers for flags
+    statsView.querySelectorAll(".stats-flag.clickable").forEach((el) => {
+      el.addEventListener("click", () => {
+        const url = (el as HTMLElement).dataset.url;
+        if (url) window.open(url, "_blank");
+      });
+    });
 
     document.getElementById("refresh-stream-stats")?.addEventListener("click", renderViewers);
   };

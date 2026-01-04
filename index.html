@@ -284,6 +284,17 @@
             vertical-align: middle;
             margin-right: 0.5rem;
         }
+        .stats-flag {
+            font-size: 1.25rem;
+            cursor: default;
+        }
+        .stats-flag.clickable {
+            cursor: pointer;
+            transition: transform 0.15s ease;
+        }
+        .stats-flag.clickable:hover {
+            transform: scale(1.3);
+        }
         .stats-login-required {
             text-align: center;
             padding: 3rem;

@@ -23,6 +23,13 @@ CREATE TABLE IF NOT EXISTS broadcast_events (
   stream_id TEXT NOT NULL,
   started_at TEXT DEFAULT (datetime('now')),
   ended_at TEXT,
+  -- Geolocation data from Cloudflare
+  geo_country TEXT,
+  geo_city TEXT,
+  geo_region TEXT,
+  geo_latitude TEXT,
+  geo_longitude TEXT,
+  geo_timezone TEXT,
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -36,7 +43,14 @@ CREATE TABLE IF NOT EXISTS watch_events (
   user_id INTEGER,
   stream_id TEXT NOT NULL,
   started_at TEXT DEFAULT (datetime('now')),
-  ended_at TEXT
+  ended_at TEXT,
+  -- Geolocation data from Cloudflare
+  geo_country TEXT,
+  geo_city TEXT,
+  geo_region TEXT,
+  geo_latitude TEXT,
+  geo_longitude TEXT,
+  geo_timezone TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_watch_events_user_id ON watch_events(user_id);

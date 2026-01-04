@@ -152,6 +152,12 @@ export interface LiveBroadcast {
   user_name: string;
   user_email: string;
   avatar_url: string;
+  geo_country: string | null;
+  geo_city: string | null;
+  geo_region: string | null;
+  geo_latitude: string | null;
+  geo_longitude: string | null;
+  geo_timezone: string | null;
 }
 
 export interface LiveViewer {
@@ -162,6 +168,12 @@ export interface LiveViewer {
   user_name: string | null;
   user_email: string | null;
   avatar_url: string | null;
+  geo_country: string | null;
+  geo_city: string | null;
+  geo_region: string | null;
+  geo_latitude: string | null;
+  geo_longitude: string | null;
+  geo_timezone: string | null;
 }
 
 export async function getLiveStats(): Promise<{ broadcasts: LiveBroadcast[]; viewers: LiveViewer[] } | null> {
