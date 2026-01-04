@@ -685,7 +685,7 @@ function updateAuthUI(user: User | null, geo: Geo | null) {
 
     if (hasCoords) {
       flagEl.addEventListener("click", () => {
-        const mapsUrl = `https://www.google.com/maps/@${geo.latitude},${geo.longitude},3z`;
+        const mapsUrl = `https://www.google.com/maps/place/${geo.latitude},${geo.longitude}/@${geo.latitude},${geo.longitude},3z`;
         window.open(mapsUrl, "_blank");
       });
     }
@@ -1095,7 +1095,7 @@ async function initStatsView(user: User | null) {
       const flag = countryToFlag(geo.geo_country);
       if (!flag) return "";
       const hasCoords = geo.geo_latitude && geo.geo_longitude;
-      const mapsUrl = hasCoords ? `https://www.google.com/maps/@${geo.geo_latitude},${geo.geo_longitude},3z` : null;
+      const mapsUrl = hasCoords ? `https://www.google.com/maps/place/${geo.geo_latitude},${geo.geo_longitude}/@${geo.geo_latitude},${geo.geo_longitude},3z` : null;
       const tooltip = [
         geo.geo_city,
         geo.geo_region,
@@ -1234,7 +1234,7 @@ async function initStreamStatsView(streamId: string) {
       const flag = countryToFlag(geo.geo_country);
       if (!flag) return "";
       const hasCoords = geo.geo_latitude && geo.geo_longitude;
-      const mapsUrl = hasCoords ? `https://www.google.com/maps/@${geo.geo_latitude},${geo.geo_longitude},3z` : null;
+      const mapsUrl = hasCoords ? `https://www.google.com/maps/place/${geo.geo_latitude},${geo.geo_longitude}/@${geo.geo_latitude},${geo.geo_longitude},3z` : null;
       const tooltip = [
         geo.geo_city,
         geo.geo_region,
