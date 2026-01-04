@@ -1276,6 +1276,7 @@ async function initStreamStatsView(streamId: string) {
 
     statsView.innerHTML = `
       <h2>Viewers for <a href="/${streamId}" class="stream-link">${streamId}</a></h2>
+      <p><a href="/${streamId}/stats/map">View Map &rarr;</a></p>
       <section class="stats-section">
         <h3>Active Viewers (${data.viewers.length})</h3>
         <table class="stats-table">
@@ -1447,7 +1448,7 @@ async function initStreamStatsMapView(streamId: string) {
 
   mapView.innerHTML = `
     <h2>Viewer Map for <a href="/${streamId}" class="stream-link">${streamId}</a></h2>
-    <p><a href="/${streamId}/stats">&larr; Back to Viewers</a></p>
+    <p><a href="/${streamId}/stats">&larr; View Table</a></p>
     <div id="leaflet-map" style="height: 500px; border-radius: 8px; margin-top: 1rem;"></div>
     <button id="refresh-stream-map" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
   `;
@@ -1573,8 +1574,8 @@ async function initGreetView() {
     const map = L.map("leaflet-map").setView([20, 0], 2);
 
     // @ts-expect-error Leaflet loaded from CDN
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      attribution: '&copy; Esri &mdash; Esri, DeLorme, NAVTEQ'
     }).addTo(map);
 
     // Add broadcaster markers (red) with viewer count
