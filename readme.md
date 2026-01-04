@@ -22,8 +22,39 @@ MoQ (Media over QUIC) streaming application using Cloudflare's relay network.
 
 ## Requirements
 
-- **Browser**: Chrome 97+ or Edge 97+ (WebTransport required)
+- **Browser**: Chrome 97+, Edge 97+, Firefox 114+, or Safari 17+ (see Safari Support below)
 - **Node.js**: 20+
+
+## Safari Support
+
+Safari lacks full WebTransport support, so vivoh.earth includes a WebSocket polyfill that transparently falls back to WebSocket-enabled relay servers.
+
+### Architecture
+
+```
+┌─────────────┐         ┌──────────────────────────────┐         ┌──────────────────────────────┐
+│   Safari    │ ──────▶ │  Linode Relay Server         │ ──────▶ │  relay.cloudflare.           │
+│   Browser   │WebSocket│  (moq-relay + WebSocket)     │  QUIC   │  mediaoverquic.com           │
+│             │         │                              │         │  (Cloudflare MoQ Relay)      │
+└─────────────┘         └──────────────────────────────┘         └──────────────────────────────┘
+```
+
+### How It Works
+
+1. **Detection**: The frontend detects Safari and loads the WebSocket polyfill (`webtransport-polyfill.ts`)
+2. **Relay Selection**: A latency race selects the fastest Linode relay server:
+   - `us-central.vivoh.earth` (Dallas)
+   - `eu-central.vivoh.earth` (Frankfurt)
+   - `ap-south.vivoh.earth` (Singapore)
+3. **WebSocket Connection**: Safari connects to the Linode relay via WebSocket
+4. **Stream Proxy**: The relay uses the announce hostname to fetch streams from Cloudflare's relay over QUIC
+
+### Linode Relay Servers
+
+Each Linode server runs a patched version of [moq-relay](https://github.com/kixelated/moq-rs) with:
+- WebSocket support from the `@kixelated/hang` library
+- A patch that announces to and fetches from Cloudflare's relay (`relay.cloudflare.mediaoverquic.com`)
+- This allows Safari users to watch streams published by Chrome/Firefox users via the native Cloudflare relay
 
 ## Development
 
