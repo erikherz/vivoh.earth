@@ -70,10 +70,11 @@ export default {
     const isStreamId = /^[a-z0-9]{5}$/.test(pathWithoutSlash);
     const isStatsPage = url.pathname === "/stats";
     const isStatsMapPage = url.pathname === "/stats/map";
+    const isGreetPage = url.pathname === "/greet";
     const isStreamStatsPage = /^\/[a-z0-9]{5}\/stats$/.test(url.pathname);
     const isStreamStatsMapPage = /^\/[a-z0-9]{5}\/stats\/map$/.test(url.pathname);
 
-    if (isStreamId || isStatsPage || isStatsMapPage || isStreamStatsPage || isStreamStatsMapPage) {
+    if (isStreamId || isStatsPage || isStatsMapPage || isGreetPage || isStreamStatsPage || isStreamStatsMapPage) {
       const indexUrl = new URL("/index.html", url.origin);
       return env.ASSETS.fetch(new Request(indexUrl.toString(), {
         method: request.method,
@@ -518,6 +519,26 @@ async function handleStatsRoutes(
       stream_id: streamId,
       viewers: viewers.results,
     });
+  }
+
+  // GET /api/stats/greet - Get live broadcasts with viewer counts (public)
+  if (method === "GET" && path === "/api/stats/greet") {
+    // Get active broadcasts with viewer counts
+    const broadcasts = await env.DB
+      .prepare(`
+        SELECT
+          b.id, b.stream_id, b.started_at,
+          u.name as user_name,
+          b.geo_country, b.geo_city, b.geo_region, b.geo_latitude, b.geo_longitude,
+          (SELECT COUNT(*) FROM watch_events w WHERE w.stream_id = b.stream_id AND w.ended_at IS NULL) as viewer_count
+        FROM broadcast_events b
+        JOIN users u ON b.user_id = u.id
+        WHERE b.ended_at IS NULL
+        ORDER BY b.started_at DESC
+      `)
+      .all();
+
+    return Response.json({ broadcasts: broadcasts.results });
   }
 
   // GET /api/stats/live - Get live broadcasts and viewers (requires auth)

@@ -538,7 +538,7 @@ import {
   type LiveViewer
 } from "./auth";
 
-type View = "broadcast" | "watch" | "stats" | "stats-map" | "stream-stats" | "stream-stats-map";
+type View = "broadcast" | "watch" | "stats" | "stats-map" | "greet" | "stream-stats" | "stream-stats-map";
 
 // Generate a random stream ID (5 lowercase alphanumeric characters)
 function generateRandomId(): string {
@@ -577,6 +577,11 @@ async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
   // Stats map view: /stats/map
   if (path === "/stats/map") {
     return { view: "stats-map", streamId: "" };
+  }
+
+  // Greet view: /greet (broadcasters map)
+  if (path === "/greet") {
+    return { view: "greet", streamId: "" };
   }
 
   // Stats view: /stats
@@ -1503,6 +1508,119 @@ async function initStreamStatsMapView(streamId: string) {
   document.getElementById("refresh-stream-map")?.addEventListener("click", renderMap);
 }
 
+// Initialize greet view (broadcasters only map - public)
+async function initGreetView() {
+  console.log("Vivoh.Earth Greet - Live Broadcasters");
+
+  // Hide broadcast and watch views
+  document.getElementById("broadcast-view")?.classList.add("hidden");
+  document.getElementById("watch-view")?.classList.add("hidden");
+
+  // Hide footer and new stream button
+  const footer = document.querySelector("footer");
+  if (footer) footer.classList.add("hidden");
+  const newStreamBtn = document.getElementById("new-stream-btn");
+  if (newStreamBtn) newStreamBtn.classList.add("hidden");
+
+  // Create greet view container
+  const container = document.querySelector(".container");
+  if (!container) return;
+
+  const greetView = document.createElement("div");
+  greetView.id = "greet-view";
+  greetView.className = "stats-view";
+
+  greetView.innerHTML = `
+    <h2>Live Broadcasts</h2>
+    <p class="greet-subtitle">Click a marker to watch</p>
+    <div id="leaflet-map" style="height: 600px; border-radius: 8px; margin-top: 1rem;"></div>
+    <button id="refresh-greet" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
+  `;
+  container.appendChild(greetView);
+
+  interface GreetBroadcast {
+    id: number;
+    stream_id: string;
+    started_at: string;
+    user_name: string;
+    geo_country: string | null;
+    geo_city: string | null;
+    geo_region: string | null;
+    geo_latitude: string | null;
+    geo_longitude: string | null;
+    viewer_count: number;
+  }
+
+  const renderMap = async () => {
+    // Fetch broadcasts from public greet endpoint
+    const response = await fetch("/api/stats/greet");
+    if (!response.ok) {
+      const mapEl = document.getElementById("leaflet-map");
+      if (mapEl) {
+        mapEl.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #737373;">Failed to load broadcasts</div>`;
+      }
+      return;
+    }
+    const data = await response.json() as { broadcasts: GreetBroadcast[] };
+
+    const mapEl = document.getElementById("leaflet-map");
+    if (!mapEl) return;
+
+    // Clear existing map
+    mapEl.innerHTML = "";
+
+    // @ts-expect-error Leaflet loaded from CDN
+    const map = L.map("leaflet-map").setView([20, 0], 2);
+
+    // @ts-expect-error Leaflet loaded from CDN
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
+
+    // Add broadcaster markers (red) with viewer count
+    data.broadcasts.forEach((b: GreetBroadcast) => {
+      if (b.geo_latitude && b.geo_longitude) {
+        const lat = parseFloat(b.geo_latitude);
+        const lng = parseFloat(b.geo_longitude);
+        const name = b.user_name || "Broadcaster";
+        const location = [b.geo_city, b.geo_region, b.geo_country].filter(Boolean).join(", ");
+        const viewers = b.viewer_count || 0;
+
+        // @ts-expect-error Leaflet loaded from CDN
+        const marker = L.marker([lat, lng], {
+          // @ts-expect-error Leaflet loaded from CDN
+          icon: L.divIcon({
+            className: "broadcaster-marker",
+            html: `<div style="background: #ef4444; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.4); cursor: pointer;"></div>`,
+            iconSize: [20, 20],
+            iconAnchor: [10, 10]
+          })
+        }).addTo(map);
+
+        // Tooltip on hover showing viewer count
+        marker.bindTooltip(`<strong>${name}</strong><br>${location}<br><span style="color: #3b82f6;">${viewers} viewer${viewers !== 1 ? 's' : ''}</span>`, {
+          direction: 'top',
+          offset: [0, -10]
+        });
+
+        // Click to open watch page in new tab
+        marker.on('click', () => {
+          window.open(`/${b.stream_id}`, '_blank');
+        });
+      }
+    });
+
+    // If no broadcasters with geo, show message
+    const broadcastersWithGeo = data.broadcasts.filter((b: GreetBroadcast) => b.geo_latitude && b.geo_longitude);
+    if (broadcastersWithGeo.length === 0) {
+      mapEl.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #737373;">No live broadcasts at the moment</div>`;
+    }
+  };
+
+  await renderMap();
+  document.getElementById("refresh-greet")?.addEventListener("click", renderMap);
+}
+
 // Initialize the app
 async function init() {
   // Detect browser support (async for codec checks)
@@ -1536,6 +1654,8 @@ async function init() {
     await initStatsView(user);
   } else if (view === "stats-map") {
     await initStatsMapView(user);
+  } else if (view === "greet") {
+    await initGreetView();
   } else if (view === "stream-stats") {
     await initStreamStatsView(streamId);
   } else if (view === "stream-stats-map") {
