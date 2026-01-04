@@ -299,16 +299,17 @@ async function handleMe(request: Request, env: Env): Promise<Response> {
   const cookieHeader = request.headers.get("Cookie");
   const sessionToken = getSessionFromCookie(cookieHeader);
 
-  // Get geolocation from Cloudflare headers
+  // Get geolocation from Cloudflare request.cf object
+  const cf = (request as Request & { cf?: IncomingRequestCfProperties }).cf;
   const geo = {
-    country: request.headers.get("CF-IPCountry") || null,
-    city: request.headers.get("CF-IPCity") || null,
-    region: request.headers.get("CF-IPRegion") || null,
-    postalCode: request.headers.get("CF-IPPostalCode") || null,
-    latitude: request.headers.get("CF-IPLatitude") || null,
-    longitude: request.headers.get("CF-IPLongitude") || null,
-    timezone: request.headers.get("CF-IPTimezone") || null,
-    continent: request.headers.get("CF-IPContinent") || null,
+    country: cf?.country || null,
+    city: cf?.city || null,
+    region: cf?.region || null,
+    postalCode: cf?.postalCode || null,
+    latitude: cf?.latitude?.toString() || null,
+    longitude: cf?.longitude?.toString() || null,
+    timezone: cf?.timezone || null,
+    continent: cf?.continent || null,
   };
 
   if (!sessionToken) {
