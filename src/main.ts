@@ -1377,8 +1377,8 @@ async function initStatsMapView(user: User | null) {
     const map = L.map("leaflet-map").setView([20, 0], 2);
 
     // @ts-expect-error Leaflet loaded from CDN
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      attribution: '&copy; Esri'
     }).addTo(map);
 
     // Add viewer markers (blue)
@@ -1481,8 +1481,8 @@ async function initStreamStatsMapView(streamId: string) {
     const map = L.map("leaflet-map").setView([20, 0], 2);
 
     // @ts-expect-error Leaflet loaded from CDN
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      attribution: '&copy; Esri'
     }).addTo(map);
 
     // Add viewer markers
