@@ -430,6 +430,72 @@ MoQ achieves low latency through:
 
 ---
 
+## Safari WebSocket Support
+
+Safari doesn't support WebTransport yet (as of early 2025). To enable Safari playback, we run our own MoQ relay that accepts WebSocket connections and bridges to Cloudflare's QUIC-based relay.
+
+### Architecture
+
+```
+┌─────────────────┐     ┌─────────────────────────────────────────┐     ┌───────────────┐
+│  Chrome/Firefox │     │            Our Relay                    │     │   Cloudflare  │
+│   (Publisher)   │────▶│         (us-central)                    │────▶│     Relay     │
+│   WebTransport  │     │                                         │     │    (QUIC)     │
+└─────────────────┘     │  ┌─────────────┐   ┌─────────────────┐  │     └───────────────┘
+                        │  │   QUIC      │   │   WebSocket     │  │
+                        │  │  Listener   │   │    Listener     │  │
+┌─────────────────┐     │  │  (Chrome)   │   │    (Safari)     │  │
+│     Safari      │     │  └──────┬──────┘   └────────┬────────┘  │
+│   (Subscriber)  │────▶│         │                   │           │
+│   WebSocket     │     │         └───────┬───────────┘           │
+└─────────────────┘     │                 │                       │
+                        │         ┌───────▼───────┐               │
+                        │         │  MoQ Session  │               │
+                        │         │    Handler    │               │
+                        │         └───────────────┘               │
+                        └─────────────────────────────────────────┘
+```
+
+### WebSocket-to-WebTransport Bridge
+
+The `web-transport-ws` crate provides a WebSocket polyfill that emulates QUIC-style streams over WebSocket:
+
+1. **Stream Multiplexing**: Multiple logical streams over a single WebSocket connection
+2. **Frame Types**:
+   - `STREAM`: Data frame with stream_id, payload, and fin flag
+   - `RESET_STREAM`: Abort a stream with error code
+   - `STOP_SENDING`: Request peer to stop sending
+   - `CONNECTION_CLOSE`: Graceful session termination
+
+3. **Priority Channels**: Control messages (RESET, STOP_SENDING) use an unbounded priority channel to ensure delivery
+
+### Current Data Flow (Chrome → Safari)
+
+```
+Chrome                Our Relay              Cloudflare
+  │                       │                       │
+  │──Publish to CF───────────────────────────────▶│
+  │                       │                       │
+  │                       │◀─Subscribe (QUIC)─────│
+  │                       │                       │
+  │                       │◀─Stream data──────────│
+  │                       │                       │
+  │   Safari subscribes   │                       │
+  │◀─────via WebSocket────│                       │
+  │                       │                       │
+  │◀─Stream data (WS)─────│                       │
+```
+
+### Key Implementation Details
+
+1. **Upstream Subscribe**: When Safari subscribes to a stream the relay doesn't have locally, it forwards the subscribe to Cloudflare and relays the data back.
+
+2. **Stream Completion**: Streams must call `finish()` to send a proper FIN frame. Without this, dropped streams send RESET_STREAM which can race ahead of pending data, causing stream corruption.
+
+3. **Datagram Fallback**: Since WebSocket doesn't support QUIC datagrams, audio sent as datagrams is converted to subgroup streams.
+
+---
+
 ## References
 
 - [IETF MoQ Transport Draft](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
