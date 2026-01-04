@@ -1357,7 +1357,14 @@ async function initStatsMapView(user: User | null) {
 
   mapView.innerHTML = `
     <h2>Live Viewer Map</h2>
-    <p><a href="/stats">&larr; Back to Stats</a></p>
+    <p><a href="/stats" class="view-toggle" title="View Table">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+        <line x1="3" y1="9" x2="21" y2="9"/>
+        <line x1="3" y1="15" x2="21" y2="15"/>
+        <line x1="9" y1="3" x2="9" y2="21"/>
+      </svg>
+    </a></p>
     <div id="leaflet-map" style="height: 500px; border-radius: 8px; margin-top: 1rem;"></div>
     <button id="refresh-map" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
   `;
