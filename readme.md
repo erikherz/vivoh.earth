@@ -99,11 +99,6 @@ Streams use the format: `vivoh.earth/{streamId}`
 
 Each 5-character stream ID maps to a unique namespace on the Cloudflare relay, preventing conflicts between sessions.
 
-## Documentation
-
-- [arch.md](./arch.md) - How MoQ works at the protocol level
-- [interop.md](./interop.md) - Library versions and Cloudflare compatibility
-
 ## Interoperability
 
 **Key point:** This project uses `@kixelated/hang@0.3.12` specifically for compatibility with Cloudflare's draft-07 relay. Newer versions (0.4+) use draft-14 and won't connect.
