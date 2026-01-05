@@ -538,7 +538,7 @@ import {
   type LiveViewer
 } from "./auth";
 
-type View = "broadcast" | "watch" | "stats" | "stats-map" | "greet" | "stream-stats" | "stream-stats-map";
+type View = "broadcast" | "watch" | "stats" | "stats-map" | "greet" | "stream-stats" | "stream-stats-map" | "admin";
 
 // Generate a random stream ID (5 lowercase alphanumeric characters)
 function generateRandomId(): string {
@@ -582,6 +582,11 @@ async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
   // Greet view: /greet (broadcasters map)
   if (path === "/greet") {
     return { view: "greet", streamId: "" };
+  }
+
+  // Admin view: /cleardata
+  if (path === "/cleardata") {
+    return { view: "admin", streamId: "" };
   }
 
   // Stats view: /stats
@@ -1642,6 +1647,160 @@ async function initGreetView() {
   document.getElementById("refresh-greet")?.addEventListener("click", renderMap);
 }
 
+// Initialize admin view
+function initAdminView() {
+  console.log("Vivoh.Earth Admin Panel");
+
+  // Hide broadcast and watch views
+  document.getElementById("broadcast-view")?.classList.add("hidden");
+  document.getElementById("watch-view")?.classList.add("hidden");
+
+  // Hide footer and new stream button
+  const footer = document.querySelector("footer");
+  if (footer) footer.classList.add("hidden");
+  const newStreamBtn = document.getElementById("new-stream-btn");
+  if (newStreamBtn) newStreamBtn.classList.add("hidden");
+
+  // Create admin view container
+  const container = document.querySelector(".container");
+  if (!container) return;
+
+  const adminView = document.createElement("div");
+  adminView.id = "admin-view";
+  adminView.className = "stats-view";
+
+  adminView.innerHTML = `
+    <h2>Admin Panel</h2>
+    <div id="admin-login" class="stats-section" style="max-width: 400px; margin: 2rem auto;">
+      <h3>Password Required</h3>
+      <div style="display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem;">
+        <input type="password" id="admin-password" placeholder="Enter admin password"
+          style="background: #262626; border: 1px solid #404040; border-radius: 6px; padding: 0.75rem; color: #e5e5e5; font-size: 1rem;">
+        <button id="admin-login-btn" class="btn btn-primary">Login</button>
+        <p id="admin-error" style="color: #ef4444; display: none; text-align: center;"></p>
+      </div>
+    </div>
+    <div id="admin-panel" class="stats-section" style="max-width: 600px; margin: 2rem auto; display: none;">
+      <h3>Data Management</h3>
+      <p style="color: #a3a3a3; margin-bottom: 1.5rem;">Warning: These actions are irreversible.</p>
+      <div style="display: flex; flex-direction: column; gap: 1rem;">
+        <button id="clear-broadcasts-btn" class="btn" style="background: #7f1d1d; border-color: #991b1b;">
+          Clear All Broadcaster Data
+        </button>
+        <button id="clear-viewers-btn" class="btn" style="background: #7f1d1d; border-color: #991b1b;">
+          Clear All Viewer Data
+        </button>
+      </div>
+      <div id="admin-status" style="margin-top: 1rem; padding: 0.75rem; border-radius: 6px; display: none;"></div>
+    </div>
+  `;
+  container.appendChild(adminView);
+
+  let adminPassword = "";
+
+  const showStatus = (message: string, isError: boolean) => {
+    const statusEl = document.getElementById("admin-status");
+    if (statusEl) {
+      statusEl.textContent = message;
+      statusEl.style.display = "block";
+      statusEl.style.background = isError ? "#7f1d1d" : "#14532d";
+      statusEl.style.color = "#e5e5e5";
+    }
+  };
+
+  // Login handler
+  document.getElementById("admin-login-btn")?.addEventListener("click", async () => {
+    const passwordInput = document.getElementById("admin-password") as HTMLInputElement;
+    const errorEl = document.getElementById("admin-error");
+    adminPassword = passwordInput?.value || "";
+
+    // Verify the password
+    try {
+      const response = await fetch("/api/admin/verify", {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${adminPassword}`
+        }
+      });
+
+      // If we get 401, password is wrong
+      if (response.status === 401) {
+        if (errorEl) {
+          errorEl.textContent = "Invalid password";
+          errorEl.style.display = "block";
+        }
+        return;
+      }
+
+      // Password is correct, show the admin panel
+      document.getElementById("admin-login")!.style.display = "none";
+      document.getElementById("admin-panel")!.style.display = "block";
+    } catch {
+      if (errorEl) {
+        errorEl.textContent = "Connection error";
+        errorEl.style.display = "block";
+      }
+    }
+  });
+
+  // Clear broadcasts handler
+  document.getElementById("clear-broadcasts-btn")?.addEventListener("click", async () => {
+    if (!confirm("Are you sure you want to clear ALL broadcaster data? This cannot be undone.")) {
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/admin/broadcasts", {
+        method: "DELETE",
+        headers: {
+          "Authorization": `Bearer ${adminPassword}`
+        }
+      });
+
+      if (response.ok) {
+        showStatus("All broadcaster data has been cleared.", false);
+      } else {
+        const data = await response.json();
+        showStatus(data.error || "Failed to clear data", true);
+      }
+    } catch {
+      showStatus("Connection error", true);
+    }
+  });
+
+  // Clear viewers handler
+  document.getElementById("clear-viewers-btn")?.addEventListener("click", async () => {
+    if (!confirm("Are you sure you want to clear ALL viewer data? This cannot be undone.")) {
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/admin/viewers", {
+        method: "DELETE",
+        headers: {
+          "Authorization": `Bearer ${adminPassword}`
+        }
+      });
+
+      if (response.ok) {
+        showStatus("All viewer data has been cleared.", false);
+      } else {
+        const data = await response.json();
+        showStatus(data.error || "Failed to clear data", true);
+      }
+    } catch {
+      showStatus("Connection error", true);
+    }
+  });
+
+  // Handle enter key on password input
+  document.getElementById("admin-password")?.addEventListener("keypress", (e) => {
+    if (e.key === "Enter") {
+      document.getElementById("admin-login-btn")?.click();
+    }
+  });
+}
+
 // Initialize the app
 async function init() {
   // Detect browser support (async for codec checks)
@@ -1681,6 +1840,8 @@ async function init() {
     await initStreamStatsView(streamId);
   } else if (view === "stream-stats-map") {
     await initStreamStatsMapView(streamId);
+  } else if (view === "admin") {
+    initAdminView();
   } else {
     await initWatchView(streamId, user);
   }

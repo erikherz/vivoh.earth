@@ -73,8 +73,9 @@ export default {
     const isGreetPage = url.pathname === "/greet";
     const isStreamStatsPage = /^\/[a-z0-9]{5}\/stats$/.test(url.pathname);
     const isStreamStatsMapPage = /^\/[a-z0-9]{5}\/stats\/map$/.test(url.pathname);
+    const isClearDataPage = url.pathname === "/cleardata";
 
-    if (isStreamId || isStatsPage || isStatsMapPage || isGreetPage || isStreamStatsPage || isStreamStatsMapPage) {
+    if (isStreamId || isStatsPage || isStatsMapPage || isGreetPage || isStreamStatsPage || isStreamStatsMapPage || isClearDataPage) {
       const indexUrl = new URL("/index.html", url.origin);
       return env.ASSETS.fetch(new Request(indexUrl.toString(), {
         method: request.method,
@@ -107,6 +108,11 @@ async function handleApiRoutes(
     // Stream settings routes
     if (url.pathname.startsWith("/api/streams")) {
       return handleStreamRoutes(request, env, url);
+    }
+
+    // Admin routes
+    if (url.pathname.startsWith("/api/admin/")) {
+      return handleAdminRoutes(request, env, url);
     }
 
     // Stats routes
@@ -689,4 +695,46 @@ function getGeoFromRequest(request: Request): GeoData {
     longitude: cf?.longitude?.toString() || null,
     timezone: cf?.timezone || null,
   };
+}
+
+// Admin password - hardcoded for simplicity
+const ADMIN_PASSWORD = "V!voh2026";
+
+// Handle admin routes
+async function handleAdminRoutes(
+  request: Request,
+  env: Env,
+  url: URL
+): Promise<Response> {
+  const method = request.method;
+  const path = url.pathname;
+
+  // GET /api/admin/verify - Verify password (no auth required for this check)
+  if (method === "GET" && path === "/api/admin/verify") {
+    const authHeader = request.headers.get("Authorization");
+    if (!authHeader || authHeader !== `Bearer ${ADMIN_PASSWORD}`) {
+      return Response.json({ valid: false }, { status: 401 });
+    }
+    return Response.json({ valid: true });
+  }
+
+  // Verify admin password from Authorization header
+  const authHeader = request.headers.get("Authorization");
+  if (!authHeader || authHeader !== `Bearer ${ADMIN_PASSWORD}`) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // DELETE /api/admin/broadcasts - Clear all broadcast data
+  if (method === "DELETE" && path === "/api/admin/broadcasts") {
+    await env.DB.prepare("DELETE FROM broadcast_events").run();
+    return Response.json({ success: true, message: "All broadcaster data cleared" });
+  }
+
+  // DELETE /api/admin/viewers - Clear all viewer data
+  if (method === "DELETE" && path === "/api/admin/viewers") {
+    await env.DB.prepare("DELETE FROM watch_events").run();
+    return Response.json({ success: true, message: "All viewer data cleared" });
+  }
+
+  return new Response("Not Found", { status: 404 });
 }
