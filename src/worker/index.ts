@@ -435,13 +435,14 @@ async function handleStreamRoutes(
   if (method === "GET" && streamIdMatch) {
     const streamId = streamIdMatch[1];
     const stream = await env.DB
-      .prepare("SELECT require_auth FROM streams WHERE stream_id = ?")
+      .prepare("SELECT require_auth, overlay_html FROM streams WHERE stream_id = ?")
       .bind(streamId)
-      .first<{ require_auth: number }>();
+      .first<{ require_auth: number; overlay_html: string | null }>();
 
     return Response.json({
       stream_id: streamId,
       require_auth: stream?.require_auth === 1,
+      overlay_html: stream?.overlay_html || "",
     });
   }
 
@@ -467,26 +468,37 @@ async function handleStreamRoutes(
       return Response.json({ error: "Authentication required" }, { status: 401 });
     }
 
-    const body = await request.json() as { stream_id: string; require_auth: boolean };
+    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string };
     if (!body.stream_id) {
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
 
+    // Get current settings first
+    const current = await env.DB
+      .prepare("SELECT require_auth, overlay_html FROM streams WHERE stream_id = ?")
+      .bind(body.stream_id)
+      .first<{ require_auth: number; overlay_html: string | null }>();
+
+    const requireAuth = body.require_auth !== undefined ? body.require_auth : (current?.require_auth === 1);
+    const overlayHtml = body.overlay_html !== undefined ? body.overlay_html : (current?.overlay_html || "");
+
     // Upsert stream settings
     await env.DB
       .prepare(`
-        INSERT INTO streams (stream_id, user_id, require_auth)
-        VALUES (?, ?, ?)
+        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(stream_id) DO UPDATE SET
           require_auth = excluded.require_auth,
+          overlay_html = excluded.overlay_html,
           updated_at = datetime('now')
       `)
-      .bind(body.stream_id, user.id, body.require_auth ? 1 : 0)
+      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml)
       .run();
 
     return Response.json({
       stream_id: body.stream_id,
-      require_auth: body.require_auth,
+      require_auth: requireAuth,
+      overlay_html: overlayHtml,
     });
   }
 
