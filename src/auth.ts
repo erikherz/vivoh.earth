@@ -121,22 +121,33 @@ export async function checkStreamExists(streamId: string): Promise<boolean> {
   }
 }
 
-export async function getStreamSettings(streamId: string): Promise<{ require_auth: boolean }> {
+export interface StreamSettings {
+  require_auth: boolean;
+  overlay_html: string;
+}
+
+export async function getStreamSettings(streamId: string): Promise<StreamSettings> {
   try {
     const response = await fetch(`/api/streams/${streamId}`);
     const data = await response.json();
-    return { require_auth: data.require_auth ?? false };
+    return {
+      require_auth: data.require_auth ?? false,
+      overlay_html: data.overlay_html ?? "",
+    };
   } catch {
-    return { require_auth: false };
+    return { require_auth: false, overlay_html: "" };
   }
 }
 
-export async function updateStreamSettings(streamId: string, requireAuth: boolean): Promise<void> {
+export async function updateStreamSettings(
+  streamId: string,
+  settings: Partial<Omit<StreamSettings, never>>
+): Promise<void> {
   try {
     await fetch("/api/streams", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stream_id: streamId, require_auth: requireAuth }),
+      body: JSON.stringify({ stream_id: streamId, ...settings }),
     });
   } catch {
     // Ignore errors

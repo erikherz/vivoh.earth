@@ -882,6 +882,83 @@
             justify-content: center !important;
         }
 
+        /* HTML overlay button and input */
+        .html-overlay-btn {
+            order: 5 !important;
+            font-size: 1.25rem !important;
+            cursor: pointer;
+        }
+        .html-overlay-container {
+            width: 100%;
+            max-width: 900px;
+            margin: 1rem auto 0;
+            display: none;
+        }
+        .html-overlay-container.visible {
+            display: block;
+        }
+        .html-overlay-input {
+            width: 100%;
+            min-height: 60px;
+            max-height: 300px;
+            padding: 0.75rem;
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.875rem;
+            line-height: 1.5;
+            resize: vertical;
+            overflow: auto;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .html-overlay-input:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+        }
+        .html-overlay-input:empty::before {
+            content: "Enter HTML content to display below video for viewers...";
+            color: var(--text-muted);
+            pointer-events: none;
+        }
+        .html-overlay-hint {
+            margin-top: 0.5rem;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-align: left;
+        }
+
+        /* Viewer HTML overlay display */
+        .viewer-html-overlay {
+            width: 100%;
+            max-width: 900px;
+            margin: 1rem auto 0;
+            padding: 1rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            text-align: center;
+            transition: background-color 0.3s ease, border-color 0.3s ease;
+        }
+        .viewer-html-overlay:empty {
+            display: none;
+        }
+        .viewer-html-overlay a {
+            color: #3b82f6;
+            text-decoration: underline;
+        }
+        .viewer-html-overlay a:hover {
+            color: #60a5fa;
+        }
+        .viewer-html-overlay img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 4px;
+        }
+
         /* Theme toggle button */
         .theme-toggle {
             background: var(--bg-tertiary);

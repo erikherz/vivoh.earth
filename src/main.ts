@@ -649,6 +649,7 @@ import {
   getStreamViewers,
   type User,
   type Geo,
+  type StreamSettings,
   type LiveBroadcast,
   type LiveViewer
 } from "./auth";
@@ -942,7 +943,7 @@ function initBroadcastView(streamId: string, user: User | null) {
         }
       }
 
-      updateStreamSettings(streamId, requireAuthCheckbox.checked);
+      updateStreamSettings(streamId, { require_auth: requireAuthCheckbox.checked });
     });
   }
 
@@ -1035,6 +1036,73 @@ function initBroadcastView(streamId: string, user: User | null) {
     observer.observe(publisher, { childList: true, subtree: true });
     setTimeout(injectAudioButton, 100);
     setTimeout(injectAudioButton, 500);
+
+    // Inject HTML overlay button into device selector
+    const injectHtmlOverlayButton = () => {
+      const deviceContainer = publisher.querySelector(":scope > div > div");
+      if (!deviceContainer || deviceContainer.querySelector(".html-overlay-btn")) return;
+
+      const htmlBtn = document.createElement("button");
+      htmlBtn.type = "button";
+      htmlBtn.title = "HTML Overlay";
+      htmlBtn.className = "html-overlay-btn";
+      htmlBtn.textContent = "</>";
+      htmlBtn.style.cursor = "pointer";
+      htmlBtn.style.opacity = "0.5";
+      htmlBtn.style.fontFamily = "monospace";
+      htmlBtn.style.fontWeight = "bold";
+      htmlBtn.style.fontSize = "0.9rem";
+
+      // Create the overlay input container
+      const overlayContainer = document.createElement("div");
+      overlayContainer.className = "html-overlay-container";
+      overlayContainer.innerHTML = `
+        <div class="html-overlay-input" contenteditable="true"></div>
+        <div class="html-overlay-hint">HTML content will be displayed below the video for all viewers</div>
+      `;
+
+      // Insert container after the section
+      const section = document.querySelector("#broadcast-view section");
+      if (section && section.parentNode) {
+        section.parentNode.insertBefore(overlayContainer, section.nextSibling);
+      }
+
+      const overlayInput = overlayContainer.querySelector(".html-overlay-input") as HTMLDivElement;
+      let saveTimeout: number | null = null;
+
+      // Load existing overlay content
+      getStreamSettings(streamId).then(settings => {
+        if (settings.overlay_html) {
+          overlayInput.textContent = settings.overlay_html;
+          htmlBtn.style.opacity = "1";
+        }
+      });
+
+      // Save overlay content with debounce
+      overlayInput.addEventListener("input", () => {
+        if (saveTimeout) clearTimeout(saveTimeout);
+        saveTimeout = window.setTimeout(() => {
+          const content = overlayInput.textContent || "";
+          updateStreamSettings(streamId, { overlay_html: content });
+          htmlBtn.style.opacity = content.trim() ? "1" : "0.5";
+        }, 500);
+      });
+
+      // Toggle overlay input visibility
+      htmlBtn.addEventListener("click", () => {
+        overlayContainer.classList.toggle("visible");
+        if (overlayContainer.classList.contains("visible")) {
+          overlayInput.focus();
+        }
+      });
+
+      // Append to device container
+      deviceContainer.appendChild(htmlBtn);
+    };
+
+    // Inject HTML overlay button after component renders
+    setTimeout(injectHtmlOverlayButton, 200);
+    setTimeout(injectHtmlOverlayButton, 600);
   }
 
   // New stream button
@@ -1138,22 +1206,54 @@ async function initWatchView(streamId: string, user: User | null) {
       }
     });
 
-    // Poll for auth setting changes (anonymous viewers only)
-    if (!user) {
-      const authCheckInterval = setInterval(async () => {
-        const currentSettings = await getStreamSettings(streamId);
-        if (currentSettings.require_auth) {
-          clearInterval(authCheckInterval);
-          // End the watch event
-          if (watchEventId) {
-            logWatchEnd(watchEventId);
-            watchEventId = null;
-          }
-          // Show login required overlay
-          showWatchLoginRequired();
-        }
-      }, 10000); // Check every 10 seconds
+    // Create HTML overlay display div
+    const watchSection = document.querySelector("#watch-view section");
+    let overlayDiv = document.querySelector(".viewer-html-overlay") as HTMLDivElement;
+    if (!overlayDiv && watchSection) {
+      overlayDiv = document.createElement("div");
+      overlayDiv.className = "viewer-html-overlay";
+      watchSection.parentNode?.insertBefore(overlayDiv, watchSection.nextSibling);
     }
+
+    // Function to update overlay content
+    const updateOverlay = (overlayHtml: string) => {
+      if (overlayDiv) {
+        if (overlayHtml.trim()) {
+          overlayDiv.innerHTML = overlayHtml;
+        } else {
+          overlayDiv.innerHTML = "";
+        }
+      }
+    };
+
+    // Load initial overlay content
+    if (settings.overlay_html) {
+      updateOverlay(settings.overlay_html);
+    }
+
+    // Poll for setting changes (auth and overlay)
+    const settingsCheckInterval = setInterval(async () => {
+      const currentSettings = await getStreamSettings(streamId);
+
+      // Check auth requirement (anonymous viewers only)
+      if (!user && currentSettings.require_auth) {
+        clearInterval(settingsCheckInterval);
+        if (watchEventId) {
+          logWatchEnd(watchEventId);
+          watchEventId = null;
+        }
+        showWatchLoginRequired();
+        return;
+      }
+
+      // Update overlay content
+      updateOverlay(currentSettings.overlay_html);
+    }, 5000); // Check every 5 seconds
+
+    // Cleanup interval on page unload
+    window.addEventListener("beforeunload", () => {
+      clearInterval(settingsCheckInterval);
+    });
   }
 }
 
