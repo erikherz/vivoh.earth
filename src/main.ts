@@ -34,6 +34,121 @@ if (isSafari) {
   console.log("Safari: Patched MediaStreamTrack.getSettings for channelCount");
 }
 
+// Theme initialization - must run early to prevent flash
+function initTheme() {
+  const savedTheme = localStorage.getItem("theme");
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+  if (savedTheme === "light" || (!savedTheme && !prefersDark)) {
+    document.documentElement.classList.add("light");
+  }
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const themeToggle = document.getElementById("theme-toggle");
+    if (themeToggle) {
+      themeToggle.addEventListener("click", () => {
+        document.documentElement.classList.toggle("light");
+        const isLight = document.documentElement.classList.contains("light");
+        localStorage.setItem("theme", isLight ? "light" : "dark");
+      });
+    }
+  });
+}
+initTheme();
+
+// Flip device button appearance: selected=dim, available=bright
+// The hang component sets inline opacity (selected=1, unselected=0.5)
+// We invert this by adding CSS classes based on the opacity value
+function initDeviceButtonFlipper() {
+  document.addEventListener("DOMContentLoaded", () => {
+    // Add CSS to invert the visual appearance
+    const style = document.createElement("style");
+    style.textContent = `
+      /* Hide the Microphone toggle button (keep audio-only-btn) */
+      hang-publish button[title="Microphone"] { display: none !important; }
+
+      /* Reorder buttons: Video, Audio, Screen, None */
+      hang-publish button[title="Camera"] { order: 1 !important; }
+      hang-publish button.audio-only-btn { order: 2 !important; }
+      hang-publish button[title="Screen"] { order: 3 !important; }
+      hang-publish button[title="Nothing"] { order: 4 !important; }
+
+      /* Replace camera emoji with video camera emoji */
+      hang-publish button[title="Camera"] {
+        font-size: 0 !important;
+      }
+      hang-publish button[title="Camera"]::after {
+        content: "📹";
+        font-size: 1.25rem;
+      }
+
+      /* Selected device = dim (already chosen, de-emphasized) */
+      hang-publish button[title].device-selected {
+        filter: grayscale(50%) brightness(0.7) !important;
+        opacity: 1 !important;
+      }
+      /* Available device = bright with glow (click me!) */
+      hang-publish button[title].device-available {
+        filter: brightness(1.1) !important;
+        opacity: 1 !important;
+        box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+      }
+    `;
+    document.head.appendChild(style);
+
+    const updateButtonClasses = () => {
+      const hangPublish = document.querySelector("hang-publish");
+      if (!hangPublish) return;
+
+      const buttons = hangPublish.querySelectorAll('button[title]');
+      buttons.forEach((btn) => {
+        const button = btn as HTMLButtonElement;
+        const opacity = parseFloat(button.style.opacity);
+
+        // hang sets opacity: 1 = selected/active, 0.5 = available
+        // User wants INVERTED: selected = dim, available = bright
+        if (opacity >= 0.9 || isNaN(opacity)) {
+          // hang's selected (opacity 1) → make it DIM
+          button.classList.remove("device-available");
+          button.classList.add("device-selected");
+        } else {
+          // hang's available (opacity 0.5) → make it BRIGHT
+          button.classList.remove("device-selected");
+          button.classList.add("device-available");
+        }
+      });
+    };
+
+    // Use MutationObserver to watch for style changes on buttons
+    const setupObserver = () => {
+      const hangPublish = document.querySelector("hang-publish");
+      if (!hangPublish) {
+        setTimeout(setupObserver, 100);
+        return;
+      }
+
+      const observer = new MutationObserver(() => {
+        updateButtonClasses();
+      });
+
+      observer.observe(hangPublish, {
+        attributes: true,
+        attributeFilter: ["style"],
+        subtree: true,
+        childList: true,
+      });
+
+      // Initial update after component renders
+      setTimeout(updateButtonClasses, 100);
+      setTimeout(updateButtonClasses, 300);
+      setTimeout(updateButtonClasses, 500);
+    };
+
+    setupObserver();
+  });
+}
+initDeviceButtonFlipper();
+
 // Safari fallback relay servers (WebSocket-enabled)
 const FALLBACK_RELAYS = [
   "us-central.vivoh.earth",
