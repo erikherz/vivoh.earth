@@ -904,7 +904,7 @@ function showLoginRequired() {
   overlay.innerHTML = `
     <div class="login-required">
       <div class="watch-stream-section">
-        <h3>Enter Stream ID to Watch</h3>
+        <h2>Enter Stream ID to Watch</h2>
         <div class="watch-stream-input-row">
           <input type="text" id="watch-stream-id-input" maxlength="5" placeholder="XXXXX" autocomplete="off" spellcheck="false">
           <button id="watch-stream-go-btn" type="button" title="Go to stream">
