@@ -1055,6 +1055,7 @@ function initBroadcastView(streamId: string, user: User | null) {
   const viewersLink = document.getElementById("viewers-link") as HTMLAnchorElement;
   if (viewersLink) {
     viewersLink.href = `/${streamId}/stats`;
+    viewersLink.target = "_blank";
     // Prevent link click from toggling the checkbox
     viewersLink.addEventListener("click", (e) => {
       e.stopPropagation();
