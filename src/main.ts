@@ -1521,7 +1521,7 @@ async function initStatsView(user: User | null) {
           </table>
         </section>
       </div>
-      <button id="refresh-stats" class="btn btn-primary">Refresh</button>
+      <button id="refresh-stats" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
     `;
 
     // Add click handlers for flags
@@ -1633,7 +1633,7 @@ async function initStreamStatsView(streamId: string) {
           <tbody>${viewerRows}</tbody>
         </table>
       </section>
-      <button id="refresh-stream-stats" class="btn btn-primary">Refresh</button>
+      <button id="refresh-stream-stats" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
     `;
 
     // Add click handlers for flags
