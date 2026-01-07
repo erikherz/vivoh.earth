@@ -906,7 +906,7 @@ function showLoginRequired() {
       <div class="watch-stream-section">
         <h2>Enter Stream ID to Watch</h2>
         <div class="watch-stream-input-row">
-          <input type="text" id="watch-stream-id-input" maxlength="5" placeholder="XXXXX" autocomplete="off" spellcheck="false">
+          <input type="text" id="watch-stream-id-input" maxlength="5" placeholder="xxxxx" autocomplete="off" spellcheck="false">
           <button id="watch-stream-go-btn" type="button" title="Go to stream">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="10"/>
@@ -958,7 +958,7 @@ function showLoginRequired() {
   const watchGoBtn = document.getElementById("watch-stream-go-btn");
 
   const goToStream = () => {
-    const streamId = watchInput.value.trim().toUpperCase();
+    const streamId = watchInput.value.trim().toLowerCase();
     if (streamId.length !== 5) {
       alert("Stream IDs are five characters long");
       watchInput.focus();
@@ -973,9 +973,9 @@ function showLoginRequired() {
       goToStream();
     }
   });
-  // Auto-uppercase input
+  // Auto-lowercase input
   watchInput?.addEventListener("input", () => {
-    watchInput.value = watchInput.value.toUpperCase();
+    watchInput.value = watchInput.value.toLowerCase();
   });
 }
 
