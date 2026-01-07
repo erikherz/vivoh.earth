@@ -735,14 +735,17 @@
 
         /* Login required overlay */
         #login-overlay {
-            position: relative;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
             background: var(--overlay-bg);
             display: flex;
             align-items: center;
             justify-content: center;
             border-radius: 12px;
             z-index: 10;
-            padding: 2rem 0;
         }
         .login-required {
             text-align: center;
@@ -835,6 +838,8 @@
         }
         #broadcast-view {
             position: relative;
+            min-height: 500px;
+            margin-bottom: 50px;
         }
 
         /* Hang component button overrides */
