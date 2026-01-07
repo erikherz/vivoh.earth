@@ -1022,6 +1022,18 @@ function initBroadcastView(streamId: string, user: User | null) {
         }
       });
 
+      // Deselect audio-only button when other device buttons are clicked
+      const otherButtons = deviceContainer.querySelectorAll("button:not(.audio-only-btn)");
+      otherButtons.forEach((btn) => {
+        btn.addEventListener("click", () => {
+          // Deselect audio-only when another device is selected
+          if (audioBtn.style.opacity === "1") {
+            publisher.video = true;
+            audioBtn.style.opacity = "0.5";
+          }
+        });
+      });
+
       // Insert after the first button (camera icon)
       const buttons = deviceContainer.querySelectorAll("button");
       if (buttons.length >= 1) {
