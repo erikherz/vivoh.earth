@@ -93,6 +93,46 @@ function initDeviceButtonFlipper() {
         opacity: 1 !important;
         box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
       }
+
+      /* Status indicator: move to left of device buttons, show only ball */
+      hang-publish > div {
+        flex-wrap: nowrap !important;
+      }
+      hang-publish > div > div:first-child {
+        order: 1 !important;
+        display: flex !important;
+        align-items: center !important;
+      }
+      hang-publish > div > div:last-child {
+        order: 0 !important;
+        position: relative;
+        cursor: default;
+      }
+      /* Status indicator tooltip styling */
+      hang-publish > div > div:last-child.status-indicator-styled {
+        font-size: 1.25rem;
+        line-height: 1;
+      }
+      hang-publish > div > div:last-child.status-indicator-styled::after {
+        content: attr(data-status-text);
+        position: absolute;
+        bottom: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0, 0, 0, 0.85);
+        color: #fff;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        white-space: nowrap;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s ease;
+        margin-bottom: 4px;
+      }
+      hang-publish > div > div:last-child.status-indicator-styled:hover::after {
+        opacity: 1;
+      }
     `;
     document.head.appendChild(style);
 
@@ -117,6 +157,24 @@ function initDeviceButtonFlipper() {
           button.classList.add("device-available");
         }
       });
+
+      // Style the status indicator: show only emoji, text as hover tooltip
+      const controlsContainer = hangPublish.querySelector(":scope > div");
+      if (controlsContainer) {
+        const statusDiv = controlsContainer.querySelector(":scope > div:last-child") as HTMLElement;
+        if (statusDiv && statusDiv.textContent) {
+          const fullText = statusDiv.textContent.trim();
+          // Extract emoji (first character or emoji sequence) and text
+          const emojiMatch = fullText.match(/^([\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}])/u);
+          if (emojiMatch) {
+            const emoji = emojiMatch[1];
+            const text = fullText.slice(emoji.length).replace(/^\s+/, ''); // Remove leading space/nbsp
+            statusDiv.textContent = emoji;
+            statusDiv.setAttribute("data-status-text", text);
+            statusDiv.classList.add("status-indicator-styled");
+          }
+        }
+      }
     };
 
     // Use MutationObserver to watch for style changes on buttons
@@ -136,6 +194,7 @@ function initDeviceButtonFlipper() {
         attributeFilter: ["style"],
         subtree: true,
         childList: true,
+        characterData: true,
       });
 
       // Initial update after component renders
