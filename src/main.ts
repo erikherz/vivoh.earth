@@ -67,9 +67,9 @@ function initDeviceButtonFlipper() {
       /* Hide the Microphone toggle button (keep audio-only-btn) */
       hang-publish button[title="Microphone"] { display: none !important; }
 
-      /* Reorder buttons: Video, Audio, Screen, None */
-      hang-publish button[title="Camera"] { order: 1 !important; }
-      hang-publish button.audio-only-btn { order: 2 !important; }
+      /* Reorder buttons: Audio, Video, Screen, None */
+      hang-publish button.audio-only-btn { order: 1 !important; }
+      hang-publish button[title="Camera"] { order: 2 !important; }
       hang-publish button[title="Screen"] { order: 3 !important; }
       hang-publish button[title="Nothing"] { order: 4 !important; }
 
