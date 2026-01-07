@@ -164,14 +164,20 @@ function initDeviceButtonFlipper() {
         const statusDiv = controlsContainer.querySelector(":scope > div:last-child") as HTMLElement;
         if (statusDiv && statusDiv.textContent) {
           const fullText = statusDiv.textContent.trim();
-          // Extract emoji (first character or emoji sequence) and text
-          const emojiMatch = fullText.match(/^([\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}])/u);
-          if (emojiMatch) {
-            const emoji = emojiMatch[1];
-            const text = fullText.slice(emoji.length).replace(/^\s+/, ''); // Remove leading space/nbsp
-            statusDiv.textContent = emoji;
-            statusDiv.setAttribute("data-status-text", text);
-            statusDiv.classList.add("status-indicator-styled");
+          // Only process if there's text after the emoji (not already processed)
+          // Check if it has more than just an emoji (emojis are ~2 chars in length)
+          if (fullText.length > 2) {
+            // Extract emoji (first character or emoji sequence) and text
+            const emojiMatch = fullText.match(/^([\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}])/u);
+            if (emojiMatch) {
+              const emoji = emojiMatch[1];
+              const text = fullText.slice(emoji.length).replace(/^\s+/, ''); // Remove leading space/nbsp
+              if (text) {
+                statusDiv.textContent = emoji;
+                statusDiv.setAttribute("data-status-text", text);
+                statusDiv.classList.add("status-indicator-styled");
+              }
+            }
           }
         }
       }
