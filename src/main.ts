@@ -897,6 +897,20 @@ function showLoginRequired() {
   overlay.id = "login-overlay";
   overlay.innerHTML = `
     <div class="login-required">
+      <div class="watch-stream-section">
+        <h3>Enter Stream ID to Watch</h3>
+        <div class="watch-stream-input-row">
+          <input type="text" id="watch-stream-id-input" maxlength="5" placeholder="XXXXX" autocomplete="off" spellcheck="false">
+          <button id="watch-stream-go-btn" type="button" title="Go to stream">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <polyline points="12 16 16 12 12 8"/>
+              <line x1="8" y1="12" x2="16" y2="12"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="login-divider"><span>or</span></div>
       <h2>Sign in to Broadcast</h2>
       <p>Please sign in with one of the following to start broadcasting:</p>
       <div class="auth-buttons">
@@ -932,6 +946,31 @@ function showLoginRequired() {
   document.getElementById("overlay-login-google")?.addEventListener("click", loginWithGoogle);
   document.getElementById("overlay-login-microsoft")?.addEventListener("click", loginWithMicrosoft);
   document.getElementById("overlay-login-discord")?.addEventListener("click", loginWithDiscord);
+
+  // Watch stream functionality
+  const watchInput = document.getElementById("watch-stream-id-input") as HTMLInputElement;
+  const watchGoBtn = document.getElementById("watch-stream-go-btn");
+
+  const goToStream = () => {
+    const streamId = watchInput.value.trim().toUpperCase();
+    if (streamId.length !== 5) {
+      alert("Stream IDs are five characters long");
+      watchInput.focus();
+      return;
+    }
+    window.open(`/${streamId}`, "_blank");
+  };
+
+  watchGoBtn?.addEventListener("click", goToStream);
+  watchInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      goToStream();
+    }
+  });
+  // Auto-uppercase input
+  watchInput?.addEventListener("input", () => {
+    watchInput.value = watchInput.value.toUpperCase();
+  });
 }
 
 // Initialize broadcast view

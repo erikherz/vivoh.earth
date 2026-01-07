@@ -763,6 +763,78 @@
         .login-required .auth-buttons {
             justify-content: center;
         }
+        /* Watch stream section in login overlay */
+        .watch-stream-section {
+            margin-bottom: 1.5rem;
+        }
+        .watch-stream-section h3 {
+            font-size: 1rem;
+            margin-bottom: 0.75rem;
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+        .watch-stream-input-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+        .watch-stream-input-row input {
+            width: 5.5ch;
+            padding: 0.5rem 0.5rem;
+            font-size: 1.1rem;
+            font-family: monospace;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            background: var(--input-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 6px;
+            color: var(--text-primary);
+        }
+        .watch-stream-input-row input:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+        }
+        .watch-stream-input-row input::placeholder {
+            color: var(--text-secondary);
+            opacity: 0.5;
+        }
+        .watch-stream-input-row button {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.5rem;
+            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            border: 1px solid #3b82f6;
+            border-radius: 6px;
+            color: #fff;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .watch-stream-input-row button:hover {
+            background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%);
+            border-color: #60a5fa;
+            transform: translateY(-1px);
+        }
+        .login-divider {
+            display: flex;
+            align-items: center;
+            margin: 1.5rem 0;
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }
+        .login-divider::before,
+        .login-divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--border-color);
+        }
+        .login-divider span {
+            padding: 0 1rem;
+        }
         #broadcast-view {
             position: relative;
         }
