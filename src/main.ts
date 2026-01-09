@@ -1076,7 +1076,7 @@ function initBroadcastView(streamId: string, user: User | null) {
       const statusDiv = publisher.querySelector(":scope > div > div:last-child");
       const statusText = statusDiv?.textContent || "";
       console.log("[Broadcast Status Check] Status:", statusText, "| Event ID:", broadcastEventId);
-      if (statusText.includes("Live") || statusText.includes("Audio Only")) {
+      if (statusText.includes("🟢") || statusText.includes("Live") || statusText.includes("Audio Only")) {
         if (!broadcastEventId) {
           logBroadcastStart(streamId).then(id => {
             broadcastEventId = id;
