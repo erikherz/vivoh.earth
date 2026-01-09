@@ -66,16 +66,22 @@ export function logout(): void {
 // Stats logging functions
 export async function logBroadcastStart(streamId: string): Promise<number | null> {
   try {
+    console.log("Attempting to log broadcast start for stream:", streamId);
     const response = await fetch("/api/stats/broadcast", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ stream_id: streamId }),
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Failed to log broadcast start:", response.status, errorText);
+      return null;
+    }
     const data = await response.json();
     console.log("Broadcast started with geo:", data.geo);
     return data.id;
-  } catch {
+  } catch (e) {
+    console.error("Error logging broadcast start:", e);
     return null;
   }
 }
