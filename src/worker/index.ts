@@ -613,6 +613,7 @@ async function handleStatsRoutes(
     }
 
     const geo = getGeoFromRequest(request);
+    console.log("Broadcast geo data:", JSON.stringify(geo));
     const result = await env.DB
       .prepare(`
         INSERT INTO broadcast_events (user_id, stream_id, geo_country, geo_city, geo_region, geo_latitude, geo_longitude, geo_timezone)
@@ -622,7 +623,7 @@ async function handleStatsRoutes(
       .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone)
       .first<{ id: number }>();
 
-    return Response.json({ id: result?.id, stream_id: body.stream_id });
+    return Response.json({ id: result?.id, stream_id: body.stream_id, geo });
   }
 
   // POST /api/stats/broadcast/:id/end - End a broadcast

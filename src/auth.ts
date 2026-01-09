@@ -73,6 +73,7 @@ export async function logBroadcastStart(streamId: string): Promise<number | null
     });
     if (!response.ok) return null;
     const data = await response.json();
+    console.log("Broadcast started with geo:", data.geo);
     return data.id;
   } catch {
     return null;
