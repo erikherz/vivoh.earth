@@ -1073,17 +1073,20 @@ function initBroadcastView(streamId: string, user: User | null) {
 
     // Log broadcast start when user starts streaming
     const checkBroadcastStatus = () => {
-      const statusDiv = publisher.querySelector(":scope > div > div:last-child");
+      const statusDiv = publisher.querySelector(":scope > div > div:last-child") as HTMLElement | null;
+      // Check both textContent and data-status-text (after styling, text moves to data attribute)
       const statusText = statusDiv?.textContent || "";
-      console.log("[Broadcast Status Check] Status:", statusText, "| Event ID:", broadcastEventId);
-      if (statusText.includes("🟢") || statusText.includes("Live") || statusText.includes("Audio Only")) {
+      const statusDataText = statusDiv?.getAttribute("data-status-text") || "";
+      const fullStatus = statusText + " " + statusDataText;
+      console.log("[Broadcast Status Check] Status:", fullStatus.trim(), "| Event ID:", broadcastEventId);
+      if (fullStatus.includes("🟢") || fullStatus.includes("Live") || fullStatus.includes("Audio Only")) {
         if (!broadcastEventId) {
           logBroadcastStart(streamId).then(id => {
             broadcastEventId = id;
             console.log("Broadcast started, event ID:", id);
           });
         }
-      } else if (broadcastEventId && statusText.includes("Select Device")) {
+      } else if (broadcastEventId && fullStatus.includes("Select Device")) {
         logBroadcastEnd(broadcastEventId);
         console.log("Broadcast ended, event ID:", broadcastEventId);
         broadcastEventId = null;
