@@ -217,8 +217,6 @@ initDeviceButtonFlipper();
 // Safari fallback relay servers (WebSocket-enabled)
 const FALLBACK_RELAYS = [
   "us-central.vivoh.earth",
-  "eu-central.vivoh.earth",
-  "ap-south.vivoh.earth",
 ];
 
 // Server status tracking
