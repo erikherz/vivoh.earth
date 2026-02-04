@@ -7,8 +7,9 @@ import { install as installWebCodecsPolyfill } from "./webcodecs-polyfill";
 // Detect Safari - even Safari 17+ with WebTransport has compatibility issues with some relays
 const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 
-// Check if we need the polyfill: either no WebTransport or Safari (which has issues)
-const needsPolyfill = typeof WebTransport === "undefined" || isSafari;
+// Check if we need the polyfill: only when WebTransport is not available
+// Safari now uses native WebTransport with Cloudflare relay (fallback relays disabled)
+const needsPolyfill = typeof WebTransport === "undefined";
 if (needsPolyfill) {
   const reason = typeof WebTransport === "undefined"
     ? "WebTransport not supported"
