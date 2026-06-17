@@ -222,7 +222,7 @@
         #broadcast-view section h2 {
             text-align: left;
         }
-        #broadcast-view hang-publish {
+        #broadcast-view moq-publish {
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -842,126 +842,109 @@
             margin-bottom: 15px;
         }
 
-        /* Hang component button overrides */
-        hang-publish button,
-        hang-watch button {
+        /* MoQ core element base layout (headless light-DOM elements) */
+        moq-publish,
+        moq-watch {
+            display: block;
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            width: 100%;
+        }
+        moq-publish video,
+        moq-watch canvas {
+            display: block;
+            width: 100%;
+            max-width: 900px;
+            margin: 0 auto;
+            border-radius: 8px;
+            background: #000;
+        }
+
+        /* Broadcast control bar (custom controls driving <moq-publish>) */
+        .publish-controls {
+            display: flex;
+            flex-wrap: nowrap;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+        .publish-btn {
             background: var(--bg-tertiary);
             border: 1px solid var(--input-border);
             border-radius: 8px;
             padding: 0.5rem 0.75rem;
             color: var(--text-primary);
-            font-size: 1rem;
+            font-size: 1.25rem;
             cursor: pointer;
             transition: all 0.2s ease;
             min-width: 44px;
-            min-height: 36px;
+            min-height: 44px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 0.25rem;
-            font-weight: 500;
+            line-height: 1;
         }
-        hang-publish button:hover,
-        hang-watch button:hover {
+        .publish-btn:hover {
             background: var(--bg-hover);
             border-color: var(--border-active);
             transform: translateY(-1px);
         }
-        hang-publish button:active,
-        hang-watch button:active {
+        .publish-btn:active {
             transform: translateY(0);
         }
-        /* Device selector buttons - larger for emoji */
-        hang-publish button[title] {
-            font-size: 1.25rem;
-            min-width: 44px;
-            min-height: 44px;
+        /* Selected device = dim (already chosen); available = bright (click me) */
+        .publish-btn.device-selected {
+            filter: grayscale(50%) brightness(0.7);
+            opacity: 1;
         }
-        /* Hide "Device:" label from hang-publish */
-        hang-publish > div > div:first-child {
-            font-size: 0;
+        .publish-btn.device-available {
+            filter: brightness(1.1);
+            opacity: 1;
         }
-        hang-publish > div > div:first-child button {
-            font-size: 1.25rem;
-        }
-
-        /* Volume slider styling */
-        hang-watch input[type="range"],
-        hang-publish input[type="range"] {
-            -webkit-appearance: none;
-            appearance: none;
-            background: transparent;
-            cursor: pointer;
-            width: 100%;
-            max-width: 120px;
-        }
-        hang-watch input[type="range"]::-webkit-slider-runnable-track,
-        hang-publish input[type="range"]::-webkit-slider-runnable-track {
-            background: var(--slider-track);
-            height: 6px;
-            border-radius: 3px;
-        }
-        hang-watch input[type="range"]::-webkit-slider-thumb,
-        hang-publish input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            margin-top: -5px;
-            background: #3b82f6;
-            height: 16px;
-            width: 16px;
-            border-radius: 50%;
-            border: 2px solid #1d4ed8;
-            transition: all 0.15s ease;
-        }
-        hang-watch input[type="range"]::-webkit-slider-thumb:hover,
-        hang-publish input[type="range"]::-webkit-slider-thumb:hover {
-            background: #60a5fa;
-            transform: scale(1.1);
-        }
-        hang-watch input[type="range"]::-moz-range-track,
-        hang-publish input[type="range"]::-moz-range-track {
-            background: var(--slider-track);
-            height: 6px;
-            border-radius: 3px;
-        }
-        hang-watch input[type="range"]::-moz-range-thumb,
-        hang-publish input[type="range"]::-moz-range-thumb {
-            background: #3b82f6;
-            height: 16px;
-            width: 16px;
-            border-radius: 50%;
-            border: 2px solid #1d4ed8;
+        .publish-btn.device-available:hover {
+            box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
         }
 
-        /* Hang component text styling and alignment */
-        hang-publish,
-        hang-watch {
-            color: var(--text-primary);
-            font-size: 0.875rem;
-        }
-        /* Ensure internal flex containers are vertically centered */
-        hang-publish > div,
-        hang-watch > div {
-            display: flex;
+        /* Broadcast status indicator (emoji + hover tooltip) */
+        .publish-status {
+            position: relative;
+            font-size: 1.25rem;
+            line-height: 1;
+            cursor: default;
+            display: inline-flex;
             align-items: center;
-            justify-content: center !important;
-            gap: 0.5rem;
         }
-        /* Override hang component's space-between layout */
-        hang-publish,
-        hang-watch {
-            display: block;
+        .publish-status::after {
+            content: attr(data-status-text);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.85);
+            color: #fff;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            white-space: nowrap;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.15s ease;
+            margin-bottom: 4px;
         }
-        hang-publish > div > div,
-        hang-watch > div > div {
-            justify-content: center !important;
+        .publish-status:hover::after {
+            opacity: 1;
         }
 
         /* HTML overlay button and input */
         .html-overlay-btn {
-            order: 5 !important;
-            font-size: 1.25rem !important;
+            font-family: monospace;
+            font-weight: bold;
+            font-size: 0.9rem !important;
             cursor: pointer;
+        }
+        .html-overlay-btn.active {
+            box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
         }
         .html-overlay-container {
             width: 100%;
@@ -1142,23 +1125,18 @@
             </div>
 
             <section>
-                <hang-publish
-                    audio
-                    video
-                    controls>
-                    <video slot="preview" muted autoplay playsinline></video>
-                </hang-publish>
+                <moq-publish announce="source">
+                    <video muted autoplay playsinline></video>
+                </moq-publish>
             </section>
         </div>
 
         <!-- Watch View -->
         <div id="watch-view" class="hidden">
             <section>
-                <hang-watch
-                    controls
-                    muted>
+                <moq-watch muted>
                     <canvas></canvas>
-                </hang-watch>
+                </moq-watch>
             </section>
         </div>
 

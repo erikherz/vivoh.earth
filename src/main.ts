@@ -57,163 +57,30 @@ function initTheme() {
 }
 initTheme();
 
-// Flip device button appearance: selected=dim, available=bright
-// The hang component sets inline opacity (selected=1, unselected=0.5)
-// We invert this by adding CSS classes based on the opacity value
-function initDeviceButtonFlipper() {
-  document.addEventListener("DOMContentLoaded", () => {
-    // Add CSS to invert the visual appearance
-    const style = document.createElement("style");
-    style.textContent = `
-      /* Hide the Microphone toggle button (keep audio-only-btn) */
-      hang-publish button[title="Microphone"] { display: none !important; }
-
-      /* Reorder buttons: Audio, Video, Screen, None */
-      hang-publish button.audio-only-btn { order: 1 !important; }
-      hang-publish button[title="Camera"] { order: 2 !important; }
-      hang-publish button[title="Screen"] { order: 3 !important; }
-      hang-publish button[title="Nothing"] { order: 4 !important; }
-
-      /* Replace camera emoji with video camera emoji */
-      hang-publish button[title="Camera"] {
-        font-size: 0 !important;
-      }
-      hang-publish button[title="Camera"]::after {
-        content: "📹";
-        font-size: 1.25rem;
-      }
-
-      /* Selected device = dim (already chosen, de-emphasized) */
-      hang-publish button[title].device-selected {
-        filter: grayscale(50%) brightness(0.7) !important;
-        opacity: 1 !important;
-      }
-      /* Available device = bright with glow (click me!) */
-      hang-publish button[title].device-available {
-        filter: brightness(1.1) !important;
-        opacity: 1 !important;
-        box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
-      }
-
-      /* Status indicator: move to left of device buttons, show only ball */
-      hang-publish > div {
-        flex-wrap: nowrap !important;
-      }
-      hang-publish > div > div:first-child {
-        order: 1 !important;
-        display: flex !important;
-        align-items: center !important;
-      }
-      hang-publish > div > div:last-child {
-        order: 0 !important;
-        position: relative;
-        cursor: default;
-      }
-      /* Status indicator tooltip styling */
-      hang-publish > div > div:last-child.status-indicator-styled {
-        font-size: 1.25rem;
-        line-height: 1;
-      }
-      hang-publish > div > div:last-child.status-indicator-styled::after {
-        content: attr(data-status-text);
-        position: absolute;
-        bottom: 100%;
-        left: 50%;
-        transform: translateX(-50%);
-        background: rgba(0, 0, 0, 0.85);
-        color: #fff;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 0.75rem;
-        white-space: nowrap;
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity 0.15s ease;
-        margin-bottom: 4px;
-      }
-      hang-publish > div > div:last-child.status-indicator-styled:hover::after {
-        opacity: 1;
-      }
-    `;
-    document.head.appendChild(style);
-
-    const updateButtonClasses = () => {
-      const hangPublish = document.querySelector("hang-publish");
-      if (!hangPublish) return;
-
-      const buttons = hangPublish.querySelectorAll('button[title]');
-      buttons.forEach((btn) => {
-        const button = btn as HTMLButtonElement;
-        const opacity = parseFloat(button.style.opacity);
-
-        // hang sets opacity: 1 = selected/active, 0.5 = available
-        // User wants INVERTED: selected = dim, available = bright
-        if (opacity >= 0.9 || isNaN(opacity)) {
-          // hang's selected (opacity 1) → make it DIM
-          button.classList.remove("device-available");
-          button.classList.add("device-selected");
-        } else {
-          // hang's available (opacity 0.5) → make it BRIGHT
-          button.classList.remove("device-selected");
-          button.classList.add("device-available");
-        }
-      });
-
-      // Style the status indicator: show only emoji, text as hover tooltip
-      const controlsContainer = hangPublish.querySelector(":scope > div");
-      if (controlsContainer) {
-        const statusDiv = controlsContainer.querySelector(":scope > div:last-child") as HTMLElement;
-        if (statusDiv && statusDiv.textContent) {
-          const fullText = statusDiv.textContent.trim();
-          // Only process if there's text after the emoji (not already processed)
-          // Check if it has more than just an emoji (emojis are ~2 chars in length)
-          if (fullText.length > 2) {
-            // Extract emoji (first character or emoji sequence) and text
-            const emojiMatch = fullText.match(/^([\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}])/u);
-            if (emojiMatch) {
-              const emoji = emojiMatch[1];
-              const text = fullText.slice(emoji.length).replace(/^\s+/, ''); // Remove leading space/nbsp
-              if (text) {
-                statusDiv.textContent = emoji;
-                statusDiv.setAttribute("data-status-text", text);
-                statusDiv.classList.add("status-indicator-styled");
-              }
-            }
-          }
-        }
-      }
-    };
-
-    // Use MutationObserver to watch for style changes on buttons
-    const setupObserver = () => {
-      const hangPublish = document.querySelector("hang-publish");
-      if (!hangPublish) {
-        setTimeout(setupObserver, 100);
-        return;
-      }
-
-      const observer = new MutationObserver(() => {
-        updateButtonClasses();
-      });
-
-      observer.observe(hangPublish, {
-        attributes: true,
-        attributeFilter: ["style"],
-        subtree: true,
-        childList: true,
-        characterData: true,
-      });
-
-      // Initial update after component renders
-      setTimeout(updateButtonClasses, 100);
-      setTimeout(updateButtonClasses, 300);
-      setTimeout(updateButtonClasses, 500);
-    };
-
-    setupObserver();
-  });
+// --- Minimal typings for the headless @moq/publish + @moq/watch core elements ---
+// The core elements render no controls of their own; we drive them programmatically.
+// @moq/signals Signals expose peek()/set()/subscribe() (subscribe returns an unsubscribe fn).
+interface MoqSignal<T> {
+  peek(): T;
+  set(value: T): void;
+  subscribe(fn: (value: T) => void): () => void;
 }
-initDeviceButtonFlipper();
+type ConnStatus = "disconnected" | "connecting" | "connected";
+type PublishSource = "camera" | "screen" | "file" | null | undefined;
+
+interface MoqPublishElement extends HTMLElement {
+  source: PublishSource;
+  invisible: boolean;
+  muted: boolean;
+  connection: { status: MoqSignal<ConnStatus> };
+  state: { source: MoqSignal<PublishSource> };
+}
+
+interface MoqWatchElement extends HTMLElement {
+  muted: boolean;
+  volume: number;
+  connection: { status: MoqSignal<ConnStatus> };
+}
 
 // Safari fallback relay servers (WebSocket-enabled)
 const FALLBACK_RELAYS = [
@@ -693,15 +560,17 @@ const TINYMOQ_JWT =
 let RELAY_URL = `https://cdn.tinymoq.com/?jwt=${TINYMOQ_JWT}`; // (was: relay.cloudflare.mediaoverquic.com)
 const NAMESPACE_PREFIX = "vivoh.earth";
 
-// Dynamic imports for hang components - MUST happen after polyfills are installed
-// ES module static imports are hoisted and execute before any code runs
+// Dynamic imports for the MoQ web components - MUST happen after polyfills are installed.
+// These register the headless light-DOM core elements <moq-publish> and <moq-watch>
+// from @moq/publish + @moq/watch (which use @moq/net, negotiating moq-lite-04).
+// ES module static imports are hoisted and execute before any code runs.
 const loadHangComponents = async () => {
   // Install WebCodecs polyfill for Opus audio encoding (Safari)
-  // This must complete before hang components try to use AudioEncoder
+  // This must complete before the components try to use AudioEncoder
   await installWebCodecsPolyfill();
 
-  await import("@kixelated/hang/publish/element");
-  await import("@kixelated/hang/watch/element");
+  await import("@moq/publish/element");
+  await import("@moq/watch/element");
 };
 
 import {
@@ -1070,40 +939,120 @@ function initBroadcastView(streamId: string, user: User | null) {
     });
   }
 
-  // Set stream name on publisher
-  const publisher = document.querySelector("hang-publish") as HTMLElement & { video: boolean; device: string };
+  // Drive the headless <moq-publish> core element with our own control bar.
+  const publisher = document.querySelector("moq-publish") as MoqPublishElement | null;
   if (publisher) {
     publisher.setAttribute("url", RELAY_URL);
     publisher.setAttribute("name", streamName);
 
-    // Track broadcast event
-    let broadcastEventId: number | null = null;
+    type DeviceMode = "camera" | "audio" | "screen" | "off";
 
-    // Log broadcast start when user starts streaming
-    const checkBroadcastStatus = () => {
-      const statusDiv = publisher.querySelector(":scope > div > div:last-child") as HTMLElement | null;
-      // Check both textContent and data-status-text (after styling, text moves to data attribute)
-      const statusText = statusDiv?.textContent || "";
-      const statusDataText = statusDiv?.getAttribute("data-status-text") || "";
-      const fullStatus = statusText + " " + statusDataText;
-      console.log("[Broadcast Status Check] Status:", fullStatus.trim(), "| Event ID:", broadcastEventId);
-      if (fullStatus.includes("🟢") || fullStatus.includes("Live") || fullStatus.includes("Audio Only")) {
-        if (!broadcastEventId) {
-          logBroadcastStart(streamId).then(id => {
-            broadcastEventId = id;
-            console.log("Broadcast started, event ID:", id);
-          });
-        }
-      } else if (broadcastEventId && fullStatus.includes("Select Device")) {
+    // Map a control-bar selection to the element's source/invisible/muted props.
+    // audio-only = camera source with video disabled (invisible); off = no source.
+    const applyMode = (mode: DeviceMode) => {
+      switch (mode) {
+        case "camera":
+          publisher.invisible = false;
+          publisher.muted = false;
+          publisher.source = "camera";
+          break;
+        case "audio":
+          publisher.invisible = true;
+          publisher.muted = false;
+          publisher.source = "camera";
+          break;
+        case "screen":
+          publisher.invisible = false;
+          publisher.muted = false;
+          publisher.source = "screen";
+          break;
+        case "off":
+          publisher.source = null;
+          break;
+      }
+    };
+
+    // --- Build the control bar (status + device buttons + overlay toggle) ---
+    const bar = document.createElement("div");
+    bar.className = "publish-controls";
+
+    const statusEl = document.createElement("div");
+    statusEl.className = "publish-status";
+    statusEl.textContent = "⚪";
+    statusEl.setAttribute("data-status-text", "Offline");
+    bar.appendChild(statusEl);
+
+    const deviceButtons: Partial<Record<DeviceMode, HTMLButtonElement>> = {};
+
+    // Selected = dim (already chosen, de-emphasized); available = bright (click me).
+    const setActiveButton = (mode: DeviceMode | null) => {
+      (Object.keys(deviceButtons) as DeviceMode[]).forEach((m) => {
+        const btn = deviceButtons[m];
+        if (!btn) return;
+        btn.classList.toggle("device-selected", m === mode);
+        btn.classList.toggle("device-available", m !== mode);
+      });
+    };
+
+    const makeDeviceButton = (mode: DeviceMode, emoji: string, label: string) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "publish-btn";
+      b.title = label;
+      b.textContent = emoji;
+      b.addEventListener("click", () => {
+        applyMode(mode);
+        setActiveButton(mode);
+      });
+      deviceButtons[mode] = b;
+      bar.appendChild(b);
+    };
+    makeDeviceButton("audio", "🎤", "Audio Only");
+    makeDeviceButton("camera", "📹", "Camera");
+    makeDeviceButton("screen", "🖥️", "Screen");
+    makeDeviceButton("off", "⏹️", "Off");
+    setActiveButton(null);
+
+    // Place the control bar directly after the <moq-publish> element.
+    publisher.insertAdjacentElement("afterend", bar);
+
+    // --- Status indicator + broadcast start/end logging, driven by signals ---
+    let broadcastEventId: number | null = null;
+    const refreshStatus = () => {
+      const conn = publisher.connection?.status?.peek?.() ?? "disconnected";
+      const hasSource = !!publisher.state?.source?.peek?.();
+      let emoji = "⚪";
+      let text = "Offline";
+      if (conn === "connected" && hasSource) {
+        emoji = "🟢"; text = "Live";
+      } else if (conn === "connecting") {
+        emoji = "🟡"; text = "Connecting";
+      } else if (conn === "connected" && !hasSource) {
+        emoji = "🟡"; text = "Select Device";
+      }
+      statusEl.textContent = emoji;
+      statusEl.setAttribute("data-status-text", text);
+
+      // Log broadcast start/end transitions to the stats DB.
+      const isLive = conn === "connected" && hasSource;
+      if (isLive && !broadcastEventId) {
+        logBroadcastStart(streamId).then((id) => {
+          broadcastEventId = id;
+          console.log("Broadcast started, event ID:", id);
+        });
+      } else if (!isLive && broadcastEventId) {
         logBroadcastEnd(broadcastEventId);
         console.log("Broadcast ended, event ID:", broadcastEventId);
         broadcastEventId = null;
       }
     };
-
-    // Observe status changes
-    const statusObserver = new MutationObserver(checkBroadcastStatus);
-    statusObserver.observe(publisher, { childList: true, subtree: true, characterData: true });
+    try {
+      publisher.connection?.status?.subscribe?.(refreshStatus);
+      publisher.state?.source?.subscribe?.(refreshStatus);
+    } catch (err) {
+      console.warn("Could not subscribe to publish status signals:", err);
+    }
+    refreshStatus();
 
     // Log end on page unload
     window.addEventListener("beforeunload", () => {
@@ -1112,127 +1061,53 @@ function initBroadcastView(streamId: string, user: User | null) {
       }
     });
 
-    // Inject audio-only button into device selector
-    const injectAudioButton = () => {
-      // Find the device selector container (div with flex layout containing buttons)
-      const deviceContainer = publisher.querySelector(":scope > div > div");
-      if (!deviceContainer || deviceContainer.querySelector(".audio-only-btn")) return;
+    // --- HTML overlay editor (broadcaster-authored HTML shown to viewers) ---
+    const overlayBtn = document.createElement("button");
+    overlayBtn.type = "button";
+    overlayBtn.title = "HTML Overlay";
+    overlayBtn.className = "publish-btn html-overlay-btn";
+    overlayBtn.textContent = "</>";
+    bar.appendChild(overlayBtn);
 
-      const audioBtn = document.createElement("button");
-      audioBtn.type = "button";
-      audioBtn.title = "Audio Only";
-      audioBtn.className = "audio-only-btn";
-      audioBtn.textContent = "🎤";
-      audioBtn.style.cursor = "pointer";
-      audioBtn.style.opacity = "0.5";
+    const overlayContainer = document.createElement("div");
+    overlayContainer.className = "html-overlay-container";
+    overlayContainer.innerHTML = `
+      <div class="html-overlay-input" contenteditable="true"></div>
+      <div class="html-overlay-hint">HTML content will be displayed below the video for all viewers</div>
+    `;
+    const section = document.querySelector("#broadcast-view section");
+    if (section && section.parentNode) {
+      section.parentNode.insertBefore(overlayContainer, section.nextSibling);
+    }
 
-      audioBtn.addEventListener("click", () => {
-        const isActive = audioBtn.style.opacity === "1";
-        if (isActive) {
-          // Turn off audio-only mode
-          publisher.video = true;
-          audioBtn.style.opacity = "0.5";
-        } else {
-          // Turn on audio-only mode
-          publisher.video = false;
-          publisher.device = "camera";
-          audioBtn.style.opacity = "1";
-        }
-      });
+    const overlayInput = overlayContainer.querySelector(".html-overlay-input") as HTMLDivElement;
+    let saveTimeout: number | null = null;
 
-      // Deselect audio-only button when other device buttons are clicked
-      const otherButtons = deviceContainer.querySelectorAll("button:not(.audio-only-btn)");
-      otherButtons.forEach((btn) => {
-        btn.addEventListener("click", () => {
-          // Deselect audio-only when another device is selected
-          if (audioBtn.style.opacity === "1") {
-            publisher.video = true;
-            audioBtn.style.opacity = "0.5";
-          }
-        });
-      });
-
-      // Insert after the first button (camera icon)
-      const buttons = deviceContainer.querySelectorAll("button");
-      if (buttons.length >= 1) {
-        buttons[0].after(audioBtn);
-      } else {
-        deviceContainer.appendChild(audioBtn);
+    // Load existing overlay content
+    getStreamSettings(streamId).then((settings) => {
+      if (settings.overlay_html) {
+        overlayInput.textContent = settings.overlay_html;
+        overlayBtn.classList.add("active");
       }
-    };
+    });
 
-    // Try after component renders and observe for changes
-    const observer = new MutationObserver(() => injectAudioButton());
-    observer.observe(publisher, { childList: true, subtree: true });
-    setTimeout(injectAudioButton, 100);
-    setTimeout(injectAudioButton, 500);
+    // Save overlay content with debounce
+    overlayInput.addEventListener("input", () => {
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = window.setTimeout(() => {
+        const content = overlayInput.textContent || "";
+        updateStreamSettings(streamId, { overlay_html: content });
+        overlayBtn.classList.toggle("active", !!content.trim());
+      }, 500);
+    });
 
-    // Inject HTML overlay button into device selector
-    const injectHtmlOverlayButton = () => {
-      const deviceContainer = publisher.querySelector(":scope > div > div");
-      if (!deviceContainer || deviceContainer.querySelector(".html-overlay-btn")) return;
-
-      const htmlBtn = document.createElement("button");
-      htmlBtn.type = "button";
-      htmlBtn.title = "HTML Overlay";
-      htmlBtn.className = "html-overlay-btn";
-      htmlBtn.textContent = "</>";
-      htmlBtn.style.cursor = "pointer";
-      htmlBtn.style.opacity = "0.5";
-      htmlBtn.style.fontFamily = "monospace";
-      htmlBtn.style.fontWeight = "bold";
-      htmlBtn.style.fontSize = "0.9rem";
-
-      // Create the overlay input container
-      const overlayContainer = document.createElement("div");
-      overlayContainer.className = "html-overlay-container";
-      overlayContainer.innerHTML = `
-        <div class="html-overlay-input" contenteditable="true"></div>
-        <div class="html-overlay-hint">HTML content will be displayed below the video for all viewers</div>
-      `;
-
-      // Insert container after the section
-      const section = document.querySelector("#broadcast-view section");
-      if (section && section.parentNode) {
-        section.parentNode.insertBefore(overlayContainer, section.nextSibling);
+    // Toggle overlay input visibility
+    overlayBtn.addEventListener("click", () => {
+      overlayContainer.classList.toggle("visible");
+      if (overlayContainer.classList.contains("visible")) {
+        overlayInput.focus();
       }
-
-      const overlayInput = overlayContainer.querySelector(".html-overlay-input") as HTMLDivElement;
-      let saveTimeout: number | null = null;
-
-      // Load existing overlay content
-      getStreamSettings(streamId).then(settings => {
-        if (settings.overlay_html) {
-          overlayInput.textContent = settings.overlay_html;
-          htmlBtn.style.opacity = "1";
-        }
-      });
-
-      // Save overlay content with debounce
-      overlayInput.addEventListener("input", () => {
-        if (saveTimeout) clearTimeout(saveTimeout);
-        saveTimeout = window.setTimeout(() => {
-          const content = overlayInput.textContent || "";
-          updateStreamSettings(streamId, { overlay_html: content });
-          htmlBtn.style.opacity = content.trim() ? "1" : "0.5";
-        }, 500);
-      });
-
-      // Toggle overlay input visibility
-      htmlBtn.addEventListener("click", () => {
-        overlayContainer.classList.toggle("visible");
-        if (overlayContainer.classList.contains("visible")) {
-          overlayInput.focus();
-        }
-      });
-
-      // Append to device container
-      deviceContainer.appendChild(htmlBtn);
-    };
-
-    // Inject HTML overlay button after component renders
-    setTimeout(injectHtmlOverlayButton, 200);
-    setTimeout(injectHtmlOverlayButton, 600);
+    });
   }
 
   // New stream button
@@ -1314,11 +1189,18 @@ async function initWatchView(streamId: string, user: User | null) {
     return;
   }
 
-  // Set stream name on watcher
-  const watcher = document.querySelector("hang-watch");
+  // Set stream name on watcher (headless <moq-watch> core element)
+  const watcher = document.querySelector("moq-watch") as MoqWatchElement | null;
   if (watcher) {
     watcher.setAttribute("url", RELAY_URL);
     watcher.setAttribute("name", streamName);
+
+    // Start muted; first click/tap on the player enables audio.
+    const enableAudio = () => {
+      watcher.muted = false;
+      watcher.removeEventListener("click", enableAudio);
+    };
+    watcher.addEventListener("click", enableAudio);
 
     // Log watch event
     let watchEventId: number | null = null;
