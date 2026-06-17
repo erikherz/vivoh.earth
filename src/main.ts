@@ -1082,6 +1082,13 @@ function initBroadcastView(streamId: string, user: User | null) {
         if (kind === "video" && !diagScheduled) {
           diagScheduled = true;
           setTimeout(dumpEncoderState, 4000);
+          // The encoder is LAZY: it only activates when a viewer subscribes to video/hd.
+          // Log that transition so we can confirm a watcher is actually pulling video.
+          try {
+            (publisher.broadcast as { video?: Record<string, any> } | undefined)
+              ?.video?.hd?.active?.subscribe?.((a: unknown) =>
+                console.log("[moq-publish] video/hd encoder active ->", a, "(true once a viewer subscribes)"));
+          } catch { /* ignore */ }
         }
       } else {
         console.warn(`[moq-publish] ${kind} track: NONE — capture not running or getUserMedia failed/denied`);
