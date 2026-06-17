@@ -74,18 +74,10 @@ interface MoqPublishElement extends HTMLElement {
   muted: boolean;
   connection: { status: MoqSignal<ConnStatus> };
   state: { source: MoqSignal<PublishSource> };
-  // The captured tracks the encoder actually consumes (undefined until capture succeeds).
-  broadcast?: {
-    video?: { source: MoqSignal<unknown> };
-    audio?: { source: MoqSignal<unknown> };
-  };
 }
 
 interface MoqWatchElement extends HTMLElement {
   muted: boolean;
-  volume: number;
-  connection: { status: MoqSignal<ConnStatus> };
-  broadcast?: { catalog?: MoqSignal<unknown> };
 }
 
 // Safari fallback relay servers (WebSocket-enabled)
@@ -1009,7 +1001,6 @@ function initBroadcastView(streamId: string, user: User | null) {
           publisher.source = null;
           break;
       }
-      console.log(`[moq-publish] mode=${mode} -> source=${String(publisher.source)} invisible=${publisher.invisible} muted=${publisher.muted}`);
       // Going live (any real source) assigns + connects to a relay; "off" releases it.
       if (mode === "off") {
         endBroadcast();
@@ -1085,65 +1076,6 @@ function initBroadcastView(streamId: string, user: User | null) {
       console.warn("Could not subscribe to publish status signals:", err);
     }
     refreshStatus();
-
-    // --- Diagnostics: @moq silently swallows getUserMedia/encoder errors, so log
-    // whether real media tracks actually attach to the broadcast encoder. ---
-    // Dump the encoder's internal state (resolved codec / active / catalog).
-    const dumpEncoderState = () => {
-      const v = (publisher.broadcast as { video?: Record<string, any> } | undefined)?.video as
-        | Record<string, any>
-        | undefined;
-      console.log("[moq-publish][diag] video.frame present?", !!v?.frame?.peek?.());
-      console.log("[moq-publish][diag] video.hd.resolved (codec config):", v?.hd?.resolved?.peek?.());
-      console.log("[moq-publish][diag] video.hd.active:", v?.hd?.active?.peek?.());
-      console.log("[moq-publish][diag] video.hd.catalog:", v?.hd?.catalog?.peek?.());
-      console.log("[moq-publish][diag] video.catalog:", v?.catalog?.peek?.());
-    };
-
-    let diagScheduled = false;
-    const logTrack = (kind: string, track: unknown) => {
-      const t = track as { label?: string; readyState?: string } | null | undefined;
-      if (t && typeof t === "object") {
-        console.log(`[moq-publish] ${kind} track ATTACHED:`, t.label ?? "(no label)", "readyState:", t.readyState);
-        if (kind === "video" && !diagScheduled) {
-          diagScheduled = true;
-          setTimeout(dumpEncoderState, 4000);
-          // The encoder is LAZY: it only activates when a viewer subscribes to video/hd.
-          // Log that transition so we can confirm a watcher is actually pulling video.
-          try {
-            (publisher.broadcast as { video?: Record<string, any> } | undefined)
-              ?.video?.hd?.active?.subscribe?.((a: unknown) =>
-                console.log("[moq-publish] video/hd encoder active ->", a, "(true once a viewer subscribes)"));
-          } catch { /* ignore */ }
-        }
-      } else {
-        console.warn(`[moq-publish] ${kind} track: NONE — capture not running or getUserMedia failed/denied`);
-      }
-    };
-    try {
-      publisher.broadcast?.video?.source?.subscribe?.((t) => logTrack("video", t));
-      publisher.broadcast?.audio?.source?.subscribe?.((t) => logTrack("audio", t));
-    } catch (err) {
-      console.warn("[moq-publish] could not subscribe to media source signals:", err);
-    }
-
-    // Probe which video codecs THIS browser can actually encode at 1280x720,
-    // to confirm the @moq codec negotiation has a viable option.
-    (async () => {
-      const VE = (self as { VideoEncoder?: any }).VideoEncoder;
-      if (!VE?.isConfigSupported) {
-        console.warn("[moq-publish][diag] VideoEncoder.isConfigSupported unavailable");
-        return;
-      }
-      for (const codec of ["avc1.42E01E", "vp8", "vp09.00.10.08", "av01.0.04M.08", "hev1.1.6.L93.B0"]) {
-        try {
-          const res = await VE.isConfigSupported({ codec, width: 1280, height: 720, latencyMode: "realtime" });
-          console.log(`[moq-publish][diag] encode support ${codec}:`, res?.supported);
-        } catch (e) {
-          console.log(`[moq-publish][diag] encode support ${codec}: threw`, e);
-        }
-      }
-    })();
 
     // Log end on page unload
     window.addEventListener("beforeunload", () => {
@@ -1291,23 +1223,8 @@ async function initWatchView(streamId: string, user: User | null) {
     // Falls back to the static relay if the stream isn't routed yet / lookup fails.
     const route = await getStreamRoute(streamId);
     const watchUrl = route ? `https://${route}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
-    console.log("[routing] viewer relay:", route ?? "(static fallback)");
     watcher.setAttribute("url", watchUrl);
     watcher.setAttribute("name", streamName);
-
-    // --- Watch diagnostics: does the viewer receive + parse the catalog (and then
-    // subscribe to video/hd, which wakes the lazy publisher's encoder)? ---
-    try {
-      (watcher.connection as { status?: MoqSignal<ConnStatus> })?.status?.subscribe?.((s) =>
-        console.log("[moq-watch] connection status ->", s));
-      watcher.broadcast?.catalog?.subscribe?.((c) =>
-        console.log("[moq-watch] catalog received ->", c));
-    } catch (err) {
-      console.warn("[moq-watch] could not subscribe to watch signals:", err);
-    }
-    setTimeout(() => {
-      console.log("[moq-watch][diag] catalog after 5s:", watcher.broadcast?.catalog?.peek?.());
-    }, 5000);
 
     // Start muted; first click/tap on the player enables audio.
     const enableAudio = () => {
