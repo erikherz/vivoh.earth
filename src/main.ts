@@ -1062,10 +1062,27 @@ function initBroadcastView(streamId: string, user: User | null) {
 
     // --- Diagnostics: @moq silently swallows getUserMedia/encoder errors, so log
     // whether real media tracks actually attach to the broadcast encoder. ---
+    // Dump the encoder's internal state (resolved codec / active / catalog).
+    const dumpEncoderState = () => {
+      const v = (publisher.broadcast as { video?: Record<string, any> } | undefined)?.video as
+        | Record<string, any>
+        | undefined;
+      console.log("[moq-publish][diag] video.frame present?", !!v?.frame?.peek?.());
+      console.log("[moq-publish][diag] video.hd.resolved (codec config):", v?.hd?.resolved?.peek?.());
+      console.log("[moq-publish][diag] video.hd.active:", v?.hd?.active?.peek?.());
+      console.log("[moq-publish][diag] video.hd.catalog:", v?.hd?.catalog?.peek?.());
+      console.log("[moq-publish][diag] video.catalog:", v?.catalog?.peek?.());
+    };
+
+    let diagScheduled = false;
     const logTrack = (kind: string, track: unknown) => {
       const t = track as { label?: string; readyState?: string } | null | undefined;
       if (t && typeof t === "object") {
         console.log(`[moq-publish] ${kind} track ATTACHED:`, t.label ?? "(no label)", "readyState:", t.readyState);
+        if (kind === "video" && !diagScheduled) {
+          diagScheduled = true;
+          setTimeout(dumpEncoderState, 4000);
+        }
       } else {
         console.warn(`[moq-publish] ${kind} track: NONE — capture not running or getUserMedia failed/denied`);
       }
@@ -1076,6 +1093,24 @@ function initBroadcastView(streamId: string, user: User | null) {
     } catch (err) {
       console.warn("[moq-publish] could not subscribe to media source signals:", err);
     }
+
+    // Probe which video codecs THIS browser can actually encode at 1280x720,
+    // to confirm the @moq codec negotiation has a viable option.
+    (async () => {
+      const VE = (self as { VideoEncoder?: any }).VideoEncoder;
+      if (!VE?.isConfigSupported) {
+        console.warn("[moq-publish][diag] VideoEncoder.isConfigSupported unavailable");
+        return;
+      }
+      for (const codec of ["avc1.42E01E", "vp8", "vp09.00.10.08", "av01.0.04M.08", "hev1.1.6.L93.B0"]) {
+        try {
+          const res = await VE.isConfigSupported({ codec, width: 1280, height: 720, latencyMode: "realtime" });
+          console.log(`[moq-publish][diag] encode support ${codec}:`, res?.supported);
+        } catch (e) {
+          console.log(`[moq-publish][diag] encode support ${codec}: threw`, e);
+        }
+      }
+    })();
 
     // Log end on page unload
     window.addEventListener("beforeunload", () => {
