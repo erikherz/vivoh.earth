@@ -863,7 +863,10 @@ function showLoginRequired() {
 
 // Initialize broadcast view
 function initBroadcastView(streamId: string, user: User | null) {
-  const streamName = `${NAMESPACE_PREFIX}/${streamId}`;
+  // The ".hang" suffix makes the catalog format explicit so the watcher can parse
+  // the catalog and subscribe to video/audio tracks (otherwise detectFormat() is
+  // undefined and the viewer only fetches catalog.json, never video/hd).
+  const streamName = `${NAMESPACE_PREFIX}/${streamId}.hang`;
   const shareUrl = `${window.location.origin}/${streamId}`;
 
   console.log(`Vivoh.Earth Broadcast - Stream: ${streamId}`);
@@ -1233,7 +1236,10 @@ function showWatchLoginRequired() {
 
 // Initialize watch view
 async function initWatchView(streamId: string, user: User | null) {
-  const streamName = `${NAMESPACE_PREFIX}/${streamId}`;
+  // The ".hang" suffix makes the catalog format explicit so the watcher can parse
+  // the catalog and subscribe to video/audio tracks (otherwise detectFormat() is
+  // undefined and the viewer only fetches catalog.json, never video/hd).
+  const streamName = `${NAMESPACE_PREFIX}/${streamId}.hang`;
 
   console.log(`Vivoh.Earth Watch - Stream: ${streamId}`);
 
