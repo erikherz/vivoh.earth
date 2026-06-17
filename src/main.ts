@@ -238,7 +238,7 @@ interface ServerStatus {
 
 const serverStatus: ServerStatus = {
   mode: needsPolyfill ? "websocket" : "webtransport",
-  selectedServer: "relay.cloudflare.mediaoverquic.com",
+  selectedServer: "cdn.tinymoq.com",
   connected: false,
   raceResults: [],
 };
@@ -682,8 +682,15 @@ function updateServerStatusPanel() {
   });
 }
 
+// tinymoq relay auth token (client publish+subscribe JWT, put/get="" = all paths, exp 2026-07-17).
+// This is a client-side connection token by design (the browser must present it to connect),
+// not a server secret. Passed as ?jwt= on the WebTransport connection URL per the hang README.
+const TINYMOQ_JWT =
+  "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6IjkzMDlmZmRlNjRlMGJmMGYifQ.eyJwdXQiOlsiIl0sImdldCI6WyIiXSwiZXhwIjoxNzg0MzA4MjY4fQ.1wt1q75WmBL376xj19fRR_MhVmSLr5zZFfyHivwFl9o";
+
 // Relay URL - set dynamically for Safari fallback, static for native WebTransport
-let RELAY_URL = "https://relay.cloudflare.mediaoverquic.com"; // Default for Chrome/Firefox
+// hang connects WebTransport to this URL directly; the broadcast path travels as the `name` attr.
+let RELAY_URL = `https://cdn.tinymoq.com/?jwt=${TINYMOQ_JWT}`; // (was: relay.cloudflare.mediaoverquic.com)
 const NAMESPACE_PREFIX = "vivoh.earth";
 
 // Dynamic imports for hang components - MUST happen after polyfills are installed
