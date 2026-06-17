@@ -85,6 +85,7 @@ interface MoqWatchElement extends HTMLElement {
   muted: boolean;
   volume: number;
   connection: { status: MoqSignal<ConnStatus> };
+  broadcast?: { catalog?: MoqSignal<unknown> };
 }
 
 // Safari fallback relay servers (WebSocket-enabled)
@@ -1265,6 +1266,20 @@ async function initWatchView(streamId: string, user: User | null) {
   if (watcher) {
     watcher.setAttribute("url", RELAY_URL);
     watcher.setAttribute("name", streamName);
+
+    // --- Watch diagnostics: does the viewer receive + parse the catalog (and then
+    // subscribe to video/hd, which wakes the lazy publisher's encoder)? ---
+    try {
+      (watcher.connection as { status?: MoqSignal<ConnStatus> })?.status?.subscribe?.((s) =>
+        console.log("[moq-watch] connection status ->", s));
+      watcher.broadcast?.catalog?.subscribe?.((c) =>
+        console.log("[moq-watch] catalog received ->", c));
+    } catch (err) {
+      console.warn("[moq-watch] could not subscribe to watch signals:", err);
+    }
+    setTimeout(() => {
+      console.log("[moq-watch][diag] catalog after 5s:", watcher.broadcast?.catalog?.peek?.());
+    }, 5000);
 
     // Start muted; first click/tap on the player enables audio.
     const enableAudio = () => {
