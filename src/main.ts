@@ -590,6 +590,7 @@ import {
   logBroadcastEnd,
   logWatchStart,
   logWatchEnd,
+  getStreamRoute,
   checkStreamExists,
   getStreamSettings,
   updateStreamSettings,
@@ -951,10 +952,39 @@ function initBroadcastView(streamId: string, user: User | null) {
   // Drive the headless <moq-publish> core element with our own control bar.
   const publisher = document.querySelector("moq-publish") as MoqPublishElement | null;
   if (publisher) {
-    publisher.setAttribute("url", RELAY_URL);
+    // The relay URL is NOT static: on go-live the Worker calls tinymoq /assign and
+    // returns the relay hosting this broadcast; we point the publisher at it then.
     publisher.setAttribute("name", streamName);
 
     type DeviceMode = "camera" | "audio" | "screen" | "off";
+
+    let broadcastEventId: number | null = null;
+    let goLivePromise: Promise<void> | null = null;
+
+    // First device selection = go live: get the assigned relay, then connect to it.
+    // logBroadcastStart hits POST /api/stats/broadcast which calls /assign and stores
+    // the relay on the broadcast row (so viewers can co-locate). Idempotent/sticky.
+    const goLive = (): Promise<void> => {
+      if (goLivePromise) return goLivePromise;
+      goLivePromise = logBroadcastStart(streamId).then((res) => {
+        broadcastEventId = res?.eventId ?? null;
+        const relay = res?.relay;
+        const url = relay ? `https://${relay}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
+        publisher.setAttribute("url", url);
+        console.log("[routing] broadcaster relay:", relay ?? "(static fallback)", "eventId:", broadcastEventId);
+      });
+      return goLivePromise;
+    };
+
+    // End the broadcast: mark ended + free the relay assignment (server-side /release).
+    const endBroadcast = () => {
+      if (broadcastEventId) {
+        logBroadcastEnd(broadcastEventId);
+        console.log("Broadcast ended, event ID:", broadcastEventId);
+        broadcastEventId = null;
+      }
+      goLivePromise = null; // a later device selection re-assigns
+    };
 
     // Map a control-bar selection to the element's source/invisible/muted props.
     // audio-only = camera source with video disabled (invisible); off = no source.
@@ -980,6 +1010,12 @@ function initBroadcastView(streamId: string, user: User | null) {
           break;
       }
       console.log(`[moq-publish] mode=${mode} -> source=${String(publisher.source)} invisible=${publisher.invisible} muted=${publisher.muted}`);
+      // Going live (any real source) assigns + connects to a relay; "off" releases it.
+      if (mode === "off") {
+        endBroadcast();
+      } else {
+        void goLive();
+      }
     };
 
     // --- Build the control bar (status + device buttons + overlay toggle) ---
@@ -1026,8 +1062,7 @@ function initBroadcastView(streamId: string, user: User | null) {
     // Place the control bar directly after the <moq-publish> element.
     publisher.insertAdjacentElement("afterend", bar);
 
-    // --- Status indicator + broadcast start/end logging, driven by signals ---
-    let broadcastEventId: number | null = null;
+    // --- Status indicator (display only; go-live logging is handled by goLive) ---
     const refreshStatus = () => {
       const conn = publisher.connection?.status?.peek?.() ?? "disconnected";
       const hasSource = !!publisher.state?.source?.peek?.();
@@ -1042,19 +1077,6 @@ function initBroadcastView(streamId: string, user: User | null) {
       }
       statusEl.textContent = emoji;
       statusEl.setAttribute("data-status-text", text);
-
-      // Log broadcast start/end transitions to the stats DB.
-      const isLive = conn === "connected" && hasSource;
-      if (isLive && !broadcastEventId) {
-        logBroadcastStart(streamId).then((id) => {
-          broadcastEventId = id;
-          console.log("Broadcast started, event ID:", id);
-        });
-      } else if (!isLive && broadcastEventId) {
-        logBroadcastEnd(broadcastEventId);
-        console.log("Broadcast ended, event ID:", broadcastEventId);
-        broadcastEventId = null;
-      }
     };
     try {
       publisher.connection?.status?.subscribe?.(refreshStatus);
@@ -1264,7 +1286,13 @@ async function initWatchView(streamId: string, user: User | null) {
   // Set stream name on watcher (headless <moq-watch> core element)
   const watcher = document.querySelector("moq-watch") as MoqWatchElement | null;
   if (watcher) {
-    watcher.setAttribute("url", RELAY_URL);
+    // Co-locate on the publisher's relay: look up the broadcast→relay route.
+    // Relays are islands, so the viewer MUST use the same relay as the broadcaster.
+    // Falls back to the static relay if the stream isn't routed yet / lookup fails.
+    const route = await getStreamRoute(streamId);
+    const watchUrl = route ? `https://${route}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
+    console.log("[routing] viewer relay:", route ?? "(static fallback)");
+    watcher.setAttribute("url", watchUrl);
     watcher.setAttribute("name", streamName);
 
     // --- Watch diagnostics: does the viewer receive + parse the catalog (and then

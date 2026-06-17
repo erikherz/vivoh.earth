@@ -64,7 +64,12 @@ export function logout(): void {
 }
 
 // Stats logging functions
-export async function logBroadcastStart(streamId: string): Promise<number | null> {
+export interface BroadcastStart {
+  eventId: number;
+  relay: string | null; // assigned tinymoq relay "host:port", or null on failure
+}
+
+export async function logBroadcastStart(streamId: string): Promise<BroadcastStart | null> {
   try {
     console.log("Attempting to log broadcast start for stream:", streamId);
     const response = await fetch("/api/stats/broadcast", {
@@ -78,10 +83,23 @@ export async function logBroadcastStart(streamId: string): Promise<number | null
       return null;
     }
     const data = await response.json();
-    console.log("Broadcast started with geo:", data.geo);
-    return data.id;
+    console.log("Broadcast started with geo:", data.geo, "relay:", data.relay);
+    return { eventId: data.id, relay: data.relay ?? null };
   } catch (e) {
     console.error("Error logging broadcast start:", e);
+    return null;
+  }
+}
+
+// Look up the relay hosting a live broadcast (for viewers to co-locate).
+// Returns "host:port", or null if the stream is offline / not yet routed.
+export async function getStreamRoute(streamId: string): Promise<string | null> {
+  try {
+    const response = await fetch(`/api/streams/${streamId}/route`);
+    if (!response.ok) return null; // 404 = offline
+    const data = await response.json();
+    return data.relay ?? null;
+  } catch {
     return null;
   }
 }

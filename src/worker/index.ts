@@ -461,6 +461,24 @@ async function handleStreamRoutes(
     });
   }
 
+  // GET /api/streams/:stream_id/route - Relay hosting the live broadcast (public).
+  // 404 = no live broadcast. Viewers use this to co-locate on the publisher's relay.
+  const streamRouteMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/route$/);
+  if (method === "GET" && streamRouteMatch) {
+    const streamId = streamRouteMatch[1];
+    const row = await env.DB
+      .prepare(
+        "SELECT relay_host, relay_port FROM broadcast_events WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1"
+      )
+      .bind(streamId)
+      .first<{ relay_host: string | null; relay_port: number | null }>();
+
+    if (!row?.relay_host) {
+      return new Response("offline", { status: 404 });
+    }
+    return Response.json({ relay: `${row.relay_host}:${row.relay_port ?? 443}` });
+  }
+
   // POST /api/streams - Create or update stream settings (requires auth)
   if (method === "POST" && path === "/api/streams") {
     const user = await getAuthenticatedUser(request, env);
@@ -506,6 +524,47 @@ async function handleStreamRoutes(
 }
 
 // Stats routes handler
+// --- tinymoq broadcast→relay routing -------------------------------------
+// The autoscaler exposes a sticky, idempotent assignment API keyed by the full
+// broadcast name. The key MUST match what the client publishes/subscribes.
+const TINYMOQ_AUTOSCALER = "https://cdn.tinymoq.com";
+const TINYMOQ_STATIC_RELAY = { host: "cdn.tinymoq.com", port: 443 };
+
+function broadcastName(streamId: string): string {
+  return `vivoh.earth/${streamId}.hang`;
+}
+
+// Ask the autoscaler for the relay hosting this broadcast (spawns/sticks as needed).
+// Falls back to the static :443 relay if /assign is unavailable or returns no capacity.
+async function assignRelay(streamId: string): Promise<{ host: string; port: number }> {
+  const name = broadcastName(streamId);
+  try {
+    const res = await fetch(`${TINYMOQ_AUTOSCALER}/assign?broadcast=${encodeURIComponent(name)}`);
+    if (res.ok) {
+      const text = (await res.text()).trim(); // e.g. "cdn.tinymoq.com:8000"
+      const [host, portStr] = text.split(":");
+      const port = parseInt(portStr, 10);
+      if (host && Number.isFinite(port)) {
+        return { host, port };
+      }
+    }
+    console.warn("assignRelay: unexpected /assign response", res.status);
+  } catch (e) {
+    console.warn("assignRelay: /assign failed", e);
+  }
+  return { ...TINYMOQ_STATIC_RELAY };
+}
+
+// Free the relay route when a broadcast ends so the node can be scaled down.
+async function releaseRelay(streamId: string): Promise<void> {
+  const name = broadcastName(streamId);
+  try {
+    await fetch(`${TINYMOQ_AUTOSCALER}/release?broadcast=${encodeURIComponent(name)}`);
+  } catch (e) {
+    console.warn("releaseRelay: /release failed", e);
+  }
+}
+
 async function handleStatsRoutes(
   request: Request,
   env: Env,
@@ -614,26 +673,42 @@ async function handleStatsRoutes(
 
     const geo = getGeoFromRequest(request);
     console.log("Broadcast geo data:", JSON.stringify(geo));
+
+    // Ask the tinymoq autoscaler which relay to publish to (sticky per broadcast
+    // name). Falls back to the static relay so go-live still works if /assign is down.
+    const { host: relayHost, port: relayPort } = await assignRelay(body.stream_id);
+
     const result = await env.DB
       .prepare(`
-        INSERT INTO broadcast_events (user_id, stream_id, geo_country, geo_city, geo_region, geo_latitude, geo_longitude, geo_timezone)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO broadcast_events (user_id, stream_id, geo_country, geo_city, geo_region, geo_latitude, geo_longitude, geo_timezone, relay_host, relay_port)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
       `)
-      .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone)
+      .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort)
       .first<{ id: number }>();
 
-    return Response.json({ id: result?.id, stream_id: body.stream_id, geo });
+    return Response.json({ id: result?.id, stream_id: body.stream_id, geo, relay: `${relayHost}:${relayPort}` });
   }
 
   // POST /api/stats/broadcast/:id/end - End a broadcast
   const broadcastEndMatch = path.match(/^\/api\/stats\/broadcast\/(\d+)\/end$/);
   if (method === "POST" && broadcastEndMatch) {
     const eventId = parseInt(broadcastEndMatch[1]);
+
+    // Look up the stream so we can free the relay assignment for this broadcast.
+    const row = await env.DB
+      .prepare("SELECT stream_id FROM broadcast_events WHERE id = ?")
+      .bind(eventId)
+      .first<{ stream_id: string }>();
+
     await env.DB
       .prepare("UPDATE broadcast_events SET ended_at = datetime('now') WHERE id = ?")
       .bind(eventId)
       .run();
+
+    if (row?.stream_id) {
+      await releaseRelay(row.stream_id);
+    }
 
     return Response.json({ success: true });
   }

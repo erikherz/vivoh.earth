@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS broadcast_events (
   geo_latitude TEXT,
   geo_longitude TEXT,
   geo_timezone TEXT,
+  -- Assigned tinymoq relay (broadcast→relay routing directory)
+  relay_host TEXT,
+  relay_port INTEGER,
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
