@@ -74,6 +74,11 @@ interface MoqPublishElement extends HTMLElement {
   muted: boolean;
   connection: { status: MoqSignal<ConnStatus> };
   state: { source: MoqSignal<PublishSource> };
+  // The captured tracks the encoder actually consumes (undefined until capture succeeds).
+  broadcast?: {
+    video?: { source: MoqSignal<unknown> };
+    audio?: { source: MoqSignal<unknown> };
+  };
 }
 
 interface MoqWatchElement extends HTMLElement {
@@ -970,6 +975,7 @@ function initBroadcastView(streamId: string, user: User | null) {
           publisher.source = null;
           break;
       }
+      console.log(`[moq-publish] mode=${mode} -> source=${String(publisher.source)} invisible=${publisher.invisible} muted=${publisher.muted}`);
     };
 
     // --- Build the control bar (status + device buttons + overlay toggle) ---
@@ -1053,6 +1059,23 @@ function initBroadcastView(streamId: string, user: User | null) {
       console.warn("Could not subscribe to publish status signals:", err);
     }
     refreshStatus();
+
+    // --- Diagnostics: @moq silently swallows getUserMedia/encoder errors, so log
+    // whether real media tracks actually attach to the broadcast encoder. ---
+    const logTrack = (kind: string, track: unknown) => {
+      const t = track as { label?: string; readyState?: string } | null | undefined;
+      if (t && typeof t === "object") {
+        console.log(`[moq-publish] ${kind} track ATTACHED:`, t.label ?? "(no label)", "readyState:", t.readyState);
+      } else {
+        console.warn(`[moq-publish] ${kind} track: NONE — capture not running or getUserMedia failed/denied`);
+      }
+    };
+    try {
+      publisher.broadcast?.video?.source?.subscribe?.((t) => logTrack("video", t));
+      publisher.broadcast?.audio?.source?.subscribe?.((t) => logTrack("audio", t));
+    } catch (err) {
+      console.warn("[moq-publish] could not subscribe to media source signals:", err);
+    }
 
     // Log end on page unload
     window.addEventListener("beforeunload", () => {
