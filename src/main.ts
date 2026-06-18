@@ -2129,7 +2129,36 @@ function initAdminView() {
 }
 
 // Initialize the app
+// TEMP diagnostic: time WebTransport bidi-stream creation. If a stream takes
+// ~15s to OPEN after being requested, the stall is QUIC stream-credit/flow-control
+// (relay grants MAX_STREAMS slowly) — NOT client logic. If "called" itself is late,
+// it's client-side. Distinguishes the two for the ~15s subscribe gaps.
+function instrumentWebTransportStreams() {
+  if (typeof WebTransport === "undefined") return;
+  const proto = WebTransport.prototype as unknown as {
+    __streamTimed?: boolean;
+    createBidirectionalStream: (...args: unknown[]) => Promise<unknown>;
+  };
+  if (proto.__streamTimed) return;
+  proto.__streamTimed = true;
+  const orig = proto.createBidirectionalStream;
+  let n = 0;
+  proto.createBidirectionalStream = function (this: unknown, ...args: unknown[]) {
+    const i = ++n;
+    if (i > 8) return orig.apply(this, args);
+    const t = performance.now();
+    console.log(`[wt-stream] #${i} createBidirectionalStream() called @ ${Math.round(t)}ms`);
+    const p = orig.apply(this, args);
+    Promise.resolve(p).then(
+      () => console.log(`[wt-stream] #${i} OPENED after ${Math.round(performance.now() - t)}ms`),
+      (e: unknown) => console.log(`[wt-stream] #${i} failed after ${Math.round(performance.now() - t)}ms`, e)
+    );
+    return p;
+  };
+}
+
 async function init() {
+  instrumentWebTransportStreams();
   // Detect browser support (async for codec checks)
   browserSupport = await detectBrowserSupport();
 
