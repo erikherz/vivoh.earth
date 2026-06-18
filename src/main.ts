@@ -550,8 +550,8 @@ function updateServerStatusPanel() {
 // Record the relay this client actually connected to (assigned/routed, possibly a
 // CDN override or cross-cluster edge) and refresh the footer Server Status panel.
 function setActiveRelay(relay: string | null) {
-  serverStatus.selectedServer = relay ?? "cdn.tinymoq.com:443 (fallback)";
-  serverStatus.connected = true;
+  serverStatus.selectedServer = relay ?? "(no relay assigned)";
+  serverStatus.connected = !!relay;
   updateServerStatusPanel();
 }
 
@@ -976,10 +976,17 @@ function initBroadcastView(streamId: string, user: User | null) {
       goLivePromise = logBroadcastStart(streamId, getCdnOverride("publisher-cdn")).then((res) => {
         broadcastEventId = res?.eventId ?? null;
         const relay = res?.relay;
-        const url = relay ? `https://${relay}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
-        publisher.setAttribute("url", url);
+        if (!relay) {
+          // /assign failed — there is no static relay to fall back to. Allow a retry
+          // on the next device action rather than connecting to a dead endpoint.
+          console.error("[routing] go-live got no relay (assign unavailable); pick a device again to retry");
+          setActiveRelay(null);
+          goLivePromise = null;
+          return;
+        }
+        publisher.setAttribute("url", `https://${relay}/?jwt=${TINYMOQ_JWT}`);
         setActiveRelay(relay);
-        console.log("[routing] broadcaster relay:", relay ?? "(static fallback)", "eventId:", broadcastEventId);
+        console.log("[routing] broadcaster relay:", relay, "eventId:", broadcastEventId);
       });
       return goLivePromise;
     };
@@ -1256,12 +1263,35 @@ async function initWatchView(streamId: string, user: User | null) {
     // Optional forced cross-cluster origin (publisher relay host:port) for testing;
     // normally the Worker derives it from the publisher's stored relay in D1.
     const originOverride = new URLSearchParams(window.location.search).get("origin")?.trim() || undefined;
-    const route = await getStreamRoute(streamId, viewerCdn, originOverride);
-    console.log(`[watch-timing] route resolved @ ${ms()} ->`, route ?? "(static fallback)");
     if (viewerCdn) console.log("[routing] viewer CDN override:", viewerCdn, originOverride ? `(forced origin ${originOverride})` : "");
-    const watchUrl = route ? `https://${route}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
+
+    // Resolve the relay via /route. There is NO static relay to fall back to — every
+    // connection must use the dynamic host:port from the directory. If the broadcast
+    // isn't live yet (404), poll until it is, showing a "waiting" state. Connect once.
+    let route = await getStreamRoute(streamId, viewerCdn, originOverride);
+    console.log(`[watch-timing] route resolved @ ${ms()} ->`, route ?? "(offline, polling)");
+
+    if (!route) {
+      const section = document.querySelector("#watch-view section");
+      const waitingEl = document.createElement("div");
+      waitingEl.className = "watch-waiting";
+      waitingEl.textContent = "Waiting for broadcaster…";
+      waitingEl.style.cssText = "text-align:center;padding:1.5rem;color:var(--text-muted);";
+      section?.appendChild(waitingEl);
+
+      let stopped = false;
+      window.addEventListener("beforeunload", () => { stopped = true; });
+      while (!route && !stopped) {
+        await new Promise((r) => setTimeout(r, 1500));
+        route = await getStreamRoute(streamId, viewerCdn, originOverride);
+      }
+      waitingEl.remove();
+      if (stopped) return;
+      console.log(`[watch-timing] route became available @ ${ms()} ->`, route);
+    }
+
     setActiveRelay(route);
-    watcher.setAttribute("url", watchUrl);
+    watcher.setAttribute("url", `https://${route}/?jwt=${TINYMOQ_JWT}`);
     watcher.setAttribute("name", streamName);
     console.log(`[watch-timing] url set, connecting @ ${ms()}`);
 

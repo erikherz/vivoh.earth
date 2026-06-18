@@ -493,8 +493,9 @@ async function handleStreamRoutes(
         : viewerCdn !== row.relay_host
           ? publisherRelay
           : undefined;
-      const { host, port } = await assignRelay(streamId, viewerCdn, origin);
-      return Response.json({ relay: `${host}:${port}` });
+      const edge = await assignRelay(streamId, viewerCdn, origin);
+      if (!edge) return new Response("offline", { status: 404 });
+      return Response.json({ relay: `${edge.host}:${edge.port}` });
     }
 
     return Response.json({ relay: publisherRelay });
@@ -549,7 +550,9 @@ async function handleStreamRoutes(
 // The autoscaler exposes a sticky, idempotent assignment API keyed by the full
 // broadcast name. The key MUST match what the client publishes/subscribes.
 const TINYMOQ_AUTOSCALER = "https://cdn.tinymoq.com";
-const TINYMOQ_STATIC_RELAY = { host: "cdn.tinymoq.com", port: 443 };
+// NOTE: there is no static relay fallback. cdn.tinymoq.com:443 is the autoscaler
+// control API (TCP), not a MoQ relay — UDP/443 has no media listener. Every media
+// connection must use a dynamic host:port from /assign or /route.
 
 function broadcastName(streamId: string): string {
   return `vivoh.earth/${streamId}.hang`;
@@ -573,12 +576,12 @@ function isValidOrigin(origin: string): boolean {
 // Ask the autoscaler for the relay hosting this broadcast (spawns/sticks as needed).
 // When the viewer's cluster differs from the publisher's, pass `origin` (the
 // publisher's relay host:port) so the assigned edge relay pulls the stream across
-// clusters. Falls back to the static :443 relay if /assign is unavailable.
+// clusters. Returns null if /assign is unavailable — there is NO static fallback.
 async function assignRelay(
   streamId: string,
   cdnHost?: string | null,
   origin?: string | null
-): Promise<{ host: string; port: number }> {
+): Promise<{ host: string; port: number } | null> {
   const name = broadcastName(streamId);
   const base = autoscalerBase(cdnHost);
   let query = `broadcast=${encodeURIComponent(name)}`;
@@ -599,7 +602,7 @@ async function assignRelay(
   } catch (e) {
     console.warn("assignRelay: /assign failed", e);
   }
-  return { ...TINYMOQ_STATIC_RELAY };
+  return null;
 }
 
 // Free the relay route when a broadcast ends so the node can be scaled down.
@@ -725,8 +728,10 @@ async function handleStatsRoutes(
 
     // Ask the tinymoq autoscaler which relay to publish to (sticky per broadcast
     // name). Optional publisher_cdn picks which CDN destination to assign on (testing).
-    // Falls back to the static relay so go-live still works if /assign is down.
-    const { host: relayHost, port: relayPort } = await assignRelay(body.stream_id, body.publisher_cdn);
+    // No static fallback: if /assign is down, relay is null and the client retries.
+    const assigned = await assignRelay(body.stream_id, body.publisher_cdn);
+    const relayHost = assigned?.host ?? null;
+    const relayPort = assigned?.port ?? null;
 
     const result = await env.DB
       .prepare(`
@@ -737,7 +742,12 @@ async function handleStatsRoutes(
       .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort)
       .first<{ id: number }>();
 
-    return Response.json({ id: result?.id, stream_id: body.stream_id, geo, relay: `${relayHost}:${relayPort}` });
+    return Response.json({
+      id: result?.id,
+      stream_id: body.stream_id,
+      geo,
+      relay: assigned ? `${relayHost}:${relayPort}` : null,
+    });
   }
 
   // POST /api/stats/broadcast/:id/end - End a broadcast
