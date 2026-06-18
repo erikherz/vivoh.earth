@@ -463,6 +463,9 @@ async function handleStreamRoutes(
 
   // GET /api/streams/:stream_id/route - Relay hosting the live broadcast (public).
   // 404 = no live broadcast. Viewers use this to co-locate on the publisher's relay.
+  // Optional ?viewer-cdn=cdn-02.tinymoq.com pulls from a different CDN destination
+  // (testing "push to one, pull from two") by assigning on that CDN instead of
+  // returning the publisher's stored relay.
   const streamRouteMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/route$/);
   if (method === "GET" && streamRouteMatch) {
     const streamId = streamRouteMatch[1];
@@ -476,6 +479,14 @@ async function handleStreamRoutes(
     if (!row?.relay_host) {
       return new Response("offline", { status: 404 });
     }
+
+    const viewerCdn = url.searchParams.get("viewer-cdn");
+    if (viewerCdn) {
+      // Resolve a relay on the requested viewer CDN for this same broadcast name.
+      const { host, port } = await assignRelay(streamId, viewerCdn);
+      return Response.json({ relay: `${host}:${port}` });
+    }
+
     return Response.json({ relay: `${row.relay_host}:${row.relay_port ?? 443}` });
   }
 
@@ -534,12 +545,23 @@ function broadcastName(streamId: string): string {
   return `vivoh.earth/${streamId}.hang`;
 }
 
+// Resolve the autoscaler base URL, honoring an optional per-request CDN override
+// (e.g. cdn-01.tinymoq.com) for testing individual destinations. Only tinymoq CDN
+// hosts are allowed — this guards the Worker's fetch against SSRF via user input.
+function autoscalerBase(cdnHost?: string | null): string {
+  if (cdnHost && /^cdn(-[a-z0-9]+)?\.tinymoq\.com$/i.test(cdnHost)) {
+    return `https://${cdnHost}`;
+  }
+  return TINYMOQ_AUTOSCALER;
+}
+
 // Ask the autoscaler for the relay hosting this broadcast (spawns/sticks as needed).
 // Falls back to the static :443 relay if /assign is unavailable or returns no capacity.
-async function assignRelay(streamId: string): Promise<{ host: string; port: number }> {
+async function assignRelay(streamId: string, cdnHost?: string | null): Promise<{ host: string; port: number }> {
   const name = broadcastName(streamId);
+  const base = autoscalerBase(cdnHost);
   try {
-    const res = await fetch(`${TINYMOQ_AUTOSCALER}/assign?broadcast=${encodeURIComponent(name)}`);
+    const res = await fetch(`${base}/assign?broadcast=${encodeURIComponent(name)}`);
     if (res.ok) {
       const text = (await res.text()).trim(); // e.g. "cdn.tinymoq.com:8000"
       const [host, portStr] = text.split(":");
@@ -556,10 +578,12 @@ async function assignRelay(streamId: string): Promise<{ host: string; port: numb
 }
 
 // Free the relay route when a broadcast ends so the node can be scaled down.
-async function releaseRelay(streamId: string): Promise<void> {
+// Release on the same CDN the broadcast was assigned to (its stored relay_host).
+async function releaseRelay(streamId: string, cdnHost?: string | null): Promise<void> {
   const name = broadcastName(streamId);
+  const base = autoscalerBase(cdnHost);
   try {
-    await fetch(`${TINYMOQ_AUTOSCALER}/release?broadcast=${encodeURIComponent(name)}`);
+    await fetch(`${base}/release?broadcast=${encodeURIComponent(name)}`);
   } catch (e) {
     console.warn("releaseRelay: /release failed", e);
   }
@@ -666,7 +690,7 @@ async function handleStatsRoutes(
       return Response.json({ error: "Authentication required" }, { status: 401 });
     }
 
-    const body = await request.json() as { stream_id: string };
+    const body = await request.json() as { stream_id: string; publisher_cdn?: string };
     if (!body.stream_id) {
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
@@ -675,8 +699,9 @@ async function handleStatsRoutes(
     console.log("Broadcast geo data:", JSON.stringify(geo));
 
     // Ask the tinymoq autoscaler which relay to publish to (sticky per broadcast
-    // name). Falls back to the static relay so go-live still works if /assign is down.
-    const { host: relayHost, port: relayPort } = await assignRelay(body.stream_id);
+    // name). Optional publisher_cdn picks which CDN destination to assign on (testing).
+    // Falls back to the static relay so go-live still works if /assign is down.
+    const { host: relayHost, port: relayPort } = await assignRelay(body.stream_id, body.publisher_cdn);
 
     const result = await env.DB
       .prepare(`
@@ -695,11 +720,11 @@ async function handleStatsRoutes(
   if (method === "POST" && broadcastEndMatch) {
     const eventId = parseInt(broadcastEndMatch[1]);
 
-    // Look up the stream so we can free the relay assignment for this broadcast.
+    // Look up the stream (and the CDN it was assigned on) to free the assignment.
     const row = await env.DB
-      .prepare("SELECT stream_id FROM broadcast_events WHERE id = ?")
+      .prepare("SELECT stream_id, relay_host FROM broadcast_events WHERE id = ?")
       .bind(eventId)
-      .first<{ stream_id: string }>();
+      .first<{ stream_id: string; relay_host: string | null }>();
 
     await env.DB
       .prepare("UPDATE broadcast_events SET ended_at = datetime('now') WHERE id = ?")
@@ -707,7 +732,7 @@ async function handleStatsRoutes(
       .run();
 
     if (row?.stream_id) {
-      await releaseRelay(row.stream_id);
+      await releaseRelay(row.stream_id, row.relay_host);
     }
 
     return Response.json({ success: true });

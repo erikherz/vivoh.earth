@@ -69,13 +69,13 @@ export interface BroadcastStart {
   relay: string | null; // assigned tinymoq relay "host:port", or null on failure
 }
 
-export async function logBroadcastStart(streamId: string): Promise<BroadcastStart | null> {
+export async function logBroadcastStart(streamId: string, publisherCdn?: string): Promise<BroadcastStart | null> {
   try {
-    console.log("Attempting to log broadcast start for stream:", streamId);
+    console.log("Attempting to log broadcast start for stream:", streamId, publisherCdn ? `(publisher CDN: ${publisherCdn})` : "");
     const response = await fetch("/api/stats/broadcast", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stream_id: streamId }),
+      body: JSON.stringify({ stream_id: streamId, publisher_cdn: publisherCdn }),
     });
     if (!response.ok) {
       const errorText = await response.text();
@@ -93,9 +93,11 @@ export async function logBroadcastStart(streamId: string): Promise<BroadcastStar
 
 // Look up the relay hosting a live broadcast (for viewers to co-locate).
 // Returns "host:port", or null if the stream is offline / not yet routed.
-export async function getStreamRoute(streamId: string): Promise<string | null> {
+// Optional viewerCdn pulls from a specific CDN destination (testing).
+export async function getStreamRoute(streamId: string, viewerCdn?: string): Promise<string | null> {
   try {
-    const response = await fetch(`/api/streams/${streamId}/route`);
+    const qs = viewerCdn ? `?viewer-cdn=${encodeURIComponent(viewerCdn)}` : "";
+    const response = await fetch(`/api/streams/${streamId}/route${qs}`);
     if (!response.ok) return null; // 404 = offline
     const data = await response.json();
     return data.relay ?? null;

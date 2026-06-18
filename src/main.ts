@@ -856,6 +856,13 @@ function showLoginRequired() {
 }
 
 // Initialize broadcast view
+// Optional per-request CDN override for testing individual tinymoq destinations
+// (e.g. ?publisher-cdn=cdn-01.tinymoq.com, &viewer-cdn=cdn-02.tinymoq.com).
+function getCdnOverride(param: "publisher-cdn" | "viewer-cdn"): string | undefined {
+  const v = new URLSearchParams(window.location.search).get(param)?.trim();
+  return v || undefined;
+}
+
 function initBroadcastView(streamId: string, user: User | null) {
   // The ".hang" suffix makes the catalog format explicit so the watcher can parse
   // the catalog and subscribe to video/audio tracks (otherwise detectFormat() is
@@ -958,7 +965,7 @@ function initBroadcastView(streamId: string, user: User | null) {
     // the relay on the broadcast row (so viewers can co-locate). Idempotent/sticky.
     const goLive = (): Promise<void> => {
       if (goLivePromise) return goLivePromise;
-      goLivePromise = logBroadcastStart(streamId).then((res) => {
+      goLivePromise = logBroadcastStart(streamId, getCdnOverride("publisher-cdn")).then((res) => {
         broadcastEventId = res?.eventId ?? null;
         const relay = res?.relay;
         const url = relay ? `https://${relay}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
@@ -1221,7 +1228,9 @@ async function initWatchView(streamId: string, user: User | null) {
     // Co-locate on the publisher's relay: look up the broadcast→relay route.
     // Relays are islands, so the viewer MUST use the same relay as the broadcaster.
     // Falls back to the static relay if the stream isn't routed yet / lookup fails.
-    const route = await getStreamRoute(streamId);
+    const viewerCdn = getCdnOverride("viewer-cdn");
+    const route = await getStreamRoute(streamId, viewerCdn);
+    if (viewerCdn) console.log("[routing] viewer CDN override:", viewerCdn);
     const watchUrl = route ? `https://${route}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
     watcher.setAttribute("url", watchUrl);
     watcher.setAttribute("name", streamName);
