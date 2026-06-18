@@ -463,9 +463,15 @@ async function handleStreamRoutes(
 
   // GET /api/streams/:stream_id/route - Relay hosting the live broadcast (public).
   // 404 = no live broadcast. Viewers use this to co-locate on the publisher's relay.
-  // Optional ?viewer-cdn=cdn-02.tinymoq.com pulls from a different CDN destination
-  // (testing "push to one, pull from two") by assigning on that CDN instead of
-  // returning the publisher's stored relay.
+  //
+  // IMPORTANT: relay ports are dynamic and can change DURING a live broadcast
+  // (reap/respawn), so the stored D1 port goes stale. We therefore re-query the
+  // autoscaler (/assign is sticky + idempotent → the broadcast's CURRENT relay)
+  // and use D1 only to confirm the stream is live and which CDN cluster the
+  // publisher is on. D1 is synced when the port has changed (for /admin + stats).
+  //
+  // Optional ?viewer-cdn=cdn-02.tinymoq.com pulls from a different CDN cluster
+  // (push-to-one/pull-from-two), with origin = the publisher's CURRENT relay.
   const streamRouteMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/route$/);
   if (method === "GET" && streamRouteMatch) {
     const streamId = streamRouteMatch[1];
@@ -479,26 +485,34 @@ async function handleStreamRoutes(
     if (!row?.relay_host) {
       return new Response("offline", { status: 404 });
     }
+    const publisherCluster = row.relay_host; // cluster host, e.g. cdn.tinymoq.com / cdn-01.tinymoq.com
 
-    const publisherRelay = `${row.relay_host}:${row.relay_port ?? 443}`;
+    // Authoritative current relay for this broadcast (sticky per name).
+    const current = await assignRelay(streamId, publisherCluster);
+    if (!current) {
+      return new Response("offline", { status: 404 });
+    }
+
+    // Keep D1 in sync if the relay moved (reap/respawn) so admin/stats stay accurate.
+    if (current.host !== publisherCluster || current.port !== row.relay_port) {
+      await env.DB
+        .prepare("UPDATE broadcast_events SET relay_host = ?, relay_port = ? WHERE stream_id = ? AND ended_at IS NULL")
+        .bind(current.host, current.port, streamId)
+        .run();
+    }
+
     const viewerCdn = url.searchParams.get("viewer-cdn");
-    if (viewerCdn) {
-      // Cross-cluster: the viewer's cluster must pull from the publisher's relay.
-      // Use an explicit ?origin= test override if given, else the publisher's stored
-      // relay — but only when the viewer cluster differs from the publisher's host
-      // (same-cluster needs no origin, and pulling from itself would be wrong).
+    if (viewerCdn && viewerCdn !== current.host) {
+      // Cross-cluster: assign an edge on the viewer's cluster that pulls from the
+      // publisher's CURRENT relay. Explicit ?origin= test override wins.
       const forcedOrigin = url.searchParams.get("origin");
-      const origin = forcedOrigin
-        ? forcedOrigin
-        : viewerCdn !== row.relay_host
-          ? publisherRelay
-          : undefined;
+      const origin = forcedOrigin ?? `${current.host}:${current.port}`;
       const edge = await assignRelay(streamId, viewerCdn, origin);
       if (!edge) return new Response("offline", { status: 404 });
       return Response.json({ relay: `${edge.host}:${edge.port}` });
     }
 
-    return Response.json({ relay: publisherRelay });
+    return Response.json({ relay: `${current.host}:${current.port}` });
   }
 
   // POST /api/streams - Create or update stream settings (requires auth)
