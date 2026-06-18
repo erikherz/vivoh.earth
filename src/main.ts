@@ -1234,6 +1234,21 @@ async function initWatchView(streamId: string, user: User | null) {
   // Set stream name on watcher (headless <moq-watch> core element)
   const watcher = document.querySelector("moq-watch") as MoqWatchElement | null;
   if (watcher) {
+    // --- TEMP timing probe: localize viewer join latency by phase ---
+    const t0 = performance.now();
+    const ms = () => `${Math.round(performance.now() - t0)}ms`;
+    const wDiag = watcher as unknown as {
+      connection?: { status?: { subscribe?: (fn: (s: string) => void) => void } };
+      broadcast?: { catalog?: { subscribe?: (fn: (c: unknown) => void) => void } };
+    };
+    try {
+      wDiag.connection?.status?.subscribe?.((s) => console.log(`[watch-timing] connection ${s} @ ${ms()}`));
+      let gotCatalog = false;
+      wDiag.broadcast?.catalog?.subscribe?.((c) => {
+        if (c && !gotCatalog) { gotCatalog = true; console.log(`[watch-timing] catalog received @ ${ms()}`); }
+      });
+    } catch { /* ignore */ }
+
     // Co-locate on the publisher's relay: look up the broadcast→relay route.
     // Relays are islands, so the viewer MUST use the same relay as the broadcaster.
     // Falls back to the static relay if the stream isn't routed yet / lookup fails.
@@ -1242,11 +1257,13 @@ async function initWatchView(streamId: string, user: User | null) {
     // normally the Worker derives it from the publisher's stored relay in D1.
     const originOverride = new URLSearchParams(window.location.search).get("origin")?.trim() || undefined;
     const route = await getStreamRoute(streamId, viewerCdn, originOverride);
+    console.log(`[watch-timing] route resolved @ ${ms()} ->`, route ?? "(static fallback)");
     if (viewerCdn) console.log("[routing] viewer CDN override:", viewerCdn, originOverride ? `(forced origin ${originOverride})` : "");
     const watchUrl = route ? `https://${route}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
     setActiveRelay(route);
     watcher.setAttribute("url", watchUrl);
     watcher.setAttribute("name", streamName);
+    console.log(`[watch-timing] url set, connecting @ ${ms()}`);
 
     // Start muted; first click/tap on the player enables audio.
     const enableAudio = () => {
