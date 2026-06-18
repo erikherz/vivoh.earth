@@ -2180,7 +2180,22 @@ function instrumentWebTransportStreams() {
   };
 }
 
+// TEMP diagnostic: prefix every console line with a wall-clock timestamp
+// (HH:MM:SS.mmm) so the @moq MoQ request logs (connected, negotiated ALPN,
+// announced, subscribe start/ok catalog.json + video/hd, received catalog,
+// sync[video]) can be correlated directly against the relay's server-side timeline.
+function timestampConsole() {
+  const w = window as unknown as { __consoleTimestamped?: boolean };
+  if (w.__consoleTimestamped) return;
+  w.__consoleTimestamped = true;
+  (["debug", "log", "info", "warn", "error"] as const).forEach((m) => {
+    const orig = console[m].bind(console);
+    console[m] = (...args: unknown[]) => orig(`[${new Date().toISOString().slice(11, 23)}]`, ...args);
+  });
+}
+
 async function init() {
+  timestampConsole();
   instrumentWebTransportStreams();
   // Detect browser support (async for codec checks)
   browserSupport = await detectBrowserSupport();
