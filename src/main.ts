@@ -547,6 +547,14 @@ function updateServerStatusPanel() {
   });
 }
 
+// Record the relay this client actually connected to (assigned/routed, possibly a
+// CDN override or cross-cluster edge) and refresh the footer Server Status panel.
+function setActiveRelay(relay: string | null) {
+  serverStatus.selectedServer = relay ?? "cdn.tinymoq.com:443 (fallback)";
+  serverStatus.connected = true;
+  updateServerStatusPanel();
+}
+
 // tinymoq relay auth token (client publish+subscribe JWT, put/get="" = all paths, exp 2026-07-17).
 // This is a client-side connection token by design (the browser must present it to connect),
 // not a server secret. Passed as ?jwt= on the WebTransport connection URL per the hang README.
@@ -970,6 +978,7 @@ function initBroadcastView(streamId: string, user: User | null) {
         const relay = res?.relay;
         const url = relay ? `https://${relay}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
         publisher.setAttribute("url", url);
+        setActiveRelay(relay);
         console.log("[routing] broadcaster relay:", relay ?? "(static fallback)", "eventId:", broadcastEventId);
       });
       return goLivePromise;
@@ -1235,6 +1244,7 @@ async function initWatchView(streamId: string, user: User | null) {
     const route = await getStreamRoute(streamId, viewerCdn, originOverride);
     if (viewerCdn) console.log("[routing] viewer CDN override:", viewerCdn, originOverride ? `(forced origin ${originOverride})` : "");
     const watchUrl = route ? `https://${route}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
+    setActiveRelay(route);
     watcher.setAttribute("url", watchUrl);
     watcher.setAttribute("name", streamName);
 
