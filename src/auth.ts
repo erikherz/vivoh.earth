@@ -93,10 +93,14 @@ export async function logBroadcastStart(streamId: string, publisherCdn?: string)
 
 // Look up the relay hosting a live broadcast (for viewers to co-locate).
 // Returns "host:port", or null if the stream is offline / not yet routed.
-// Optional viewerCdn pulls from a specific CDN destination (testing).
-export async function getStreamRoute(streamId: string, viewerCdn?: string): Promise<string | null> {
+// Optional viewerCdn pulls from a specific CDN destination; optional origin
+// (publisher relay host:port) forces a cross-cluster pull source (testing).
+export async function getStreamRoute(streamId: string, viewerCdn?: string, origin?: string): Promise<string | null> {
   try {
-    const qs = viewerCdn ? `?viewer-cdn=${encodeURIComponent(viewerCdn)}` : "";
+    const qp = new URLSearchParams();
+    if (viewerCdn) qp.set("viewer-cdn", viewerCdn);
+    if (origin) qp.set("origin", origin);
+    const qs = qp.toString() ? `?${qp.toString()}` : "";
     const response = await fetch(`/api/streams/${streamId}/route${qs}`);
     if (!response.ok) return null; // 404 = offline
     const data = await response.json();

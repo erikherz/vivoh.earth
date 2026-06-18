@@ -1229,8 +1229,11 @@ async function initWatchView(streamId: string, user: User | null) {
     // Relays are islands, so the viewer MUST use the same relay as the broadcaster.
     // Falls back to the static relay if the stream isn't routed yet / lookup fails.
     const viewerCdn = getCdnOverride("viewer-cdn");
-    const route = await getStreamRoute(streamId, viewerCdn);
-    if (viewerCdn) console.log("[routing] viewer CDN override:", viewerCdn);
+    // Optional forced cross-cluster origin (publisher relay host:port) for testing;
+    // normally the Worker derives it from the publisher's stored relay in D1.
+    const originOverride = new URLSearchParams(window.location.search).get("origin")?.trim() || undefined;
+    const route = await getStreamRoute(streamId, viewerCdn, originOverride);
+    if (viewerCdn) console.log("[routing] viewer CDN override:", viewerCdn, originOverride ? `(forced origin ${originOverride})` : "");
     const watchUrl = route ? `https://${route}/?jwt=${TINYMOQ_JWT}` : RELAY_URL;
     watcher.setAttribute("url", watchUrl);
     watcher.setAttribute("name", streamName);

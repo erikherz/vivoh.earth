@@ -480,14 +480,24 @@ async function handleStreamRoutes(
       return new Response("offline", { status: 404 });
     }
 
+    const publisherRelay = `${row.relay_host}:${row.relay_port ?? 443}`;
     const viewerCdn = url.searchParams.get("viewer-cdn");
     if (viewerCdn) {
-      // Resolve a relay on the requested viewer CDN for this same broadcast name.
-      const { host, port } = await assignRelay(streamId, viewerCdn);
+      // Cross-cluster: the viewer's cluster must pull from the publisher's relay.
+      // Use an explicit ?origin= test override if given, else the publisher's stored
+      // relay — but only when the viewer cluster differs from the publisher's host
+      // (same-cluster needs no origin, and pulling from itself would be wrong).
+      const forcedOrigin = url.searchParams.get("origin");
+      const origin = forcedOrigin
+        ? forcedOrigin
+        : viewerCdn !== row.relay_host
+          ? publisherRelay
+          : undefined;
+      const { host, port } = await assignRelay(streamId, viewerCdn, origin);
       return Response.json({ relay: `${host}:${port}` });
     }
 
-    return Response.json({ relay: `${row.relay_host}:${row.relay_port ?? 443}` });
+    return Response.json({ relay: publisherRelay });
   }
 
   // POST /api/streams - Create or update stream settings (requires auth)
@@ -555,13 +565,28 @@ function autoscalerBase(cdnHost?: string | null): string {
   return TINYMOQ_AUTOSCALER;
 }
 
+// A tinymoq relay origin "host:port" (the publisher's relay), for cross-cluster pulls.
+function isValidOrigin(origin: string): boolean {
+  return /^cdn(-[a-z0-9]+)?\.tinymoq\.com:\d+$/i.test(origin);
+}
+
 // Ask the autoscaler for the relay hosting this broadcast (spawns/sticks as needed).
-// Falls back to the static :443 relay if /assign is unavailable or returns no capacity.
-async function assignRelay(streamId: string, cdnHost?: string | null): Promise<{ host: string; port: number }> {
+// When the viewer's cluster differs from the publisher's, pass `origin` (the
+// publisher's relay host:port) so the assigned edge relay pulls the stream across
+// clusters. Falls back to the static :443 relay if /assign is unavailable.
+async function assignRelay(
+  streamId: string,
+  cdnHost?: string | null,
+  origin?: string | null
+): Promise<{ host: string; port: number }> {
   const name = broadcastName(streamId);
   const base = autoscalerBase(cdnHost);
+  let query = `broadcast=${encodeURIComponent(name)}`;
+  if (origin && isValidOrigin(origin)) {
+    query += `&origin=${encodeURIComponent(origin)}`;
+  }
   try {
-    const res = await fetch(`${base}/assign?broadcast=${encodeURIComponent(name)}`);
+    const res = await fetch(`${base}/assign?${query}`);
     if (res.ok) {
       const text = (await res.text()).trim(); // e.g. "cdn.tinymoq.com:8000"
       const [host, portStr] = text.split(":");
