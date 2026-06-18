@@ -1256,6 +1256,29 @@ async function initWatchView(streamId: string, user: User | null) {
       });
     } catch { /* ignore */ }
 
+    // --- Time to first frame ---
+    // The renderer draws decoded frames to the <canvas> 2D context via drawImage
+    // (black background uses fillRect, so drawImage = a real video frame). Hook it
+    // once to capture time-to-first-frame from page load and show it in the footer.
+    const canvas = watcher.querySelector("canvas") as HTMLCanvasElement | null;
+    const ctx = canvas?.getContext("2d");
+    if (ctx) {
+      const origDrawImage = ctx.drawImage as (...a: unknown[]) => unknown;
+      (ctx as unknown as { drawImage: unknown }).drawImage = function (this: CanvasRenderingContext2D, ...args: unknown[]) {
+        const result = origDrawImage.apply(this, args);
+        // First real frame: report, then restore the prototype method (no per-frame overhead).
+        delete (ctx as unknown as { drawImage?: unknown }).drawImage;
+        const sinceLoad = performance.now(); // ms since page navigation start
+        console.log(`[watch-timing] FIRST FRAME painted @ ${ms()} (from page load: ${Math.round(sinceLoad)}ms)`);
+        const ttffEl = document.getElementById("ttff-display");
+        if (ttffEl) {
+          ttffEl.style.color = "#737373";
+          ttffEl.textContent = ` | first frame: ${(sinceLoad / 1000).toFixed(2)}s`;
+        }
+        return result;
+      };
+    }
+
     // Co-locate on the publisher's relay: look up the broadcast→relay route.
     // Relays are islands, so the viewer MUST use the same relay as the broadcaster.
     // Falls back to the static relay if the stream isn't routed yet / lookup fails.
