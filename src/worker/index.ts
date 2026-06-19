@@ -725,11 +725,19 @@ async function handleStatsRoutes(
     });
   }
 
-  // POST /api/stats/broadcast - Start a broadcast (requires auth)
+  // POST /api/stats/broadcast - Start a broadcast (requires auth + allow list)
   if (method === "POST" && path === "/api/stats/broadcast") {
     const user = await getAuthenticatedUser(request, env);
     if (!user) {
       return Response.json({ error: "Authentication required" }, { status: 401 });
+    }
+
+    // Default-deny broadcaster allow list: only explicitly-allowed emails may publish.
+    if (!(await canBroadcast(env.DB, user.email))) {
+      return Response.json(
+        { error: "Your account is not approved to broadcast. Contact the site administrator." },
+        { status: 403 }
+      );
     }
 
     const body = await request.json() as { stream_id: string; publisher_cdn?: string };
@@ -837,6 +845,16 @@ async function getAuthenticatedUser(request: Request, env: Env): Promise<User | 
   return getUserById(env.DB, session.userId);
 }
 
+// Broadcaster allow list check (default-deny): true ONLY if there is an explicit
+// row for this email with status='allowed'. No row or 'suspended' => blocked.
+async function canBroadcast(db: D1Database, email: string): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT status FROM broadcaster_access WHERE email = ?")
+    .bind(email)
+    .first<{ status: string }>();
+  return row?.status === "allowed";
+}
+
 // Helper to extract geolocation from Cloudflare request
 interface GeoData {
   country: string | null;
@@ -860,7 +878,7 @@ function getGeoFromRequest(request: Request): GeoData {
 }
 
 // Admin password - hardcoded for simplicity
-const ADMIN_PASSWORD = "V!voh2026";
+const ADMIN_PASSWORD = "vivoh2026";
 
 // Handle admin routes
 async function handleAdminRoutes(
@@ -896,6 +914,85 @@ async function handleAdminRoutes(
   if (method === "DELETE" && path === "/api/admin/viewers") {
     await env.DB.prepare("DELETE FROM watch_events").run();
     return Response.json({ success: true, message: "All viewer data cleared" });
+  }
+
+  // GET /api/admin/broadcasters - List everyone who could broadcast: all signed-in
+  // users plus any pre-authorized emails, each with their effective allow-list status.
+  if (method === "GET" && path === "/api/admin/broadcasters") {
+    // Signed-in users joined with their allow-list status (default 'none' = blocked).
+    const users = await env.DB
+      .prepare(`
+        SELECT u.email, u.name, u.avatar_url,
+               COALESCE(a.status, 'none') AS status,
+               (SELECT MAX(started_at) FROM broadcast_events b WHERE b.user_id = u.id) AS last_broadcast
+        FROM users u
+        LEFT JOIN broadcaster_access a ON a.email = u.email
+        ORDER BY u.name COLLATE NOCASE
+      `)
+      .all<{ email: string; name: string | null; avatar_url: string | null; status: string; last_broadcast: string | null }>();
+
+    // Allow-list emails that have never signed in (pre-authorized / suspended-by-email).
+    const orphans = await env.DB
+      .prepare(`
+        SELECT a.email, a.status
+        FROM broadcaster_access a
+        LEFT JOIN users u ON u.email = a.email
+        WHERE u.id IS NULL
+        ORDER BY a.email COLLATE NOCASE
+      `)
+      .all<{ email: string; status: string }>();
+
+    const list = [
+      ...(users.results ?? []),
+      ...(orphans.results ?? []).map((o) => ({
+        email: o.email,
+        name: null,
+        avatar_url: null,
+        status: o.status,
+        last_broadcast: null,
+        never_signed_in: true,
+      })),
+    ];
+
+    return Response.json({ broadcasters: list });
+  }
+
+  // POST /api/admin/broadcasters - Set a user's broadcast status.
+  // Body: { email: string, status: "allowed" | "suspended" }
+  if (method === "POST" && path === "/api/admin/broadcasters") {
+    const body = await request.json().catch(() => null) as { email?: string; status?: string } | null;
+    const email = body?.email?.trim().toLowerCase();
+    const status = body?.status;
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      return Response.json({ error: "Valid email required" }, { status: 400 });
+    }
+    if (status !== "allowed" && status !== "suspended") {
+      return Response.json({ error: "status must be 'allowed' or 'suspended'" }, { status: 400 });
+    }
+
+    await env.DB
+      .prepare(`
+        INSERT INTO broadcaster_access (email, status, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(email) DO UPDATE SET
+          status = excluded.status,
+          updated_at = datetime('now')
+      `)
+      .bind(email, status)
+      .run();
+
+    return Response.json({ success: true, email, status });
+  }
+
+  // DELETE /api/admin/broadcasters?email=... - Remove an allow-list entry entirely
+  // (reverts that email to the default-deny state).
+  if (method === "DELETE" && path === "/api/admin/broadcasters") {
+    const email = url.searchParams.get("email")?.trim().toLowerCase();
+    if (!email) {
+      return Response.json({ error: "email required" }, { status: 400 });
+    }
+    await env.DB.prepare("DELETE FROM broadcaster_access WHERE email = ?").bind(email).run();
+    return Response.json({ success: true, email });
   }
 
   return new Response("Not Found", { status: 404 });

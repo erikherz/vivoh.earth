@@ -863,6 +863,30 @@ function showLoginRequired() {
   });
 }
 
+// Shown when a signed-in user tries to broadcast but is not on the allow list (403).
+function showBroadcastNotAllowed(message?: string) {
+  const broadcastView = document.getElementById("broadcast-view");
+  if (!broadcastView) return;
+
+  // Replace any prior banner so repeated attempts don't stack.
+  document.getElementById("broadcast-blocked")?.remove();
+
+  const banner = document.createElement("div");
+  banner.id = "broadcast-blocked";
+  banner.style.cssText =
+    "max-width: 560px; margin: 1.5rem auto; padding: 1rem 1.25rem; border-radius: 8px;" +
+    "background: #7f1d1d; border: 1px solid #991b1b; color: #fee2e2; text-align: center;";
+  banner.innerHTML = `
+    <strong style="display:block; margin-bottom:0.35rem;">Broadcasting not enabled for this account</strong>
+    <span style="color:#fecaca; font-size:0.9rem;">${
+      message || "Your account is not approved to broadcast. Contact the site administrator."
+    }</span>
+  `;
+
+  const section = document.querySelector("#broadcast-view section") || broadcastView;
+  section.prepend(banner);
+}
+
 // Initialize broadcast view
 // Optional per-request CDN override for testing individual tinymoq destinations
 // (e.g. ?publisher-cdn=cdn-01.tinymoq.com, &viewer-cdn=cdn-02.tinymoq.com).
@@ -974,6 +998,16 @@ function initBroadcastView(streamId: string, user: User | null) {
     const goLive = (): Promise<void> => {
       if (goLivePromise) return goLivePromise;
       goLivePromise = logBroadcastStart(streamId, getCdnOverride("publisher-cdn")).then((res) => {
+        if (res?.forbidden) {
+          // Signed in, but not on the broadcaster allow list. Stop capture and
+          // explain; don't retry (a later device action would just 403 again).
+          console.warn("[access] broadcasting not permitted for this account");
+          publisher.source = null;
+          setActiveRelay(null);
+          showBroadcastNotAllowed(res.error);
+          goLivePromise = null;
+          return;
+        }
         broadcastEventId = res?.eventId ?? null;
         const relay = res?.relay;
         if (!relay) {
@@ -2030,18 +2064,36 @@ function initAdminView() {
         <p id="admin-error" style="color: #ef4444; display: none; text-align: center;"></p>
       </div>
     </div>
-    <div id="admin-panel" class="stats-section" style="max-width: 600px; margin: 2rem auto; display: none;">
-      <h3>Data Management</h3>
-      <p style="color: #a3a3a3; margin-bottom: 1.5rem;">Warning: These actions are irreversible.</p>
-      <div style="display: flex; flex-direction: column; gap: 1rem;">
-        <button id="clear-broadcasts-btn" class="btn" style="background: #7f1d1d; border-color: #991b1b;">
-          Clear All Broadcaster Data
-        </button>
-        <button id="clear-viewers-btn" class="btn" style="background: #7f1d1d; border-color: #991b1b;">
-          Clear All Viewer Data
-        </button>
+    <div id="admin-panel" style="display: none;">
+      <div class="stats-section" style="max-width: 720px; margin: 2rem auto;">
+        <h3>Broadcaster Access</h3>
+        <p style="color: #a3a3a3; margin-bottom: 1rem;">
+          Default-deny: only <strong>allowed</strong> accounts can broadcast. Suspend or remove to block.
+        </p>
+        <div style="display: flex; gap: 0.5rem; margin-bottom: 1.5rem;">
+          <input type="email" id="add-email-input" placeholder="email@example.com" autocomplete="off" spellcheck="false"
+            style="flex: 1; background: #262626; border: 1px solid #404040; border-radius: 6px; padding: 0.6rem; color: #e5e5e5; font-size: 0.95rem;">
+          <button id="add-allow-btn" class="btn btn-primary">Allow</button>
+        </div>
+        <div id="broadcasters-list" style="display: flex; flex-direction: column; gap: 0.5rem;">
+          <p style="color: #737373;">Loading…</p>
+        </div>
+        <div id="access-status" style="margin-top: 1rem; padding: 0.75rem; border-radius: 6px; display: none;"></div>
       </div>
-      <div id="admin-status" style="margin-top: 1rem; padding: 0.75rem; border-radius: 6px; display: none;"></div>
+
+      <div class="stats-section" style="max-width: 720px; margin: 2rem auto;">
+        <h3>Data Management</h3>
+        <p style="color: #a3a3a3; margin-bottom: 1.5rem;">Warning: These actions are irreversible.</p>
+        <div style="display: flex; flex-direction: column; gap: 1rem;">
+          <button id="clear-broadcasts-btn" class="btn" style="background: #7f1d1d; border-color: #991b1b;">
+            Clear All Broadcaster Data
+          </button>
+          <button id="clear-viewers-btn" class="btn" style="background: #7f1d1d; border-color: #991b1b;">
+            Clear All Viewer Data
+          </button>
+        </div>
+        <div id="admin-status" style="margin-top: 1rem; padding: 0.75rem; border-radius: 6px; display: none;"></div>
+      </div>
     </div>
   `;
   container.appendChild(adminView);
@@ -2085,12 +2137,149 @@ function initAdminView() {
       // Password is correct, show the admin panel
       document.getElementById("admin-login")!.style.display = "none";
       document.getElementById("admin-panel")!.style.display = "block";
+      loadBroadcasters();
     } catch {
       if (errorEl) {
         errorEl.textContent = "Connection error";
         errorEl.style.display = "block";
       }
     }
+  });
+
+  // --- Broadcaster access management ---
+  const showAccessStatus = (message: string, isError: boolean) => {
+    const el = document.getElementById("access-status");
+    if (!el) return;
+    el.textContent = message;
+    el.style.display = "block";
+    el.style.background = isError ? "#7f1d1d" : "#14532d";
+    el.style.color = "#e5e5e5";
+  };
+
+  interface BroadcasterRow {
+    email: string;
+    name: string | null;
+    avatar_url: string | null;
+    status: string; // 'allowed' | 'suspended' | 'none'
+    last_broadcast: string | null;
+    never_signed_in?: boolean;
+  }
+
+  const escapeHtml = (s: string) =>
+    s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
+
+  const setAccess = async (email: string, status: "allowed" | "suspended") => {
+    try {
+      const res = await fetch("/api/admin/broadcasters", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${adminPassword}` },
+        body: JSON.stringify({ email, status }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        showAccessStatus(d.error || "Failed to update access", true);
+        return;
+      }
+      showAccessStatus(`${email} is now ${status}.`, false);
+      loadBroadcasters();
+    } catch {
+      showAccessStatus("Connection error", true);
+    }
+  };
+
+  const removeAccess = async (email: string) => {
+    if (!confirm(`Remove ${email} from the allow list? They will no longer be able to broadcast.`)) return;
+    try {
+      const res = await fetch(`/api/admin/broadcasters?email=${encodeURIComponent(email)}`, {
+        method: "DELETE",
+        headers: { "Authorization": `Bearer ${adminPassword}` },
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        showAccessStatus(d.error || "Failed to remove", true);
+        return;
+      }
+      showAccessStatus(`${email} removed from the allow list.`, false);
+      loadBroadcasters();
+    } catch {
+      showAccessStatus("Connection error", true);
+    }
+  };
+
+  function loadBroadcasters() {
+    const listEl = document.getElementById("broadcasters-list");
+    if (!listEl) return;
+    fetch("/api/admin/broadcasters", { headers: { "Authorization": `Bearer ${adminPassword}` } })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((data: { broadcasters: BroadcasterRow[] }) => {
+        const rows = data.broadcasters || [];
+        if (rows.length === 0) {
+          listEl.innerHTML = `<p style="color:#737373;">No users yet. Add an email above to pre-approve a broadcaster.</p>`;
+          return;
+        }
+        listEl.innerHTML = rows
+          .map((b) => {
+            const allowed = b.status === "allowed";
+            const statusColor = allowed ? "#22c55e" : b.status === "suspended" ? "#f59e0b" : "#737373";
+            const statusLabel = allowed ? "allowed" : b.status === "suspended" ? "suspended" : "not allowed";
+            const subtitle = b.never_signed_in
+              ? "pre-approved · never signed in"
+              : b.last_broadcast
+              ? `last broadcast ${escapeHtml(b.last_broadcast)} UTC`
+              : "signed in · never broadcast";
+            const name = escapeHtml(b.name || b.email);
+            const email = escapeHtml(b.email);
+            return `
+              <div style="display:flex; align-items:center; gap:0.75rem; padding:0.6rem 0.75rem; background:#1f1f1f; border:1px solid #333; border-radius:6px;">
+                <div style="flex:1; min-width:0;">
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <span style="width:8px; height:8px; border-radius:50%; background:${statusColor}; flex:none;"></span>
+                    <strong style="color:#e5e5e5; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${name}</strong>
+                    <span style="color:${statusColor}; font-size:0.8rem;">${statusLabel}</span>
+                  </div>
+                  <div style="color:#737373; font-size:0.8rem; margin-top:0.15rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${email} · ${subtitle}</div>
+                </div>
+                <div style="display:flex; gap:0.4rem; flex:none;">
+                  ${
+                    allowed
+                      ? `<button class="btn access-suspend" data-email="${email}" style="background:#92400e; border-color:#b45309; padding:0.35rem 0.7rem; font-size:0.85rem;">Suspend</button>`
+                      : `<button class="btn access-allow" data-email="${email}" style="background:#166534; border-color:#15803d; padding:0.35rem 0.7rem; font-size:0.85rem;">Allow</button>`
+                  }
+                  <button class="btn access-remove" data-email="${email}" title="Remove from list" style="background:#3f3f3f; border-color:#525252; padding:0.35rem 0.6rem; font-size:0.85rem;">✕</button>
+                </div>
+              </div>`;
+          })
+          .join("");
+
+        listEl.querySelectorAll(".access-allow").forEach((btn) =>
+          btn.addEventListener("click", () => setAccess((btn as HTMLElement).dataset.email!, "allowed"))
+        );
+        listEl.querySelectorAll(".access-suspend").forEach((btn) =>
+          btn.addEventListener("click", () => setAccess((btn as HTMLElement).dataset.email!, "suspended"))
+        );
+        listEl.querySelectorAll(".access-remove").forEach((btn) =>
+          btn.addEventListener("click", () => removeAccess((btn as HTMLElement).dataset.email!))
+        );
+      })
+      .catch(() => {
+        listEl.innerHTML = `<p style="color:#ef4444;">Failed to load broadcasters.</p>`;
+      });
+  }
+
+  // Add-email "Allow" handler
+  const addEmail = () => {
+    const input = document.getElementById("add-email-input") as HTMLInputElement;
+    const email = input?.value.trim().toLowerCase();
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      showAccessStatus("Enter a valid email address.", true);
+      return;
+    }
+    setAccess(email, "allowed");
+    input.value = "";
+  };
+  document.getElementById("add-allow-btn")?.addEventListener("click", addEmail);
+  document.getElementById("add-email-input")?.addEventListener("keypress", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") addEmail();
   });
 
   // Clear broadcasts handler

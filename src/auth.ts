@@ -65,8 +65,10 @@ export function logout(): void {
 
 // Stats logging functions
 export interface BroadcastStart {
-  eventId: number;
+  eventId: number | null;
   relay: string | null; // assigned tinymoq relay "host:port", or null on failure
+  forbidden?: boolean;  // true if the account is not on the broadcaster allow list (403)
+  error?: string;       // human-readable reason when blocked
 }
 
 export async function logBroadcastStart(streamId: string, publisherCdn?: string): Promise<BroadcastStart | null> {
@@ -77,6 +79,12 @@ export async function logBroadcastStart(streamId: string, publisherCdn?: string)
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ stream_id: streamId, publisher_cdn: publisherCdn }),
     });
+    if (response.status === 403) {
+      // Account is signed in but not approved to broadcast (allow list).
+      const data = await response.json().catch(() => ({}));
+      console.warn("Broadcast not permitted:", data.error);
+      return { eventId: null, relay: null, forbidden: true, error: data.error };
+    }
     if (!response.ok) {
       const errorText = await response.text();
       console.error("Failed to log broadcast start:", response.status, errorText);

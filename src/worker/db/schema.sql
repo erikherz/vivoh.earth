@@ -73,3 +73,13 @@ CREATE TABLE IF NOT EXISTS streams (
 
 CREATE INDEX IF NOT EXISTS idx_streams_stream_id ON streams(stream_id);
 CREATE INDEX IF NOT EXISTS idx_streams_user_id ON streams(user_id);
+
+-- Broadcaster allow list (default-deny): a user may broadcast ONLY if there is a
+-- row here for their email with status='allowed'. No row, or status='suspended',
+-- means broadcasting is blocked. Managed from the /cleardata admin page.
+CREATE TABLE IF NOT EXISTS broadcaster_access (
+  email TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'allowed', -- 'allowed' | 'suspended'
+  note TEXT,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
