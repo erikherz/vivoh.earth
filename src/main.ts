@@ -879,8 +879,14 @@ function showBroadcastNotAllowed(message?: string) {
   banner.innerHTML = `
     <strong style="display:block; margin-bottom:0.35rem;">Broadcasting not enabled for this account</strong>
     <span style="color:#fecaca; font-size:0.9rem;">${
-      message || "Your account is not approved to broadcast. Contact the site administrator."
+      message || "Your account is not approved to broadcast."
     }</span>
+    <div style="color:#fecaca; font-size:0.9rem; margin-top:0.5rem;">
+      For access, contact Erik Herz at
+      <a href="mailto:erik@vivoh.com" style="color:#fff; text-decoration:underline;">erik@vivoh.com</a>
+      or
+      <a href="https://linkedin.com/in/erikherz" target="_blank" rel="noopener" style="color:#fff; text-decoration:underline;">linkedin.com/in/erikherz</a>.
+    </div>
   `;
 
   const section = document.querySelector("#broadcast-view section") || broadcastView;

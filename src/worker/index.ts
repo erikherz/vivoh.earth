@@ -735,7 +735,7 @@ async function handleStatsRoutes(
     // Default-deny broadcaster allow list: only explicitly-allowed emails may publish.
     if (!(await canBroadcast(env.DB, user.email))) {
       return Response.json(
-        { error: "Your account is not approved to broadcast. Contact the site administrator." },
+        { error: "Your account is not approved to broadcast." },
         { status: 403 }
       );
     }
