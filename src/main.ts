@@ -630,6 +630,39 @@ function isValidStreamId(str: string): boolean {
   return /^[a-z0-9]{5}$/.test(str);
 }
 
+// Repair a malformed query string so URLSearchParams parses it correctly: a stray
+// "?" after the first (e.g. /?stream=ig6eb?publisher-cdn=…) and "&&" are treated as
+// separators, empty segments dropped. Safe here because our param values (stream id,
+// CDN hostnames, host:port origin) never contain "?" or "&".
+function repairSearch(search: string): string {
+  return search
+    .replace(/^\?/, "")
+    .split(/[?&]/)
+    .filter(Boolean)
+    .join("&");
+}
+
+// Test/override params that should survive stream (re)generation and ride along on
+// share links so a CDN test keeps its context. Always rebuilt with URLSearchParams
+// so the result is a single "?" + "&"-separated query — never "?...?" or "&&".
+const OVERRIDE_PARAMS = ["publisher-cdn", "viewer-cdn", "origin"] as const;
+
+function carryOverrideParams(search: string): URLSearchParams {
+  const src = new URLSearchParams(repairSearch(search));
+  const out = new URLSearchParams();
+  for (const k of OVERRIDE_PARAMS) {
+    const v = src.get(k)?.trim();
+    if (v) out.set(k, v);
+  }
+  return out;
+}
+
+// Append a (well-formed) query string to a base URL/path, joining with a single "?".
+function withQuery(base: string, params: URLSearchParams): string {
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
 // Determine current view and stream ID from URL
 async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
   const path = window.location.pathname;
@@ -672,16 +705,21 @@ async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
     return { view: "watch", streamId: potentialStreamId };
   }
 
-  // Broadcast view: / or /?stream=xxx
-  const params = new URLSearchParams(window.location.search);
+  // Broadcast view: / or /?stream=xxx. repairSearch() handles a malformed URL like
+  // /?stream=ig6eb?publisher-cdn=… where `stream` would otherwise absorb the rest.
+  const params = new URLSearchParams(repairSearch(window.location.search));
   let streamId = params.get("stream");
-
-  if (!streamId) {
+  if (streamId) streamId = streamId.trim();
+  if (!streamId || !isValidStreamId(streamId)) {
     streamId = await generateStreamId();
-    // Update URL without reload
-    const newUrl = `${window.location.pathname}?stream=${streamId}`;
-    window.history.replaceState({}, "", newUrl);
   }
+
+  // Always normalize the URL to a single, well-formed query string: stream + any
+  // override params (publisher-cdn / viewer-cdn / origin), joined with URLSearchParams.
+  // This also repairs an already-corrupted "?...?" / "&&" URL in place.
+  const normalized = carryOverrideParams(window.location.search);
+  normalized.set("stream", streamId);
+  window.history.replaceState({}, "", withQuery(window.location.pathname, normalized));
 
   return { view: "broadcast", streamId };
 }
@@ -892,7 +930,7 @@ function showBroadcastNotAllowed(message?: string) {
 // Optional per-request CDN override for testing individual tinymoq destinations
 // (e.g. ?publisher-cdn=cdn-01.tinymoq.com, &viewer-cdn=cdn-02.tinymoq.com).
 function getCdnOverride(param: "publisher-cdn" | "viewer-cdn"): string | undefined {
-  const v = new URLSearchParams(window.location.search).get(param)?.trim();
+  const v = new URLSearchParams(repairSearch(window.location.search)).get(param)?.trim();
   return v || undefined;
 }
 
@@ -901,7 +939,9 @@ function initBroadcastView(streamId: string, user: User | null) {
   // the catalog and subscribe to video/audio tracks (otherwise detectFormat() is
   // undefined and the viewer only fetches catalog.json, never video/hd).
   const streamName = `${NAMESPACE_PREFIX}/${streamId}.hang`;
-  const shareUrl = `${window.location.origin}/${streamId}`;
+  // Watch URL (path form /{id}); carry forward any override params for test continuity,
+  // joined with URLSearchParams so it's a single "?" + "&"-separated query.
+  const shareUrl = withQuery(`${window.location.origin}/${streamId}`, carryOverrideParams(window.location.search));
 
   console.log(`Vivoh.Earth Broadcast - Stream: ${streamId}`);
 
@@ -1198,7 +1238,11 @@ function initBroadcastView(streamId: string, user: User | null) {
   if (newStreamBtn) {
     newStreamBtn.addEventListener("click", async () => {
       const newStream = await generateStreamId();
-      window.location.href = `/?stream=${newStream}`;
+      // Preserve override params (publisher-cdn / viewer-cdn / origin) for the new
+      // stream; URLSearchParams guarantees a single "?" + "&"-separated query.
+      const next = carryOverrideParams(window.location.search);
+      next.set("stream", newStream);
+      window.location.href = withQuery("/", next);
     });
   }
 }
@@ -1322,7 +1366,7 @@ async function initWatchView(streamId: string, user: User | null) {
     const viewerCdn = getCdnOverride("viewer-cdn");
     // Optional forced cross-cluster origin (publisher relay host:port) for testing;
     // normally the Worker derives it from the publisher's stored relay in D1.
-    const originOverride = new URLSearchParams(window.location.search).get("origin")?.trim() || undefined;
+    const originOverride = new URLSearchParams(repairSearch(window.location.search)).get("origin")?.trim() || undefined;
     if (viewerCdn) console.log("[routing] viewer CDN override:", viewerCdn, originOverride ? `(forced origin ${originOverride})` : "");
 
     // Resolve the relay via /route. There is NO static relay to fall back to — every
