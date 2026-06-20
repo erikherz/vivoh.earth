@@ -67,6 +67,7 @@ export function logout(): void {
 export interface BroadcastStart {
   eventId: number | null;
   relay: string | null; // assigned tinymoq relay "host:port", or null on failure
+  jwt: string | null;   // per-broadcast publisher token to present to the relay
   forbidden?: boolean;  // true if the account is not on the broadcaster allow list (403)
   error?: string;       // human-readable reason when blocked
 }
@@ -83,7 +84,7 @@ export async function logBroadcastStart(streamId: string, publisherCdn?: string)
       // Account is signed in but not approved to broadcast (allow list).
       const data = await response.json().catch(() => ({}));
       console.warn("Broadcast not permitted:", data.error);
-      return { eventId: null, relay: null, forbidden: true, error: data.error };
+      return { eventId: null, relay: null, jwt: null, forbidden: true, error: data.error };
     }
     if (!response.ok) {
       const errorText = await response.text();
@@ -92,7 +93,7 @@ export async function logBroadcastStart(streamId: string, publisherCdn?: string)
     }
     const data = await response.json();
     console.log("Broadcast started with geo:", data.geo, "relay:", data.relay);
-    return { eventId: data.id, relay: data.relay ?? null };
+    return { eventId: data.id, relay: data.relay ?? null, jwt: data.jwt ?? null };
   } catch (e) {
     console.error("Error logging broadcast start:", e);
     return null;
@@ -100,10 +101,17 @@ export async function logBroadcastStart(streamId: string, publisherCdn?: string)
 }
 
 // Look up the relay hosting a live broadcast (for viewers to co-locate).
-// Returns "host:port", or null if the stream is offline / not yet routed.
+// Returns { relay: "host:port", jwt } or null if offline / not yet routed.
+// The jwt is a short-lived, subscribe-only viewer token signed for this relay;
+// re-fetching (the poll/refresh loop) returns a fresh token + relay after a reap.
 // Optional viewerCdn pulls from a specific CDN destination; optional origin
 // (publisher relay host:port) forces a cross-cluster pull source (testing).
-export async function getStreamRoute(streamId: string, viewerCdn?: string, origin?: string): Promise<string | null> {
+export interface StreamRoute {
+  relay: string;        // "host:port"
+  jwt: string | null;   // per-broadcast viewer token to present to the relay
+}
+
+export async function getStreamRoute(streamId: string, viewerCdn?: string, origin?: string): Promise<StreamRoute | null> {
   try {
     const qp = new URLSearchParams();
     if (viewerCdn) qp.set("viewer-cdn", viewerCdn);
@@ -112,7 +120,8 @@ export async function getStreamRoute(streamId: string, viewerCdn?: string, origi
     const response = await fetch(`/api/streams/${streamId}/route${qs}`);
     if (!response.ok) return null; // 404 = offline
     const data = await response.json();
-    return data.relay ?? null;
+    if (!data.relay) return null;
+    return { relay: data.relay, jwt: data.jwt ?? null };
   } catch {
     return null;
   }

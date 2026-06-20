@@ -555,15 +555,10 @@ function setActiveRelay(relay: string | null) {
   updateServerStatusPanel();
 }
 
-// tinymoq relay auth token (client publish+subscribe JWT, put/get="" = all paths, exp 2026-07-17).
-// This is a client-side connection token by design (the browser must present it to connect),
-// not a server secret. Passed as ?jwt= on the WebTransport connection URL per the hang README.
-const TINYMOQ_JWT =
-  "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6IjkzMDlmZmRlNjRlMGJmMGYifQ.eyJwdXQiOlsiIl0sImdldCI6WyIiXSwiZXhwIjoxNzg0MzA4MjY4fQ.1wt1q75WmBL376xj19fRR_MhVmSLr5zZFfyHivwFl9o";
-
-// Relay URL - set dynamically for Safari fallback, static for native WebTransport
-// hang connects WebTransport to this URL directly; the broadcast path travels as the `name` attr.
-let RELAY_URL = `https://cdn.tinymoq.com/?jwt=${TINYMOQ_JWT}`; // (was: relay.cloudflare.mediaoverquic.com)
+// Relay auth tokens are now per-broadcast and server-minted: the publisher gets its
+// token from the go-live (POST /api/stats/broadcast) response, the viewer from the
+// /route response. Both are short-lived and scoped to one broadcast (viewer = put:[],
+// subscribe-only). No static client token exists anymore. See PER-BROADCAST-TOKENS.md.
 const NAMESPACE_PREFIX = "vivoh.earth";
 
 // Dynamic imports for the MoQ web components - MUST happen after polyfills are installed.
@@ -1016,15 +1011,17 @@ function initBroadcastView(streamId: string, user: User | null) {
         }
         broadcastEventId = res?.eventId ?? null;
         const relay = res?.relay;
-        if (!relay) {
-          // /assign failed — there is no static relay to fall back to. Allow a retry
-          // on the next device action rather than connecting to a dead endpoint.
-          console.error("[routing] go-live got no relay (assign unavailable); pick a device again to retry");
+        const jwt = res?.jwt;
+        if (!relay || !jwt) {
+          // /assign failed or no token was minted — there is no static relay/token to
+          // fall back to. Allow a retry on the next device action rather than
+          // connecting to a dead endpoint or with an empty token.
+          console.error("[routing] go-live missing relay or token (relay:", relay, "token:", !!jwt, "); pick a device again to retry");
           setActiveRelay(null);
           goLivePromise = null;
           return;
         }
-        publisher.setAttribute("url", `https://${relay}/?jwt=${TINYMOQ_JWT}`);
+        publisher.setAttribute("url", `https://${relay}/?jwt=${jwt}`);
         setActiveRelay(relay);
         console.log("[routing] broadcaster relay:", relay, "eventId:", broadcastEventId);
       });
@@ -1332,7 +1329,7 @@ async function initWatchView(streamId: string, user: User | null) {
     // connection must use the dynamic host:port from the directory. If the broadcast
     // isn't live yet (404), poll until it is, showing a "waiting" state. Connect once.
     let route = await getStreamRoute(streamId, viewerCdn, originOverride);
-    console.log(`[watch-timing] route resolved @ ${ms()} ->`, route ?? "(offline, polling)");
+    console.log(`[watch-timing] route resolved @ ${ms()} ->`, route?.relay ?? "(offline, polling)");
 
     if (!route) {
       const section = document.querySelector("#watch-view section");
@@ -1350,11 +1347,15 @@ async function initWatchView(streamId: string, user: User | null) {
       }
       waitingEl.remove();
       if (stopped) return;
-      console.log(`[watch-timing] route became available @ ${ms()} ->`, route);
+      console.log(`[watch-timing] route became available @ ${ms()} ->`, route?.relay);
     }
 
-    setActiveRelay(route);
-    watcher.setAttribute("url", `https://${route}/?jwt=${TINYMOQ_JWT}`);
+    if (!route || !route.jwt) {
+      console.error("[routing] viewer route missing relay or token; cannot connect");
+      return;
+    }
+    setActiveRelay(route.relay);
+    watcher.setAttribute("url", `https://${route.relay}/?jwt=${route.jwt}`);
     watcher.setAttribute("name", streamName);
     console.log(`[watch-timing] url set, connecting @ ${ms()}`);
 
@@ -2395,12 +2396,9 @@ async function init() {
   // Detect browser support (async for codec checks)
   browserSupport = await detectBrowserSupport();
 
-  // For Safari/polyfill mode, select the best relay server based on latency
-  if (needsPolyfill) {
-    const bestRelay = await selectBestFallbackRelay();
-    RELAY_URL = `https://${bestRelay}`;
-  } else {
-    // WebTransport mode - assume connected
+  // WebTransport mode - assume connected. (Safari/polyfill fallback relays are
+  // disabled; per-broadcast tokens are WebTransport-only via the dynamic relay.)
+  if (!needsPolyfill) {
     serverStatus.connected = true;
   }
 
