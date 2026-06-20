@@ -1,0 +1,21 @@
+# Local dev secrets for `wrangler dev`. Copy to `.dev.vars` (gitignored) and fill in.
+# In production these are set with `wrangler secret put <NAME>` — NEVER commit real values.
+
+# OAuth providers
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+MICROSOFT_CLIENT_ID=
+MICROSOFT_CLIENT_SECRET=
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=
+
+# HMAC secret for signing session cookies
+SESSION_SECRET=
+
+# Opaque bearer authenticating the Worker to TinyMoQ's /assign + /release provisioning API
+TINYMOQ_PROVISION_KEY=
+
+# base64url "k" field from moq-auth.jwk — HMAC secret for signing per-broadcast relay tokens.
+# Extract with:
+#   python3 -c "import base64,json;print(json.loads(base64.urlsafe_b64decode(open('moq-auth.jwk').read().strip()+'==='))['k'])"
+MOQ_AUTH_K=

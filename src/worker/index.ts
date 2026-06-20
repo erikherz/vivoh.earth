@@ -24,6 +24,7 @@ import {
   clearSessionCookie,
   getSessionFromCookie,
 } from "./auth/session";
+import { mintMoqToken, type MoqClaims } from "./auth/moq-token";
 
 export interface Env {
   DB: D1Database;
@@ -35,6 +36,10 @@ export interface Env {
   DISCORD_CLIENT_ID: string;
   DISCORD_CLIENT_SECRET: string;
   SESSION_SECRET: string;
+  // Opaque bearer authenticating the Worker to TinyMoQ's /assign + /release.
+  TINYMOQ_PROVISION_KEY?: string;
+  // base64url "k" from moq-auth.jwk — HMAC secret for signing per-broadcast tokens.
+  MOQ_AUTH_K?: string;
 }
 
 interface User {
@@ -488,10 +493,18 @@ async function handleStreamRoutes(
     const publisherCluster = row.relay_host; // cluster host, e.g. cdn.tinymoq.com / cdn-01.tinymoq.com
 
     // Authoritative current relay for this broadcast (sticky per name).
-    const current = await assignRelay(streamId, publisherCluster);
+    const current = await assignRelay(streamId, publisherCluster, undefined, env.TINYMOQ_PROVISION_KEY);
     if (!current) {
       return new Response("offline", { status: 404 });
     }
+
+    // Viewer token: subscribe-only to THIS broadcast (put:[] = cannot publish/hijack).
+    const b = broadcastName(streamId);
+    const viewerJwt = await tryMintMoqToken(env, {
+      put: [],
+      get: [b],
+      exp: Math.floor(Date.now() / 1000) + VIEWER_TOKEN_TTL,
+    });
 
     // Keep D1 in sync if the relay moved (reap/respawn) so admin/stats stay accurate.
     if (current.host !== publisherCluster || current.port !== row.relay_port) {
@@ -507,12 +520,12 @@ async function handleStreamRoutes(
       // publisher's CURRENT relay. Explicit ?origin= test override wins.
       const forcedOrigin = url.searchParams.get("origin");
       const origin = forcedOrigin ?? `${current.host}:${current.port}`;
-      const edge = await assignRelay(streamId, viewerCdn, origin);
+      const edge = await assignRelay(streamId, viewerCdn, origin, env.TINYMOQ_PROVISION_KEY);
       if (!edge) return new Response("offline", { status: 404 });
-      return Response.json({ relay: `${edge.host}:${edge.port}` });
+      return Response.json({ relay: `${edge.host}:${edge.port}`, jwt: viewerJwt });
     }
 
-    return Response.json({ relay: `${current.host}:${current.port}` });
+    return Response.json({ relay: `${current.host}:${current.port}`, jwt: viewerJwt });
   }
 
   // POST /api/streams - Create or update stream settings (requires auth)
@@ -594,7 +607,8 @@ function isValidOrigin(origin: string): boolean {
 async function assignRelay(
   streamId: string,
   cdnHost?: string | null,
-  origin?: string | null
+  origin?: string | null,
+  provisionKey?: string | null
 ): Promise<{ host: string; port: number } | null> {
   const name = broadcastName(streamId);
   const base = autoscalerBase(cdnHost);
@@ -603,7 +617,7 @@ async function assignRelay(
     query += `&origin=${encodeURIComponent(origin)}`;
   }
   try {
-    const res = await fetch(`${base}/assign?${query}`);
+    const res = await fetch(`${base}/assign?${query}`, { headers: provisionHeaders(provisionKey) });
     if (res.ok) {
       const text = (await res.text()).trim(); // e.g. "cdn.tinymoq.com:8000"
       const [host, portStr] = text.split(":");
@@ -621,15 +635,44 @@ async function assignRelay(
 
 // Free the relay route when a broadcast ends so the node can be scaled down.
 // Release on the same CDN the broadcast was assigned to (its stored relay_host).
-async function releaseRelay(streamId: string, cdnHost?: string | null): Promise<void> {
+async function releaseRelay(streamId: string, cdnHost?: string | null, provisionKey?: string | null): Promise<void> {
   const name = broadcastName(streamId);
   const base = autoscalerBase(cdnHost);
   try {
-    await fetch(`${base}/release?broadcast=${encodeURIComponent(name)}`);
+    await fetch(`${base}/release?broadcast=${encodeURIComponent(name)}`, { headers: provisionHeaders(provisionKey) });
   } catch (e) {
     console.warn("releaseRelay: /release failed", e);
   }
 }
+
+// Authenticate the Worker to TinyMoQ's provisioning API (/assign, /release) with an
+// opaque bearer. Omitted when the key isn't set so deploys are safe before the
+// operator runs `wrangler secret put TINYMOQ_PROVISION_KEY` (relay still accepts).
+function provisionHeaders(provisionKey?: string | null): HeadersInit {
+  return provisionKey ? { Authorization: `Bearer ${provisionKey}` } : {};
+}
+
+// Mint a per-broadcast relay token, guarded: if MOQ_AUTH_K isn't set (or signing
+// fails), return null instead of throwing — the endpoint still works, it just
+// doesn't include a `jwt` yet (clients fall back to the static token until the
+// rollout switches them over). See PER-BROADCAST-TOKENS.md.
+async function tryMintMoqToken(env: Env, claims: MoqClaims): Promise<string | null> {
+  if (!env.MOQ_AUTH_K) {
+    console.warn("[moq-token] MOQ_AUTH_K not set; returning no per-broadcast token");
+    return null;
+  }
+  try {
+    return await mintMoqToken(env.MOQ_AUTH_K, claims);
+  } catch (e) {
+    console.error("[moq-token] mint failed", e);
+    return null;
+  }
+}
+
+// Token lifetimes (seconds). Generous until a refresh loop exists, so long
+// broadcasts / long views aren't dropped mid-stream (reconnect is costly).
+const PUBLISHER_TOKEN_TTL = 12 * 60 * 60; // 12h
+const VIEWER_TOKEN_TTL = 6 * 60 * 60; // 6h
 
 async function handleStatsRoutes(
   request: Request,
@@ -751,7 +794,7 @@ async function handleStatsRoutes(
     // Ask the tinymoq autoscaler which relay to publish to (sticky per broadcast
     // name). Optional publisher_cdn picks which CDN destination to assign on (testing).
     // No static fallback: if /assign is down, relay is null and the client retries.
-    const assigned = await assignRelay(body.stream_id, body.publisher_cdn);
+    const assigned = await assignRelay(body.stream_id, body.publisher_cdn, undefined, env.TINYMOQ_PROVISION_KEY);
     const relayHost = assigned?.host ?? null;
     const relayPort = assigned?.port ?? null;
 
@@ -764,11 +807,20 @@ async function handleStatsRoutes(
       .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort)
       .first<{ id: number }>();
 
+    // Publisher token: may publish (and read acks on) its own broadcast only.
+    const b = broadcastName(body.stream_id);
+    const jwt = await tryMintMoqToken(env, {
+      put: [b],
+      get: [b],
+      exp: Math.floor(Date.now() / 1000) + PUBLISHER_TOKEN_TTL,
+    });
+
     return Response.json({
       id: result?.id,
       stream_id: body.stream_id,
       geo,
       relay: assigned ? `${relayHost}:${relayPort}` : null,
+      jwt,
     });
   }
 
@@ -789,7 +841,7 @@ async function handleStatsRoutes(
       .run();
 
     if (row?.stream_id) {
-      await releaseRelay(row.stream_id, row.relay_host);
+      await releaseRelay(row.stream_id, row.relay_host, env.TINYMOQ_PROVISION_KEY);
     }
 
     return Response.json({ success: true });
