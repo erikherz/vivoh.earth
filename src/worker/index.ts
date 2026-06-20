@@ -498,14 +498,6 @@ async function handleStreamRoutes(
       return new Response("offline", { status: 404 });
     }
 
-    // Viewer token: subscribe-only to THIS broadcast (put:[] = cannot publish/hijack).
-    const b = broadcastName(streamId);
-    const viewerJwt = await tryMintMoqToken(env, {
-      put: [],
-      get: [b],
-      exp: Math.floor(Date.now() / 1000) + VIEWER_TOKEN_TTL,
-    });
-
     // Keep D1 in sync if the relay moved (reap/respawn) so admin/stats stay accurate.
     if (current.host !== publisherCluster || current.port !== row.relay_port) {
       await env.DB
@@ -514,6 +506,10 @@ async function handleStreamRoutes(
         .run();
     }
 
+    // Resolve the relay the viewer will actually connect to. For a cross-cluster
+    // viewer that's a fresh edge (with its OWN per-stream key); otherwise it's the
+    // publisher's relay. The viewer token must be signed with THAT relay's key.
+    let relay = current;
     const viewerCdn = url.searchParams.get("viewer-cdn");
     if (viewerCdn && viewerCdn !== current.host) {
       // Cross-cluster: assign an edge on the viewer's cluster that pulls from the
@@ -522,10 +518,19 @@ async function handleStreamRoutes(
       const origin = forcedOrigin ?? `${current.host}:${current.port}`;
       const edge = await assignRelay(streamId, viewerCdn, origin, env.TINYMOQ_PROVISION_KEY);
       if (!edge) return new Response("offline", { status: 404 });
-      return Response.json({ relay: `${edge.host}:${edge.port}`, jwt: viewerJwt });
+      relay = edge;
     }
 
-    return Response.json({ relay: `${current.host}:${current.port}`, jwt: viewerJwt });
+    // Viewer token: subscribe-only to THIS broadcast (put:[] = cannot publish/hijack).
+    // Signed with the connecting relay's per-stream key when present, else MOQ_AUTH_K.
+    const b = broadcastName(streamId);
+    const viewerJwt = await tryMintMoqToken(env, {
+      put: [],
+      get: [b],
+      exp: Math.floor(Date.now() / 1000) + VIEWER_TOKEN_TTL,
+    }, relay.key);
+
+    return Response.json({ relay: `${relay.host}:${relay.port}`, jwt: viewerJwt });
   }
 
   // POST /api/streams - Create or update stream settings (requires auth)
@@ -604,12 +609,19 @@ function isValidOrigin(origin: string): boolean {
 // When the viewer's cluster differs from the publisher's, pass `origin` (the
 // publisher's relay host:port) so the assigned edge relay pulls the stream across
 // clusters. Returns null if /assign is unavailable — there is NO static fallback.
+// The /assign response is dual-mode (cutover-safe):
+//   SHARED mode (today):    plain text  "host:port"            -> sign tokens with env.MOQ_AUTH_K
+//   PER-STREAM mode (later): JSON  {"relay":"host:port","key":"<base64url HMAC secret>"}
+//                                                              -> sign THIS broadcast's tokens with `key`
+// In per-stream mode the relay is keyed ONLY with its fresh per-broadcast key; a
+// reap/respawn yields a new key (old tokens die = intended revocation). /assign is
+// sticky, so do NOT cache the key — sign on demand with what this call returned.
 async function assignRelay(
   streamId: string,
   cdnHost?: string | null,
   origin?: string | null,
   provisionKey?: string | null
-): Promise<{ host: string; port: number } | null> {
+): Promise<{ host: string; port: number; key?: string } | null> {
   const name = broadcastName(streamId);
   const base = autoscalerBase(cdnHost);
   let query = `broadcast=${encodeURIComponent(name)}`;
@@ -619,11 +631,23 @@ async function assignRelay(
   try {
     const res = await fetch(`${base}/assign?${query}`, { headers: provisionHeaders(provisionKey) });
     if (res.ok) {
-      const text = (await res.text()).trim(); // e.g. "cdn.tinymoq.com:8000"
-      const [host, portStr] = text.split(":");
+      const text = (await res.text()).trim();
+      let relayStr = text; // e.g. "cdn.tinymoq.com:8000"
+      let key: string | undefined;
+      // Per-stream mode returns JSON; shared mode returns a bare "host:port".
+      if (text.startsWith("{")) {
+        try {
+          const obj = JSON.parse(text) as { relay?: string; key?: string };
+          if (obj.relay) relayStr = String(obj.relay).trim();
+          if (obj.key) key = String(obj.key);
+        } catch {
+          console.warn("assignRelay: /assign returned non-JSON starting with '{'");
+        }
+      }
+      const [host, portStr] = relayStr.split(":");
       const port = parseInt(portStr, 10);
       if (host && Number.isFinite(port)) {
-        return { host, port };
+        return { host, port, key };
       }
     }
     console.warn("assignRelay: unexpected /assign response", res.status);
@@ -656,13 +680,18 @@ function provisionHeaders(provisionKey?: string | null): HeadersInit {
 // fails), return null instead of throwing — the endpoint still works, it just
 // doesn't include a `jwt` yet (clients fall back to the static token until the
 // rollout switches them over). See PER-BROADCAST-TOKENS.md.
-async function tryMintMoqToken(env: Env, claims: MoqClaims): Promise<string | null> {
-  if (!env.MOQ_AUTH_K) {
-    console.warn("[moq-token] MOQ_AUTH_K not set; returning no per-broadcast token");
+// `streamKey` is the per-stream HMAC secret from /assign (per-stream mode). When
+// present it signs this broadcast's tokens; otherwise we fall back to the shared
+// env.MOQ_AUTH_K (shared mode). Both being absent => no token (clients fall back to
+// the static TINYMOQ_JWT until the rollout switches them over).
+async function tryMintMoqToken(env: Env, claims: MoqClaims, streamKey?: string | null): Promise<string | null> {
+  const secret = streamKey ?? env.MOQ_AUTH_K;
+  if (!secret) {
+    console.warn("[moq-token] no signing key (per-stream key absent and MOQ_AUTH_K unset); returning no token");
     return null;
   }
   try {
-    return await mintMoqToken(env.MOQ_AUTH_K, claims);
+    return await mintMoqToken(secret, claims);
   } catch (e) {
     console.error("[moq-token] mint failed", e);
     return null;
@@ -808,12 +837,13 @@ async function handleStatsRoutes(
       .first<{ id: number }>();
 
     // Publisher token: may publish (and read acks on) its own broadcast only.
+    // Signed with the relay's per-stream key when /assign returned one, else MOQ_AUTH_K.
     const b = broadcastName(body.stream_id);
     const jwt = await tryMintMoqToken(env, {
       put: [b],
       get: [b],
       exp: Math.floor(Date.now() / 1000) + PUBLISHER_TOKEN_TTL,
-    });
+    }, assigned?.key);
 
     return Response.json({
       id: result?.id,
