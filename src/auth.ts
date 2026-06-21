@@ -68,6 +68,8 @@ export interface BroadcastStart {
   eventId: number | null;
   relay: string | null; // assigned tinymoq relay "host:port", or null on failure
   jwt: string | null;   // per-broadcast publisher token to present to the relay
+  encrypted?: boolean;  // true if this stream uses relay-blind E2E media encryption
+  contentKey?: string | null; // per-broadcast AES content key (base64url) when encrypted
   forbidden?: boolean;  // true if the account is not on the broadcaster allow list (403)
   error?: string;       // human-readable reason when blocked
 }
@@ -93,7 +95,13 @@ export async function logBroadcastStart(streamId: string, publisherCdn?: string)
     }
     const data = await response.json();
     console.log("Broadcast started with geo:", data.geo, "relay:", data.relay);
-    return { eventId: data.id, relay: data.relay ?? null, jwt: data.jwt ?? null };
+    return {
+      eventId: data.id,
+      relay: data.relay ?? null,
+      jwt: data.jwt ?? null,
+      encrypted: data.encrypted ?? false,
+      contentKey: data.content_key ?? null,
+    };
   } catch (e) {
     console.error("Error logging broadcast start:", e);
     return null;
@@ -109,6 +117,8 @@ export async function logBroadcastStart(streamId: string, publisherCdn?: string)
 export interface StreamRoute {
   relay: string;        // "host:port"
   jwt: string | null;   // per-broadcast viewer token to present to the relay
+  encrypted?: boolean;  // true if this stream uses relay-blind E2E media encryption
+  contentKey?: string | null; // per-broadcast AES content key (base64url); null if withheld (auth-gated)
 }
 
 export async function getStreamRoute(streamId: string, viewerCdn?: string, origin?: string): Promise<StreamRoute | null> {
@@ -121,7 +131,12 @@ export async function getStreamRoute(streamId: string, viewerCdn?: string, origi
     if (!response.ok) return null; // 404 = offline
     const data = await response.json();
     if (!data.relay) return null;
-    return { relay: data.relay, jwt: data.jwt ?? null };
+    return {
+      relay: data.relay,
+      jwt: data.jwt ?? null,
+      encrypted: data.encrypted ?? false,
+      contentKey: data.content_key ?? null,
+    };
   } catch {
     return null;
   }
@@ -172,6 +187,7 @@ export async function checkStreamExists(streamId: string): Promise<boolean> {
 export interface StreamSettings {
   require_auth: boolean;
   overlay_html: string;
+  encrypted: boolean;
 }
 
 export async function getStreamSettings(streamId: string): Promise<StreamSettings> {
@@ -181,9 +197,10 @@ export async function getStreamSettings(streamId: string): Promise<StreamSetting
     return {
       require_auth: data.require_auth ?? false,
       overlay_html: data.overlay_html ?? "",
+      encrypted: data.encrypted ?? false,
     };
   } catch {
-    return { require_auth: false, overlay_html: "" };
+    return { require_auth: false, overlay_html: "", encrypted: false };
   }
 }
 

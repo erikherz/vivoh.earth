@@ -440,14 +440,15 @@ async function handleStreamRoutes(
   if (method === "GET" && streamIdMatch) {
     const streamId = streamIdMatch[1];
     const stream = await env.DB
-      .prepare("SELECT require_auth, overlay_html FROM streams WHERE stream_id = ?")
+      .prepare("SELECT require_auth, overlay_html, encrypted FROM streams WHERE stream_id = ?")
       .bind(streamId)
-      .first<{ require_auth: number; overlay_html: string | null }>();
+      .first<{ require_auth: number; overlay_html: string | null; encrypted: number }>();
 
     return Response.json({
       stream_id: streamId,
       require_auth: stream?.require_auth === 1,
       overlay_html: stream?.overlay_html || "",
+      encrypted: stream?.encrypted === 1,
     });
   }
 
@@ -482,10 +483,10 @@ async function handleStreamRoutes(
     const streamId = streamRouteMatch[1];
     const row = await env.DB
       .prepare(
-        "SELECT relay_host, relay_port FROM broadcast_events WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1"
+        "SELECT relay_host, relay_port, content_key FROM broadcast_events WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1"
       )
       .bind(streamId)
-      .first<{ relay_host: string | null; relay_port: number | null }>();
+      .first<{ relay_host: string | null; relay_port: number | null; content_key: string | null }>();
 
     if (!row?.relay_host) {
       return new Response("offline", { status: 404 });
@@ -530,7 +531,33 @@ async function handleStreamRoutes(
       exp: Math.floor(Date.now() / 1000) + VIEWER_TOKEN_TTL,
     }, relay.key);
 
-    return Response.json({ relay: `${relay.host}:${relay.port}`, jwt: viewerJwt });
+    // Relay-blind E2E: hand the per-broadcast content key to authorized viewers.
+    // The key gates DECRYPTION (the JWT only gates the connection). For a stream
+    // that requires auth, the caller must be signed in to receive it — an
+    // unauthorized viewer can still connect but, lacking the key, only ever sees
+    // ciphertext (fail-closed). Non-auth encrypted streams hand the key to anyone
+    // (they are not meant to be private; encryption there only blinds the relay).
+    let contentKey: string | null = null;
+    const encrypted = !!row.content_key;
+    if (encrypted) {
+      const stream = await env.DB
+        .prepare("SELECT require_auth FROM streams WHERE stream_id = ?")
+        .bind(streamId)
+        .first<{ require_auth: number }>();
+      if (stream?.require_auth === 1) {
+        const viewer = await getAuthenticatedUser(request, env);
+        if (viewer) contentKey = row.content_key;
+      } else {
+        contentKey = row.content_key;
+      }
+    }
+
+    return Response.json({
+      relay: `${relay.host}:${relay.port}`,
+      jwt: viewerJwt,
+      encrypted,
+      content_key: contentKey,
+    });
   }
 
   // POST /api/streams - Create or update stream settings (requires auth)
@@ -540,37 +567,40 @@ async function handleStreamRoutes(
       return Response.json({ error: "Authentication required" }, { status: 401 });
     }
 
-    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string };
+    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; encrypted?: boolean };
     if (!body.stream_id) {
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
 
     // Get current settings first
     const current = await env.DB
-      .prepare("SELECT require_auth, overlay_html FROM streams WHERE stream_id = ?")
+      .prepare("SELECT require_auth, overlay_html, encrypted FROM streams WHERE stream_id = ?")
       .bind(body.stream_id)
-      .first<{ require_auth: number; overlay_html: string | null }>();
+      .first<{ require_auth: number; overlay_html: string | null; encrypted: number }>();
 
     const requireAuth = body.require_auth !== undefined ? body.require_auth : (current?.require_auth === 1);
     const overlayHtml = body.overlay_html !== undefined ? body.overlay_html : (current?.overlay_html || "");
+    const isEncrypted = body.encrypted !== undefined ? body.encrypted : (current?.encrypted === 1);
 
     // Upsert stream settings
     await env.DB
       .prepare(`
-        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html, encrypted)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(stream_id) DO UPDATE SET
           require_auth = excluded.require_auth,
           overlay_html = excluded.overlay_html,
+          encrypted = excluded.encrypted,
           updated_at = datetime('now')
       `)
-      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml)
+      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, isEncrypted ? 1 : 0)
       .run();
 
     return Response.json({
       stream_id: body.stream_id,
       require_auth: requireAuth,
       overlay_html: overlayHtml,
+      encrypted: isEncrypted,
     });
   }
 
@@ -588,6 +618,17 @@ const TINYMOQ_AUTOSCALER = "https://cdn.tinymoq.com";
 
 function broadcastName(streamId: string): string {
   return `vivoh.earth/${streamId}.hang`;
+}
+
+// Generate a fresh 256-bit content encryption key (base64url, unpadded) for a
+// broadcast session. Distinct from any relay/JWT secret; only ever sent to the
+// publisher and authorized viewers over TLS, never to the relay.
+function generateContentKey(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 // Resolve the autoscaler base URL, honoring an optional per-request CDN override
@@ -827,13 +868,24 @@ async function handleStatsRoutes(
     const relayHost = assigned?.host ?? null;
     const relayPort = assigned?.port ?? null;
 
+    // Relay-blind E2E media encryption (opt-in per stream). When on, mint a fresh
+    // per-broadcast content key, store it on the broadcast row (so authorized
+    // viewers get the SAME key via /route), and return it to the publisher. This
+    // is a SEPARATE secret from the relay JWT-signing key and never goes to the relay.
+    const streamRow = await env.DB
+      .prepare("SELECT encrypted FROM streams WHERE stream_id = ?")
+      .bind(body.stream_id)
+      .first<{ encrypted: number }>();
+    const encrypted = streamRow?.encrypted === 1;
+    const contentKey = encrypted ? generateContentKey() : null;
+
     const result = await env.DB
       .prepare(`
-        INSERT INTO broadcast_events (user_id, stream_id, geo_country, geo_city, geo_region, geo_latitude, geo_longitude, geo_timezone, relay_host, relay_port)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO broadcast_events (user_id, stream_id, geo_country, geo_city, geo_region, geo_latitude, geo_longitude, geo_timezone, relay_host, relay_port, content_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
       `)
-      .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort)
+      .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort, contentKey)
       .first<{ id: number }>();
 
     // Publisher token: may publish (and read acks on) its own broadcast only.
@@ -851,6 +903,8 @@ async function handleStatsRoutes(
       geo,
       relay: assigned ? `${relayHost}:${relayPort}` : null,
       jwt,
+      encrypted,
+      content_key: contentKey,
     });
   }
 

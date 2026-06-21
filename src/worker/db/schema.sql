@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS broadcast_events (
   -- Assigned tinymoq relay (broadcast→relay routing directory)
   relay_host TEXT,
   relay_port INTEGER,
+  -- Per-broadcast content encryption key (base64url, 256-bit) for relay-blind
+  -- E2E media encryption. NULL when the stream is not encrypted. Never sent to
+  -- the relay; handed to the publisher at go-live and to authorized viewers.
+  content_key TEXT,
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -66,6 +70,8 @@ CREATE TABLE IF NOT EXISTS streams (
   stream_id TEXT UNIQUE NOT NULL,
   user_id INTEGER NOT NULL,
   require_auth INTEGER DEFAULT 0,
+  -- Relay-blind E2E media encryption opt-in (1 = encrypt payload, AES-GCM).
+  encrypted INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY (user_id) REFERENCES users(id)
