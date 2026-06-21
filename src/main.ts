@@ -555,6 +555,22 @@ function setActiveRelay(relay: string | null) {
   updateServerStatusPanel();
 }
 
+// A small "🔒 Encrypted" pill shown in the publisher and player views when the
+// stream uses relay-blind E2E media encryption. Purely informational.
+function createEncryptionBadge(): HTMLSpanElement {
+  const badge = document.createElement("span");
+  badge.className = "encryption-badge";
+  badge.title = "End-to-end encrypted — the relay only forwards ciphertext it cannot read";
+  badge.innerHTML =
+    `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>` +
+    `<span>Encrypted</span>`;
+  badge.style.cssText =
+    "display:inline-flex;align-items:center;gap:4px;font-size:0.72rem;font-weight:600;" +
+    "color:#22c55e;border:1px solid rgba(34,197,94,0.5);border-radius:999px;padding:2px 8px;" +
+    "line-height:1;white-space:nowrap;";
+  return badge;
+}
+
 // Relay auth tokens are now per-broadcast and server-minted: the publisher gets its
 // token from the go-live (POST /api/stats/broadcast) response, the viewer from the
 // /route response. Both are short-lived and scoped to one broadcast (viewer = put:[],
@@ -1021,14 +1037,22 @@ function initBroadcastView(streamId: string, user: User | null) {
   // the frames the armed publisher has been queuing. See src/crypto/media-crypto.ts.
   const encryptCheckbox = document.getElementById("encrypt-checkbox") as HTMLInputElement;
   if (encryptCheckbox) {
+    // "🔒 Encrypted" indicator in the stream header, reflecting the live toggle state.
+    const encBadge = createEncryptionBadge();
+    encBadge.style.display = "none";
+    document.querySelector(".stream-header")?.appendChild(encBadge);
+    const reflectBadge = (on: boolean) => { encBadge.style.display = on ? "inline-flex" : "none"; };
+
     getStreamSettings(streamId).then(settings => {
       encryptCheckbox.checked = settings.encrypted;
       streamEncrypted = settings.encrypted;
+      reflectBadge(settings.encrypted);
       if (settings.encrypted) armPublisher();
     });
 
     encryptCheckbox.addEventListener("change", () => {
       streamEncrypted = encryptCheckbox.checked;
+      reflectBadge(encryptCheckbox.checked);
       if (encryptCheckbox.checked) armPublisher();
       else clearMediaCrypto();
       updateStreamSettings(streamId, { encrypted: encryptCheckbox.checked });
@@ -1454,6 +1478,16 @@ async function initWatchView(streamId: string, user: User | null) {
       }
       armViewer();
       await setMediaKey(route.contentKey);
+      // "🔒 Encrypted" badge overlaid on the player.
+      const sec = document.querySelector("#watch-view section") as HTMLElement | null;
+      if (sec) {
+        if (!sec.style.position) sec.style.position = "relative";
+        const badge = createEncryptionBadge();
+        badge.style.cssText +=
+          "position:absolute;top:10px;right:10px;z-index:5;color:#4ade80;" +
+          "background:rgba(0,0,0,0.55);border-color:rgba(74,222,128,0.6);";
+        sec.appendChild(badge);
+      }
     }
     setActiveRelay(route.relay);
     watcher.setAttribute("url", `https://${route.relay}/?jwt=${route.jwt}`);
