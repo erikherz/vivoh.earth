@@ -24,7 +24,7 @@ import {
   clearSessionCookie,
   getSessionFromCookie,
 } from "./auth/session";
-import { mintMoqToken, type MoqClaims } from "./auth/moq-token";
+import { mintEd25519Token, mintHs256Token, type MoqClaims } from "./auth/moq-token";
 
 export interface Env {
   DB: D1Database;
@@ -38,8 +38,12 @@ export interface Env {
   SESSION_SECRET: string;
   // Opaque bearer authenticating the Worker to TinyMoQ's /assign + /release.
   TINYMOQ_PROVISION_KEY?: string;
-  // base64url "k" from moq-auth.jwk — HMAC secret for signing per-broadcast tokens.
+  // base64url "k" from moq-auth.jwk — HMAC secret for signing per-broadcast tokens
+  // (managed mode — vivoh's runtime model).
   MOQ_AUTH_K?: string;
+  // OKP (Ed25519) private JWK for BYOK/asymmetric signing. UNSET on vivoh (managed
+  // tenant); present here only so the token code stays in sync with earthseed's BYOK.
+  MOQ_AUTH_PRIVATE_JWK?: string;
 }
 
 interface User {
@@ -726,13 +730,21 @@ function provisionHeaders(provisionKey?: string | null): HeadersInit {
 // env.MOQ_AUTH_K (shared mode). Both being absent => no token (clients fall back to
 // the static TINYMOQ_JWT until the rollout switches them over).
 async function tryMintMoqToken(env: Env, claims: MoqClaims, streamKey?: string | null): Promise<string | null> {
-  const secret = streamKey ?? env.MOQ_AUTH_K;
-  if (!secret) {
-    console.warn("[moq-token] no signing key (per-stream key absent and MOQ_AUTH_K unset); returning no token");
-    return null;
-  }
   try {
-    return await mintMoqToken(secret, claims);
+    // BYOK (asymmetric, EdDSA) if a private JWK is configured. UNSET on vivoh —
+    // vivoh runs the managed HS256 path below; this branch keeps the code in sync
+    // with earthseed's BYOK tenant without changing vivoh's behavior.
+    if (env.MOQ_AUTH_PRIVATE_JWK) {
+      return await mintEd25519Token(env.MOQ_AUTH_PRIVATE_JWK, claims);
+    }
+    // Managed (HS256): per-stream key from /assign when present, else the shared
+    // env.MOQ_AUTH_K. Both absent => no token (clients retry / fall back).
+    const secret = streamKey ?? env.MOQ_AUTH_K;
+    if (!secret) {
+      console.warn("[moq-token] no signing key (per-stream key absent and MOQ_AUTH_K unset); returning no token");
+      return null;
+    }
+    return await mintHs256Token(secret, claims);
   } catch (e) {
     console.error("[moq-token] mint failed", e);
     return null;
