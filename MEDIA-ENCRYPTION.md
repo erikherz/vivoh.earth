@@ -5,7 +5,7 @@
 
 This document explains the design, the exact integration points, the cryptographic
 contract, and the limitations. It is the companion to
-[`PER-BROADCAST-TOKENS.md`](./PER-BROADCAST-TOKENS.md) (relay access tokens).
+[`TOKENS.md`](./TOKENS.md) (relay access tokens).
 
 ---
 
@@ -20,7 +20,7 @@ Two independent layers protect a stream; they compose:
 
 | Layer | Secret | Gates | Defined in |
 |-------|--------|-------|-----------|
-| **Access** | per-broadcast HS256 **JWT** | the *connection* to the relay | `PER-BROADCAST-TOKENS.md` |
+| **Access** | per-broadcast **EdDSA JWT** (BYOK Ed25519) | the *connection* to the relay | [`TOKENS.md`](./TOKENS.md) |
 | **Confidentiality** | per-broadcast **content key** (AES-256) | *decryption* of the media | this document |
 
 Because they layer, even an unauthorized connection — or the relay operator
@@ -195,8 +195,8 @@ is possible but deferred to v2.
 ## 7. Key generation, storage, and distribution
 
 The Cloudflare Worker owns the content key. It is a **separate secret** from the
-relay JWT-signing key (`MOQ_AUTH_K` / per-stream `relay.key`) and is **never** sent
-to the relay or put on a connection URL.
+relay token-signing key (the BYOK Ed25519 private key `MOQ_AUTH_PRIVATE_JWK`; see
+[`TOKENS.md`](./TOKENS.md)) and is **never** sent to the relay or put on a connection URL.
 
 ### Generation & storage (publisher go-live)
 
@@ -309,4 +309,4 @@ compatibility.
 | Schema | `src/worker/db/migrations/0005_add_media_encryption.sql`, `src/worker/db/schema.sql` |
 | Client return shapes | `src/auth.ts` (`BroadcastStart`, `StreamRoute`, `StreamSettings`) |
 | Client wiring + toggle + badge | `src/main.ts`, `index.html` |
-| Access tokens (companion layer) | `PER-BROADCAST-TOKENS.md` |
+| Access tokens (companion layer) | [`TOKENS.md`](./TOKENS.md) |
