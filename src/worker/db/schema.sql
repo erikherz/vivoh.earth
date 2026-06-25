@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS streams (
   require_auth INTEGER DEFAULT 0,
   -- Relay-blind E2E media encryption opt-in (1 = encrypt payload, AES-GCM).
   encrypted INTEGER DEFAULT 0,
+  -- Live chat opt-in (1 = chat enabled; messages flow via the ChatRoom Durable Object).
+  chat_enabled INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now')),
   FOREIGN KEY (user_id) REFERENCES users(id)

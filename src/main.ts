@@ -614,6 +614,8 @@ import {
   type LiveViewer
 } from "./auth";
 import { armPublisher, armViewer, setMediaKey, resetMediaKey, clearMediaCrypto } from "./crypto/media-crypto";
+import { createCompositor, type Compositor } from "./media/pip-compositor";
+import { initChat, type ChatHandle } from "./chat/chat-client";
 
 type View = "broadcast" | "watch" | "stats" | "stats-map" | "greet" | "stream-stats" | "stream-stats-map" | "admin";
 
@@ -1059,6 +1061,34 @@ function initBroadcastView(streamId: string, user: User | null) {
     });
   }
 
+  // Live chat toggle. When on, reveal the chat panel (right column on desktop, bottom
+  // overlay on mobile) and connect the broadcaster to the per-stream ChatRoom; persist
+  // the setting so viewers' getStreamSettings() reflects it.
+  const chatCheckbox = document.getElementById("chat-checkbox") as HTMLInputElement;
+  const broadcastChatPanel = document.getElementById("broadcast-chat") as HTMLElement | null;
+  let chatHandle: ChatHandle | null = null;
+  const openChat = () => {
+    if (!broadcastChatPanel || chatHandle) return;
+    broadcastChatPanel.classList.remove("hidden");
+    chatHandle = initChat({ streamId, container: broadcastChatPanel, user });
+  };
+  const closeChat = () => {
+    chatHandle?.destroy();
+    chatHandle = null;
+    broadcastChatPanel?.classList.add("hidden");
+  };
+  if (chatCheckbox) {
+    getStreamSettings(streamId).then(settings => {
+      chatCheckbox.checked = settings.chat_enabled;
+      if (settings.chat_enabled) openChat();
+    });
+    chatCheckbox.addEventListener("change", () => {
+      if (chatCheckbox.checked) openChat();
+      else closeChat();
+      updateStreamSettings(streamId, { chat_enabled: chatCheckbox.checked });
+    });
+  }
+
   // Set viewers link to stream stats page
   const viewersLink = document.getElementById("viewers-link") as HTMLAnchorElement;
   if (viewersLink) {
@@ -1076,8 +1106,6 @@ function initBroadcastView(streamId: string, user: User | null) {
     // The relay URL is NOT static: on go-live the Worker calls tinymoq /assign and
     // returns the relay hosting this broadcast; we point the publisher at it then.
     publisher.setAttribute("name", streamName);
-
-    type DeviceMode = "camera" | "audio" | "screen" | "off";
 
     let broadcastEventId: number | null = null;
     let goLivePromise: Promise<void> | null = null;
@@ -1145,38 +1173,114 @@ function initBroadcastView(streamId: string, user: User | null) {
       resetMediaKey();
     };
 
-    // Map a control-bar selection to the element's source/invisible/muted props.
-    // audio-only = camera source with video disabled (invisible); off = no source.
-    const applyMode = (mode: DeviceMode) => {
-      switch (mode) {
-        case "camera":
-          publisher.invisible = false;
-          publisher.muted = false;
+    // --- Combinable capture toggles: 📹 Camera (video) + 🎤 Audio + 🖥️ Screen ---
+    // Camera and/or Screen video is composited onto a single <canvas> and published as one
+    // stable track (announce=true + source=undefined so the element's own capture stands
+    // down); audio is mixed (mic for camera, system/tab audio for screen) into one stable
+    // track. Toggling sources changes only the compositor inputs, never the published
+    // tracks, so viewers never see a reset. Audio-only uses the element's native source.
+    type Toggle = "camera" | "audio" | "screen";
+    const capture: Record<Toggle, boolean> = { camera: false, audio: false, screen: false };
+    let anyActive = false;
+
+    // Low-level seam: a video/audio Source is just a MediaStreamTrack signal.
+    const bcast = publisher.broadcast as unknown as {
+      video: { source: { set(t: MediaStreamTrack | undefined): void } };
+      audio: { source: { set(t: MediaStreamTrack | undefined): void } };
+    };
+
+    // Any video state (camera and/or screen) routes through ONE compositor whose canvas
+    // and audio-mix tracks are published once and never re-set. Toggling camera/screen/
+    // mic changes only the compositor's inputs, so the viewer never sees a track reset
+    // (RESET_STREAM) — the <moq-watch> element can't re-subscribe after one and would
+    // otherwise freeze. Audio-only (mic, no video) stays on the element's native source.
+    let comp: Compositor | null = null;
+    let bound = false; // whether the compositor's tracks are wired into the broadcast
+    const teardownComposite = () => {
+      if (!comp) return;
+      comp.stop();
+      comp = null;
+      bound = false;
+      bcast.video.source.set(undefined);
+      bcast.audio.source.set(undefined);
+      const v = publisher.querySelector("video") as HTMLElement | null;
+      if (v) v.style.display = ""; // restore the element's own preview
+    };
+
+    // Serialize because getDisplayMedia/getUserMedia show permission prompts.
+    let applying = false;
+    const applyState = async () => {
+      if (applying) return;
+      applying = true;
+      try {
+        const { camera, audio, screen } = capture;
+        anyActive = camera || audio || screen;
+        const hasVideo = camera || screen;
+
+        if (hasVideo) {
+          try {
+            if (!comp) {
+              comp = createCompositor();
+              const v = publisher.querySelector("video") as HTMLElement | null;
+              if (v) v.style.display = "none";
+              comp.canvas.className = "pip-canvas";
+              publisher.insertAdjacentElement("afterbegin", comp.canvas);
+            }
+            // Reconcile sources without re-prompting the ones already captured.
+            if (screen && !comp.hasScreen()) {
+              await comp.enableScreen({
+                onEnded: () => { capture.screen = false; syncButtons(); void applyState(); },
+              });
+            } else if (!screen && comp.hasScreen()) {
+              comp.disableScreen();
+            }
+            if (camera && !comp.hasCamera()) await comp.enableCamera();
+            else if (!camera && comp.hasCamera()) comp.disableCamera();
+
+            // Audio routing: screen present -> system/tab audio; else the mic. The mix's
+            // output track is stable, so crossing mic<->system never resets audio.
+            comp.setSystemAudioEnabled(audio && screen);
+            await comp.setMicEnabled(audio && !screen);
+
+            publisher.announce = true;
+            publisher.source = undefined;
+            publisher.invisible = false;
+            publisher.muted = false; // the mixed audio track is always published (silent when audio off) to keep it stable
+            // Wire the stable tracks exactly once; re-setting them would reset the track.
+            if (!bound) {
+              bcast.video.source.set(comp.videoTrack);
+              bcast.audio.source.set(comp.audioTrack);
+              bound = true;
+            }
+            void goLive();
+          } catch (e) {
+            console.error("[media] capture failed (or cancelled):", e);
+            capture.screen = false;
+            capture.camera = false;
+            syncButtons();
+            teardownComposite();
+          }
+          return;
+        }
+
+        // No video — drop the composite and use the element's own capture (audio-only/idle).
+        teardownComposite();
+        publisher.announce = "source";
+        if (audio) {
           publisher.source = "camera";
-          break;
-        case "audio":
-          publisher.invisible = true;
+          publisher.invisible = true; // audio only -> no camera light / no video track
           publisher.muted = false;
-          publisher.source = "camera";
-          break;
-        case "screen":
-          publisher.invisible = false;
-          publisher.muted = false;
-          publisher.source = "screen";
-          break;
-        case "off":
+          void goLive();
+        } else {
           publisher.source = null;
-          break;
-      }
-      // Going live (any real source) assigns + connects to a relay; "off" releases it.
-      if (mode === "off") {
-        endBroadcast();
-      } else {
-        void goLive();
+          endBroadcast();
+        }
+      } finally {
+        applying = false;
       }
     };
 
-    // --- Build the control bar (status + device buttons + overlay toggle) ---
+    // --- Build the control bar (status + capture toggles + overlay toggle) ---
     const bar = document.createElement("div");
     bar.className = "publish-controls";
 
@@ -1186,36 +1290,42 @@ function initBroadcastView(streamId: string, user: User | null) {
     statusEl.setAttribute("data-status-text", "Offline");
     bar.appendChild(statusEl);
 
-    const deviceButtons: Partial<Record<DeviceMode, HTMLButtonElement>> = {};
-
-    // Selected = dim (already chosen, de-emphasized); available = bright (click me).
-    const setActiveButton = (mode: DeviceMode | null) => {
-      (Object.keys(deviceButtons) as DeviceMode[]).forEach((m) => {
-        const btn = deviceButtons[m];
-        if (!btn) return;
-        btn.classList.toggle("device-selected", m === mode);
-        btn.classList.toggle("device-available", m !== mode);
+    const toggleButtons: Partial<Record<Toggle, HTMLButtonElement>> = {};
+    const syncButtons = () => {
+      (Object.keys(toggleButtons) as Toggle[]).forEach((k) => {
+        toggleButtons[k]?.classList.toggle("toggle-on", capture[k]);
       });
     };
-
-    const makeDeviceButton = (mode: DeviceMode, emoji: string, label: string) => {
+    const makeToggle = (key: Toggle, emoji: string, label: string) => {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = "publish-btn";
+      b.className = "publish-btn toggle-btn";
       b.title = label;
       b.textContent = emoji;
       b.addEventListener("click", () => {
-        applyMode(mode);
-        setActiveButton(mode);
+        capture[key] = !capture[key];
+        syncButtons();
+        void applyState();
       });
-      deviceButtons[mode] = b;
+      toggleButtons[key] = b;
       bar.appendChild(b);
     };
-    makeDeviceButton("audio", "🎤", "Audio Only");
-    makeDeviceButton("camera", "📹", "Camera");
-    makeDeviceButton("screen", "🖥️", "Screen");
-    makeDeviceButton("off", "⏹️", "Off");
-    setActiveButton(null);
+    makeToggle("camera", "📹", "Camera");
+    makeToggle("audio", "🎤", "Audio (mic, or system audio with screen)");
+    makeToggle("screen", "🖥️", "Screen");
+
+    const stopBtn = document.createElement("button");
+    stopBtn.type = "button";
+    stopBtn.className = "publish-btn";
+    stopBtn.title = "Stop";
+    stopBtn.textContent = "⏹️";
+    stopBtn.addEventListener("click", () => {
+      capture.camera = capture.audio = capture.screen = false;
+      syncButtons();
+      void applyState();
+    });
+    bar.appendChild(stopBtn);
+    syncButtons();
 
     // Place the control bar directly after the <moq-publish> element.
     publisher.insertAdjacentElement("afterend", bar);
@@ -1223,7 +1333,8 @@ function initBroadcastView(streamId: string, user: User | null) {
     // --- Status indicator (display only; go-live logging is handled by goLive) ---
     const refreshStatus = () => {
       const conn = publisher.connection?.status?.peek?.() ?? "disconnected";
-      const hasSource = !!publisher.state?.source?.peek?.();
+      // anyActive covers the composited path too (where state.source is undefined by design).
+      const hasSource = anyActive || !!publisher.state?.source?.peek?.();
       let emoji = "⚪";
       let text = "Offline";
       if (conn === "connected" && hasSource) {
@@ -1384,6 +1495,16 @@ async function initWatchView(streamId: string, user: User | null) {
   if (settings.require_auth && !user) {
     showWatchLoginRequired();
     return;
+  }
+
+  // Live chat for viewers, when the broadcaster enabled it (right column on desktop,
+  // bottom overlay on mobile). The WS is also gated server-side on chat_enabled.
+  if (settings.chat_enabled) {
+    const watchChatPanel = document.getElementById("watch-chat") as HTMLElement | null;
+    if (watchChatPanel) {
+      watchChatPanel.classList.remove("hidden");
+      initChat({ streamId, container: watchChatPanel, user });
+    }
   }
 
   // Set stream name on watcher (headless <moq-watch> core element)

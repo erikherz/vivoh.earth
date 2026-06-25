@@ -24,10 +24,22 @@
       "custom_domain": true
     }
   ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHAT_ROOMS",
+        "class_name": "ChatRoom"
+      }
+    ]
+  },
   "migrations": [
     {
       "tag": "v2",
       "deleted_classes": ["MoqRelay"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["ChatRoom"]
     }
   ]
 }

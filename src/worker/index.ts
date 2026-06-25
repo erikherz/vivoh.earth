@@ -26,6 +26,10 @@ import {
 } from "./auth/session";
 import { mintEd25519Token, mintHs256Token, type MoqClaims } from "./auth/moq-token";
 
+// Per-stream live chat Durable Object (WebSocket hibernation). Re-exported so wrangler
+// can bind it; see wrangler.jsonc durable_objects + migrations.
+export { ChatRoom } from "./chat-room";
+
 export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
@@ -44,6 +48,8 @@ export interface Env {
   // OKP (Ed25519) private JWK for BYOK/asymmetric signing. UNSET on vivoh (managed
   // tenant); present here only so the token code stays in sync with earthseed's BYOK.
   MOQ_AUTH_PRIVATE_JWK?: string;
+  // Per-stream live chat rooms (one Durable Object instance per streamId).
+  CHAT_ROOMS: DurableObjectNamespace;
 }
 
 interface User {
@@ -439,20 +445,41 @@ async function handleStreamRoutes(
   const method = request.method;
   const path = url.pathname;
 
+  // GET /api/streams/:stream_id/chat - Live chat WebSocket (forwarded to the per-stream
+  // Durable Object). Only for chat-enabled streams; everyone (broadcaster + viewers) can
+  // connect. WS handshakes are GET requests.
+  const chatMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/chat$/);
+  if (chatMatch) {
+    const streamId = chatMatch[1];
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("expected websocket", { status: 426 });
+    }
+    const s = await env.DB
+      .prepare("SELECT chat_enabled FROM streams WHERE stream_id = ?")
+      .bind(streamId)
+      .first<{ chat_enabled: number }>();
+    if (s?.chat_enabled !== 1) {
+      return new Response("chat disabled", { status: 403 });
+    }
+    const id = env.CHAT_ROOMS.idFromName(streamId);
+    return env.CHAT_ROOMS.get(id).fetch(request);
+  }
+
   // GET /api/streams/:stream_id - Get stream settings (public)
   const streamIdMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})$/);
   if (method === "GET" && streamIdMatch) {
     const streamId = streamIdMatch[1];
     const stream = await env.DB
-      .prepare("SELECT require_auth, overlay_html, encrypted FROM streams WHERE stream_id = ?")
+      .prepare("SELECT require_auth, overlay_html, encrypted, chat_enabled FROM streams WHERE stream_id = ?")
       .bind(streamId)
-      .first<{ require_auth: number; overlay_html: string | null; encrypted: number }>();
+      .first<{ require_auth: number; overlay_html: string | null; encrypted: number; chat_enabled: number }>();
 
     return Response.json({
       stream_id: streamId,
       require_auth: stream?.require_auth === 1,
       overlay_html: stream?.overlay_html || "",
       encrypted: stream?.encrypted === 1,
+      chat_enabled: stream?.chat_enabled === 1,
     });
   }
 
@@ -571,33 +598,35 @@ async function handleStreamRoutes(
       return Response.json({ error: "Authentication required" }, { status: 401 });
     }
 
-    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; encrypted?: boolean };
+    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; encrypted?: boolean; chat_enabled?: boolean };
     if (!body.stream_id) {
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
 
     // Get current settings first
     const current = await env.DB
-      .prepare("SELECT require_auth, overlay_html, encrypted FROM streams WHERE stream_id = ?")
+      .prepare("SELECT require_auth, overlay_html, encrypted, chat_enabled FROM streams WHERE stream_id = ?")
       .bind(body.stream_id)
-      .first<{ require_auth: number; overlay_html: string | null; encrypted: number }>();
+      .first<{ require_auth: number; overlay_html: string | null; encrypted: number; chat_enabled: number }>();
 
     const requireAuth = body.require_auth !== undefined ? body.require_auth : (current?.require_auth === 1);
     const overlayHtml = body.overlay_html !== undefined ? body.overlay_html : (current?.overlay_html || "");
     const isEncrypted = body.encrypted !== undefined ? body.encrypted : (current?.encrypted === 1);
+    const chatEnabled = body.chat_enabled !== undefined ? body.chat_enabled : (current?.chat_enabled === 1);
 
     // Upsert stream settings
     await env.DB
       .prepare(`
-        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html, encrypted)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html, encrypted, chat_enabled)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(stream_id) DO UPDATE SET
           require_auth = excluded.require_auth,
           overlay_html = excluded.overlay_html,
           encrypted = excluded.encrypted,
+          chat_enabled = excluded.chat_enabled,
           updated_at = datetime('now')
       `)
-      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, isEncrypted ? 1 : 0)
+      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, isEncrypted ? 1 : 0, chatEnabled ? 1 : 0)
       .run();
 
     return Response.json({
@@ -605,6 +634,7 @@ async function handleStreamRoutes(
       require_auth: requireAuth,
       overlay_html: overlayHtml,
       encrypted: isEncrypted,
+      chat_enabled: chatEnabled,
     });
   }
 
