@@ -548,7 +548,18 @@ async function handleStreamRoutes(
       // publisher's CURRENT relay. Explicit ?origin= test override wins.
       const forcedOrigin = url.searchParams.get("origin");
       const origin = forcedOrigin ?? `${current.host}:${current.port}`;
-      const edge = await assignRelay(streamId, viewerCdn, origin, env.TINYMOQ_PROVISION_KEY);
+      // Subscribe-scoped, cluster-flagged token so the edge can authenticate its pull
+      // from the origin. Signed with OUR key via the SAME signer used for viewer tokens
+      // (managed HS256 here; BYOK EdDSA when configured) — the autoscaler can't mint this,
+      // and a different signer would produce tokens the deployed relay rejects. Broad
+      // get:[""] (root) scope so the edge can pull whatever subtree the origin advertises.
+      const pullToken = await tryMintMoqToken(env, {
+        put: [],
+        get: [""],
+        cluster: true,
+        exp: Math.floor(Date.now() / 1000) + PULL_TOKEN_TTL,
+      });
+      const edge = await assignRelay(streamId, viewerCdn, origin, env.TINYMOQ_PROVISION_KEY, pullToken);
       if (!edge) return new Response("offline", { status: 404 });
       relay = edge;
     }
@@ -695,13 +706,18 @@ async function assignRelay(
   streamId: string,
   cdnHost?: string | null,
   origin?: string | null,
-  provisionKey?: string | null
+  provisionKey?: string | null,
+  pull?: string | null
 ): Promise<{ host: string; port: number; key?: string } | null> {
   const name = broadcastName(streamId);
   const base = autoscalerBase(cdnHost);
   let query = `broadcast=${encodeURIComponent(name)}`;
   if (origin && isValidOrigin(origin)) {
     query += `&origin=${encodeURIComponent(origin)}`;
+    // Cross-cluster: the edge relay needs a subscribe-scoped, cluster-flagged token
+    // (minted with OUR signing key — the autoscaler holds none) to authenticate its
+    // pull from the origin. Only meaningful alongside `origin`.
+    if (pull) query += `&pull=${encodeURIComponent(pull)}`;
   }
   try {
     const res = await fetch(`${base}/assign?${query}`, { headers: provisionHeaders(provisionKey) });
@@ -785,6 +801,9 @@ async function tryMintMoqToken(env: Env, claims: MoqClaims, streamKey?: string |
 // broadcasts / long views aren't dropped mid-stream (reconnect is costly).
 const PUBLISHER_TOKEN_TTL = 12 * 60 * 60; // 12h
 const VIEWER_TOKEN_TTL = 6 * 60 * 60; // 6h
+// Cross-cluster pull token (edge relay -> origin). Matches the viewer TTL so a long
+// broadcast's edge pull isn't dropped mid-stream.
+const PULL_TOKEN_TTL = 6 * 60 * 60; // 6h
 
 async function handleStatsRoutes(
   request: Request,

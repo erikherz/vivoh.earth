@@ -43,6 +43,11 @@ export interface MoqClaims {
   put: string[]; // path prefixes the holder may publish to ([] = none)
   get: string[]; // path prefixes the holder may subscribe to
   exp: number; // expiry, unix SECONDS
+  // Cross-cluster pull flag. Set only on the `&pull=` token handed to a viewer-CDN edge
+  // relay so it may pull this broadcast from the publisher's origin relay across clusters.
+  // Omitted (undefined) on ordinary publisher/viewer tokens, so they are byte-identical
+  // to before — JSON.stringify drops undefined fields.
+  cluster?: boolean;
 }
 
 const sign = async (header: object, claims: MoqClaims, signFn: (input: Uint8Array) => Promise<ArrayBuffer>): Promise<string> => {
