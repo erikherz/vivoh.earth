@@ -656,7 +656,9 @@ async function handleStreamRoutes(
 // --- tinymoq broadcast→relay routing -------------------------------------
 // The autoscaler exposes a sticky, idempotent assignment API keyed by the full
 // broadcast name. The key MUST match what the client publishes/subscribes.
-const TINYMOQ_AUTOSCALER = "https://cdn.tinymoq.com";
+// TinyMoQ moved the shared autoscaler from cdn.tinymoq.com (now decommissioned — DNS no
+// longer resolves) to gpc-01.tinymoq.com. Relays advertise as gpc-01.tinymoq.com:<port>.
+const TINYMOQ_AUTOSCALER = "https://gpc-01.tinymoq.com";
 // NOTE: there is no static relay fallback. cdn.tinymoq.com:443 is the autoscaler
 // control API (TCP), not a MoQ relay — UDP/443 has no media listener. Every media
 // connection must use a dynamic host:port from /assign or /route.
@@ -680,7 +682,7 @@ function generateContentKey(): string {
 // (e.g. cdn-01.tinymoq.com) for testing individual destinations. Only tinymoq CDN
 // hosts are allowed — this guards the Worker's fetch against SSRF via user input.
 function autoscalerBase(cdnHost?: string | null): string {
-  if (cdnHost && /^cdn(-[a-z0-9]+)?\.tinymoq\.com$/i.test(cdnHost)) {
+  if (cdnHost && /^(cdn|gpc)(-[a-z0-9]+)?\.tinymoq\.com$/i.test(cdnHost)) {
     return `https://${cdnHost}`;
   }
   return TINYMOQ_AUTOSCALER;
@@ -688,7 +690,7 @@ function autoscalerBase(cdnHost?: string | null): string {
 
 // A tinymoq relay origin "host:port" (the publisher's relay), for cross-cluster pulls.
 function isValidOrigin(origin: string): boolean {
-  return /^cdn(-[a-z0-9]+)?\.tinymoq\.com:\d+$/i.test(origin);
+  return /^(cdn|gpc)(-[a-z0-9]+)?\.tinymoq\.com:\d+$/i.test(origin);
 }
 
 // Ask the autoscaler for the relay hosting this broadcast (spawns/sticks as needed).

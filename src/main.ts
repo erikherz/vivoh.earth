@@ -103,7 +103,7 @@ interface ServerStatus {
 
 const serverStatus: ServerStatus = {
   mode: needsPolyfill ? "websocket" : "webtransport",
-  selectedServer: "cdn.tinymoq.com",
+  selectedServer: "gpc-01.tinymoq.com",
   connected: false,
   raceResults: [],
 };
