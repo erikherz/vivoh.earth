@@ -24,7 +24,7 @@ import {
   clearSessionCookie,
   getSessionFromCookie,
 } from "./auth/session";
-import { mintEd25519Token, mintHs256Token, type MoqClaims } from "./auth/moq-token";
+import { mintEd25519Token, mintHs256Token, publicVerifyJwk, type MoqClaims } from "./auth/moq-token";
 
 // Per-stream live chat Durable Object (WebSocket hibernation). Re-exported so wrangler
 // can bind it; see wrangler.jsonc durable_objects + migrations.
@@ -40,8 +40,22 @@ export interface Env {
   DISCORD_CLIENT_ID: string;
   DISCORD_CLIENT_SECRET: string;
   SESSION_SECRET: string;
-  // Opaque bearer authenticating the Worker to TinyMoQ's /assign + /release.
+  // DIRECT mode only (FLEET_MODE=direct): the box bearer authenticating the Worker to a
+  // relay box's /assign + /release. In BROKERED mode this must NOT be set — the box bearer
+  // stays with the broker; leaking it into the customer app defeats Path 2.
   TINYMOQ_PROVISION_KEY?: string;
+  // BROKERED mode only (FLEET_MODE=brokered): the operator-issued CUSTOMER token presented
+  // to the broker's assign URL. The customer's credential — NOT the box bearer. wrangler secret.
+  CDN_API_TOKEN?: string;
+  // TinyMoQ fleet endpoint: the base URL the Worker hits to get a relay for a broadcast.
+  // Switching endpoints (or paths, see FLEET_MODE) is config, not code — set it in
+  // wrangler.jsonc `vars`. Optional; falls back to the historical box when unset.
+  //   - direct mode:   the relay box BASE, e.g. https://gpc-01.tinymoq.com (Worker appends /assign + /release)
+  //   - brokered mode: the broker's full ASSIGN URL, e.g. https://tinymoq.com/cdn/assign (Worker POSTs to it)
+  FLEET_ENDPOINT?: string;
+  // How the Worker gets a relay: "direct" (Path 1 — call a relay box's /assign yourself) or
+  // "brokered" (Path 2 — POST {broadcast} to a CDN operator's broker). Default "direct".
+  FLEET_MODE?: string;
   // base64url "k" from moq-auth.jwk — HMAC secret for signing per-broadcast tokens
   // (managed mode — vivoh's runtime model).
   MOQ_AUTH_K?: string;
@@ -109,6 +123,22 @@ async function handleApiRoutes(
   url: URL
 ): Promise<Response> {
   try {
+    // GET /api/pubkey — the PUBLIC verify JWK for this deployment's BYOK signing key, as
+    // plain JSON, for an operator to paste into their CDN console as the verify_jwk.
+    // Public material only; the private half (MOQ_AUTH_PRIVATE_JWK) is never exposed here.
+    // (Managed/HMAC deployments leave MOQ_AUTH_PRIVATE_JWK unset, so this returns 503.)
+    if (request.method === "GET" && url.pathname === "/api/pubkey") {
+      if (!env.MOQ_AUTH_PRIVATE_JWK) {
+        return new Response("signing key not configured", { status: 503 });
+      }
+      try {
+        return Response.json(publicVerifyJwk(env.MOQ_AUTH_PRIVATE_JWK));
+      } catch (e) {
+        console.error("/api/pubkey:", e);
+        return new Response("invalid signing key", { status: 500 });
+      }
+    }
+
     // Provider-specific routes
     if (url.pathname.startsWith("/api/auth/google/")) {
       return handleProviderAuth(request, env, url, "google");
@@ -478,7 +508,7 @@ async function handleStreamRoutes(
       stream_id: streamId,
       require_auth: stream?.require_auth === 1,
       overlay_html: stream?.overlay_html || "",
-      encrypted: stream?.encrypted === 1,
+      encrypted: true, // mandatory for every stream; the column is retained but no longer authoritative
       chat_enabled: stream?.chat_enabled === 1,
     });
   }
@@ -525,7 +555,7 @@ async function handleStreamRoutes(
     const publisherCluster = row.relay_host; // cluster host, e.g. cdn.tinymoq.com / cdn-01.tinymoq.com
 
     // Authoritative current relay for this broadcast (sticky per name).
-    const current = await assignRelay(streamId, publisherCluster, undefined, env.TINYMOQ_PROVISION_KEY);
+    const current = await assignRelay(env, streamId, publisherCluster, undefined, env.TINYMOQ_PROVISION_KEY);
     if (!current) {
       return new Response("offline", { status: 404 });
     }
@@ -559,7 +589,7 @@ async function handleStreamRoutes(
         cluster: true,
         exp: Math.floor(Date.now() / 1000) + PULL_TOKEN_TTL,
       });
-      const edge = await assignRelay(streamId, viewerCdn, origin, env.TINYMOQ_PROVISION_KEY, pullToken);
+      const edge = await assignRelay(env, streamId, viewerCdn, origin, env.TINYMOQ_PROVISION_KEY, pullToken);
       if (!edge) return new Response("offline", { status: 404 });
       relay = edge;
     }
@@ -656,12 +686,52 @@ async function handleStreamRoutes(
 // --- tinymoq broadcast→relay routing -------------------------------------
 // The autoscaler exposes a sticky, idempotent assignment API keyed by the full
 // broadcast name. The key MUST match what the client publishes/subscribes.
-// TinyMoQ moved the shared autoscaler from cdn.tinymoq.com (now decommissioned — DNS no
-// longer resolves) to gpc-01.tinymoq.com. Relays advertise as gpc-01.tinymoq.com:<port>.
-const TINYMOQ_AUTOSCALER = "https://gpc-01.tinymoq.com";
-// NOTE: there is no static relay fallback. cdn.tinymoq.com:443 is the autoscaler
-// control API (TCP), not a MoQ relay — UDP/443 has no media listener. Every media
-// connection must use a dynamic host:port from /assign or /route.
+// --- TinyMoQ fleet broadcast→relay routing -------------------------------
+// "Get a relay" has TWO configurable paths (FLEET_MODE); both return a host:port the
+// browser connects to (only the endpoint + credential differ, so switching paths is
+// config, not code):
+//   - direct (Path 1):   the Worker calls a relay box's /assign itself, authed by the
+//                         provisioning bearer (this is vivoh's current model).
+//   - brokered (Path 2): the Worker POSTs {broadcast} to a CDN operator's broker (the
+//                         FLEET_ENDPOINT assign URL), authed by the operator-issued
+//                         CUSTOMER token (env.CDN_API_TOKEN); the operator selects the box.
+// Endpoint = env.FLEET_ENDPOINT; credential = TINYMOQ_PROVISION_KEY (direct) / CDN_API_TOKEN (brokered).
+//
+// NOTE: there is no static relay fallback. The autoscaler endpoint is a control API (TCP),
+// not a MoQ relay — UDP/443 has no media listener. Every media connection must use a
+// dynamic host:port from /assign or /route.
+const FALLBACK_FLEET_ENDPOINT = "https://gpc-01.tinymoq.com";
+
+// The fleet base URL for this deployment (no trailing slash).
+function fleetEndpoint(env: Env): string {
+  return (env.FLEET_ENDPOINT || FALLBACK_FLEET_ENDPOINT).replace(/\/+$/, "");
+}
+
+// Which "get a relay" path this deployment uses (see FLEET_MODE). Default direct.
+function fleetMode(env: Env): "direct" | "brokered" {
+  return (env.FLEET_MODE || "").trim().toLowerCase() === "brokered" ? "brokered" : "direct";
+}
+
+// The configured fleet's autoscaler hostname (e.g. gpc-01.tinymoq.com).
+function fleetHost(env: Env): string {
+  try {
+    return new URL(fleetEndpoint(env)).hostname.toLowerCase();
+  } catch {
+    return new URL(FALLBACK_FLEET_ENDPOINT).hostname;
+  }
+}
+
+// SSRF guard for user-supplied hosts (publisher-cdn / viewer-cdn / cross-cluster origin):
+// allow only the configured fleet host and sibling boxes under its registrable domain, so
+// multi-box fleets work without a code change while a stray/hostile value can't redirect
+// the Worker's /assign fetch off-fleet.
+function isFleetHost(env: Env, host: string): boolean {
+  const h = host.toLowerCase();
+  const fh = fleetHost(env);
+  if (h === fh) return true;
+  const parent = fh.split(".").slice(-2).join("."); // e.g. tinymoq.com
+  return parent.includes(".") && (h === parent || h.endsWith("." + parent));
+}
 
 function broadcastName(streamId: string): string {
   return `vivoh.earth/${streamId}.hang`;
@@ -679,18 +749,20 @@ function generateContentKey(): string {
 }
 
 // Resolve the autoscaler base URL, honoring an optional per-request CDN override
-// (e.g. cdn-01.tinymoq.com) for testing individual destinations. Only tinymoq CDN
-// hosts are allowed — this guards the Worker's fetch against SSRF via user input.
-function autoscalerBase(cdnHost?: string | null): string {
-  if (cdnHost && /^(cdn|gpc)(-[a-z0-9]+)?\.tinymoq\.com$/i.test(cdnHost)) {
+// (a specific box within the fleet). Only hosts on the configured fleet's domain are
+// allowed — this guards the Worker's fetch against SSRF via user input.
+function autoscalerBase(env: Env, cdnHost?: string | null): string {
+  if (cdnHost && isFleetHost(env, cdnHost)) {
     return `https://${cdnHost}`;
   }
-  return TINYMOQ_AUTOSCALER;
+  return fleetEndpoint(env);
 }
 
-// A tinymoq relay origin "host:port" (the publisher's relay), for cross-cluster pulls.
-function isValidOrigin(origin: string): boolean {
-  return /^(cdn|gpc)(-[a-z0-9]+)?\.tinymoq\.com:\d+$/i.test(origin);
+// A fleet relay origin "host:port" (the publisher's relay), for cross-cluster pulls.
+// The host must be on the configured fleet's domain.
+function isValidOrigin(env: Env, origin: string): boolean {
+  const m = /^([a-z0-9.-]+):(\d+)$/i.exec(origin);
+  return !!m && isFleetHost(env, m[1]);
 }
 
 // Ask the autoscaler for the relay hosting this broadcast (spawns/sticks as needed).
@@ -705,6 +777,7 @@ function isValidOrigin(origin: string): boolean {
 // reap/respawn yields a new key (old tokens die = intended revocation). /assign is
 // sticky, so do NOT cache the key — sign on demand with what this call returned.
 async function assignRelay(
+  env: Env,
   streamId: string,
   cdnHost?: string | null,
   origin?: string | null,
@@ -712,9 +785,15 @@ async function assignRelay(
   pull?: string | null
 ): Promise<{ host: string; port: number; key?: string } | null> {
   const name = broadcastName(streamId);
-  const base = autoscalerBase(cdnHost);
+  // Path 2 (brokered): hand the broadcast to the operator and let it pick the box. The
+  // cdnHost/origin/pull overrides are direct-mode (self-selected box) concerns and don't
+  // apply — the operator owns topology.
+  if (fleetMode(env) === "brokered") {
+    return assignViaBroker(env, name);
+  }
+  const base = autoscalerBase(env, cdnHost);
   let query = `broadcast=${encodeURIComponent(name)}`;
-  if (origin && isValidOrigin(origin)) {
+  if (origin && isValidOrigin(env, origin)) {
     query += `&origin=${encodeURIComponent(origin)}`;
     // Cross-cluster: the edge relay needs a subscribe-scoped, cluster-flagged token
     // (minted with OUR signing key — the autoscaler holds none) to authenticate its
@@ -750,11 +829,59 @@ async function assignRelay(
   return null;
 }
 
-// Free the relay route when a broadcast ends so the node can be scaled down.
-// Release on the same CDN the broadcast was assigned to (its stored relay_host).
-async function releaseRelay(streamId: string, cdnHost?: string | null, provisionKey?: string | null): Promise<void> {
+// Path 2 (brokered): POST {broadcast} to the operator's broker; it selects a box and
+// returns {relay:"host:port"}. No per-stream key, no topology and no cdnHost/origin
+// overrides (the operator owns box selection). The credential is the operator-issued
+// customer token, sent as a bearer.
+async function assignViaBroker(
+  env: Env,
+  broadcast: string
+): Promise<{ host: string; port: number; key?: string } | null> {
+  // FLEET_ENDPOINT IS the broker's full assign URL in brokered mode. Credential is the
+  // operator-issued CUSTOMER token (CDN_API_TOKEN) — never the box bearer.
+  const assignUrl = fleetEndpoint(env);
+  try {
+    const res = await fetch(assignUrl, {
+      method: "POST",
+      headers: { ...provisionHeaders(env.CDN_API_TOKEN), "content-type": "application/json" },
+      body: JSON.stringify({ broadcast }),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { relay?: string };
+      const [host, portStr] = String(data.relay ?? "").split(":");
+      const port = parseInt(portStr, 10);
+      if (host && Number.isFinite(port)) return { host, port };
+    }
+    console.warn("assignViaBroker: unexpected broker response", res.status);
+  } catch (e) {
+    console.warn("assignViaBroker: broker assign failed", e);
+  }
+  return null;
+}
+
+// Free the relay route when a broadcast ends so the node can be scaled down. Direct mode
+// releases the box it assigned (the stored relay_host); brokered mode tells the operator,
+// which owns the box lifecycle.
+async function releaseRelay(env: Env, streamId: string, cdnHost?: string | null, provisionKey?: string | null): Promise<void> {
   const name = broadcastName(streamId);
-  const base = autoscalerBase(cdnHost);
+  if (fleetMode(env) === "brokered") {
+    // Derive the release URL from the assign URL (…/assign → …/release). If FLEET_ENDPOINT
+    // doesn't end in /assign we can't derive it — skip and let the operator reap the box.
+    const assignUrl = fleetEndpoint(env);
+    if (!/assign\/?$/.test(assignUrl)) return;
+    const releaseUrl = assignUrl.replace(/assign(\/?)$/, "release$1");
+    try {
+      await fetch(releaseUrl, {
+        method: "POST",
+        headers: { ...provisionHeaders(env.CDN_API_TOKEN), "content-type": "application/json" },
+        body: JSON.stringify({ broadcast: name }),
+      });
+    } catch (e) {
+      console.warn("releaseRelay(brokered): broker release failed", e);
+    }
+    return;
+  }
+  const base = autoscalerBase(env, cdnHost);
   try {
     await fetch(`${base}/release?broadcast=${encodeURIComponent(name)}`, { headers: provisionHeaders(provisionKey) });
   } catch (e) {
@@ -927,20 +1054,17 @@ async function handleStatsRoutes(
     // Ask the tinymoq autoscaler which relay to publish to (sticky per broadcast
     // name). Optional publisher_cdn picks which CDN destination to assign on (testing).
     // No static fallback: if /assign is down, relay is null and the client retries.
-    const assigned = await assignRelay(body.stream_id, body.publisher_cdn, undefined, env.TINYMOQ_PROVISION_KEY);
+    const assigned = await assignRelay(env, body.stream_id, body.publisher_cdn, undefined, env.TINYMOQ_PROVISION_KEY);
     const relayHost = assigned?.host ?? null;
     const relayPort = assigned?.port ?? null;
 
-    // Relay-blind E2E media encryption (opt-in per stream). When on, mint a fresh
-    // per-broadcast content key, store it on the broadcast row (so authorized
-    // viewers get the SAME key via /route), and return it to the publisher. This
-    // is a SEPARATE secret from the relay JWT-signing key and never goes to the relay.
-    const streamRow = await env.DB
-      .prepare("SELECT encrypted FROM streams WHERE stream_id = ?")
-      .bind(body.stream_id)
-      .first<{ encrypted: number }>();
-    const encrypted = streamRow?.encrypted === 1;
-    const contentKey = encrypted ? generateContentKey() : null;
+    // Relay-blind E2E media encryption is MANDATORY for every stream — the guarantee we
+    // sell is that the relay/server only ever move ciphertext, so it cannot be opted out
+    // of. Mint a fresh per-broadcast content key unconditionally, store it on the
+    // broadcast row (so authorized viewers get the SAME key via /route), and return it to
+    // the publisher. SEPARATE secret from the relay JWT-signing key; never goes to the relay.
+    const encrypted = true;
+    const contentKey = generateContentKey();
 
     const result = await env.DB
       .prepare(`
@@ -988,7 +1112,7 @@ async function handleStatsRoutes(
       .run();
 
     if (row?.stream_id) {
-      await releaseRelay(row.stream_id, row.relay_host, env.TINYMOQ_PROVISION_KEY);
+      await releaseRelay(env, row.stream_id, row.relay_host, env.TINYMOQ_PROVISION_KEY);
     }
 
     return Response.json({ success: true });
