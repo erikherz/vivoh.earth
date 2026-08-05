@@ -1067,13 +1067,35 @@ async function handleStatsRoutes(
     const encrypted = true;
     const contentKey = generateContentKey();
 
+    // broadcast_events.user_id is a NOT NULL foreign key into users(id). In open-access
+    // mode a broadcaster may be anonymous (user === null), so attribute the row to a
+    // shared sentinel "anonymous" user — upserted by its unique email so SQLite assigns
+    // the id (an AUTOINCREMENT table rejects a forced rowid of 0), and RETURNING gives us
+    // that id whether the row was just created or already existed.
+    let broadcasterId: number;
+    if (user) {
+      broadcasterId = user.id;
+    } else {
+      // The live users table has google_id NOT NULL UNIQUE, so give the sentinel a fixed
+      // non-null google_id placeholder alongside its unique email.
+      const anon = await env.DB
+        .prepare(
+          "INSERT INTO users (email, name, google_id) VALUES ('anonymous@open-access.local', 'Anonymous', 'anon-open-access') ON CONFLICT(email) DO UPDATE SET name = name RETURNING id"
+        )
+        .first<{ id: number }>();
+      if (!anon) {
+        return Response.json({ error: "could not attribute anonymous broadcast" }, { status: 500 });
+      }
+      broadcasterId = anon.id;
+    }
+
     const result = await env.DB
       .prepare(`
         INSERT INTO broadcast_events (user_id, stream_id, geo_country, geo_city, geo_region, geo_latitude, geo_longitude, geo_timezone, relay_host, relay_port, content_key)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
       `)
-      .bind(user?.id ?? 0, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort, contentKey)
+      .bind(broadcasterId, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort, contentKey)
       .first<{ id: number }>();
 
     // Publisher token (moq.pro): may publish + read acks on its own broadcast only.
