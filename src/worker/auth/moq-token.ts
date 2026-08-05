@@ -107,3 +107,30 @@ export async function mintHs256Token(secretK: string, claims: MoqClaims): Promis
   const header = { typ: "JWT", alg: "HS256", kid: HS256_KID };
   return sign(header, claims, (input) => crypto.subtle.sign("HMAC", key, input));
 }
+
+// ── moq.pro (Luke Curley's hosted CDN) tokens ──────────────────────────────────
+// moq.pro verifies HS256 tokens signed with the ACCOUNT's symmetric key, selected by `kid`,
+// with claims { root, put, get, exp } where put/get are path prefixes UNDER `root`. The
+// broadcast path is `<root>/<name>.hang`; the client connects to cdn.moq.pro directly.
+export const MOQ_PRO_KID = "f865ebbc-4bb8-4a1f-834c-7d2fc0ae1d07";
+export interface MoqProClaims {
+  root: string; // account root, e.g. "erik"
+  put: string[]; // path prefixes (under root) the holder may publish to
+  get: string[]; // path prefixes (under root) the holder may subscribe to
+  exp: number; // expiry, unix SECONDS
+}
+// Sign a moq.pro token with the account's base64url HMAC secret `k` (env.MOQ_PRO_K).
+export async function mintMoqProToken(secretK: string, claims: MoqProClaims): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    b64urlDecodeToBytes(secretK),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const header = { typ: "JWT", alg: "HS256", kid: MOQ_PRO_KID };
+  const enc = (o: unknown) => b64url(new TextEncoder().encode(JSON.stringify(o)));
+  const signingInput = `${enc(header)}.${enc(claims)}`;
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
+  return `${signingInput}.${b64url(sig)}`;
+}

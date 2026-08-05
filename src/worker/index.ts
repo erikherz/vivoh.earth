@@ -24,7 +24,7 @@ import {
   clearSessionCookie,
   getSessionFromCookie,
 } from "./auth/session";
-import { mintEd25519Token, mintHs256Token, publicVerifyJwk, type MoqClaims } from "./auth/moq-token";
+import { mintEd25519Token, mintHs256Token, mintMoqProToken, publicVerifyJwk, type MoqClaims } from "./auth/moq-token";
 
 // Per-stream live chat Durable Object (WebSocket hibernation). Re-exported so wrangler
 // can bind it; see wrangler.jsonc durable_objects + migrations.
@@ -56,6 +56,11 @@ export interface Env {
   // How the Worker gets a relay: "direct" (Path 1 — call a relay box's /assign yourself) or
   // "brokered" (Path 2 — POST {broadcast} to a CDN operator's broker). Default "direct".
   FLEET_MODE?: string;
+  // moq.pro (Luke Curley's hosted CDN) migration: base64url "k" of the account's HS256 JWK
+  // (kid f865…). The Worker signs per-broadcast moq.pro tokens with it. wrangler secret;
+  // never sent to the browser. Optional root override (default "erik").
+  MOQ_PRO_K?: string;
+  MOQ_PRO_ROOT?: string;
   // base64url "k" from moq-auth.jwk — HMAC secret for signing per-broadcast tokens
   // (managed mode — vivoh's runtime model).
   MOQ_AUTH_K?: string;
@@ -552,56 +557,10 @@ async function handleStreamRoutes(
     if (!row?.relay_host) {
       return new Response("offline", { status: 404 });
     }
-    const publisherCluster = row.relay_host; // cluster host, e.g. cdn.tinymoq.com / cdn-01.tinymoq.com
-
-    // Authoritative current relay for this broadcast (sticky per name).
-    const current = await assignRelay(env, streamId, publisherCluster, undefined, env.TINYMOQ_PROVISION_KEY);
-    if (!current) {
-      return new Response("offline", { status: 404 });
-    }
-
-    // Keep D1 in sync if the relay moved (reap/respawn) so admin/stats stay accurate.
-    if (current.host !== publisherCluster || current.port !== row.relay_port) {
-      await env.DB
-        .prepare("UPDATE broadcast_events SET relay_host = ?, relay_port = ? WHERE stream_id = ? AND ended_at IS NULL")
-        .bind(current.host, current.port, streamId)
-        .run();
-    }
-
-    // Resolve the relay the viewer will actually connect to. For a cross-cluster
-    // viewer that's a fresh edge (with its OWN per-stream key); otherwise it's the
-    // publisher's relay. The viewer token must be signed with THAT relay's key.
-    let relay = current;
-    const viewerCdn = url.searchParams.get("viewer-cdn");
-    if (viewerCdn && viewerCdn !== current.host) {
-      // Cross-cluster: assign an edge on the viewer's cluster that pulls from the
-      // publisher's CURRENT relay. Explicit ?origin= test override wins.
-      const forcedOrigin = url.searchParams.get("origin");
-      const origin = forcedOrigin ?? `${current.host}:${current.port}`;
-      // Subscribe-scoped, cluster-flagged token so the edge can authenticate its pull
-      // from the origin. Signed with OUR key via the SAME signer used for viewer tokens
-      // (managed HS256 here; BYOK EdDSA when configured) — the autoscaler can't mint this,
-      // and a different signer would produce tokens the deployed relay rejects. Broad
-      // get:[""] (root) scope so the edge can pull whatever subtree the origin advertises.
-      const pullToken = await tryMintMoqToken(env, {
-        put: [],
-        get: [""],
-        cluster: true,
-        exp: Math.floor(Date.now() / 1000) + PULL_TOKEN_TTL,
-      });
-      const edge = await assignRelay(env, streamId, viewerCdn, origin, env.TINYMOQ_PROVISION_KEY, pullToken);
-      if (!edge) return new Response("offline", { status: 404 });
-      relay = edge;
-    }
-
-    // Viewer token: subscribe-only to THIS broadcast (put:[] = cannot publish/hijack).
-    // Signed with the connecting relay's per-stream key when present, else MOQ_AUTH_K.
-    const b = broadcastName(streamId);
-    const viewerJwt = await tryMintMoqToken(env, {
-      put: [],
-      get: [b],
-      exp: Math.floor(Date.now() / 1000) + VIEWER_TOKEN_TTL,
-    }, relay.key);
+    // moq.pro: the relay is always cdn.moq.pro; mint a subscribe-only token scoped to THIS
+    // stream. No cross-cluster edge assignment — moq.pro handles fan-out itself.
+    const mp = await moqProAssign(env, streamId, "watch", VIEWER_TOKEN_TTL);
+    if (!mp) return new Response("offline", { status: 404 });
 
     // Relay-blind E2E: hand the per-broadcast content key to authorized viewers.
     // The key gates DECRYPTION (the JWT only gates the connection). For a stream
@@ -625,8 +584,9 @@ async function handleStreamRoutes(
     }
 
     return Response.json({
-      relay: `${relay.host}:${relay.port}`,
-      jwt: viewerJwt,
+      relay: mp.relay, // "cdn.moq.pro"
+      path: mp.path, // "<root>/<stream>.hang"
+      jwt: mp.jwt,
       encrypted,
       content_key: contentKey,
     });
@@ -735,6 +695,31 @@ function isFleetHost(env: Env, host: string): boolean {
 
 function broadcastName(streamId: string): string {
   return `vivoh.earth/${streamId}.hang`;
+}
+
+// ── moq.pro assignment ─────────────────────────────────────────────────────────
+// The homepage now streams through Luke Curley's hosted CDN. There is no fleet /assign:
+// the relay is always cdn.moq.pro, the broadcast path is `<root>/<streamId>.hang`, and the
+// Worker mints a short-lived HS256 token scoped to THAT stream (verified: moq.pro accepts
+// put/get of ["<streamId>.hang"]). "publish" gets put+get; "watch" gets get only.
+const MOQ_PRO_RELAY = "cdn.moq.pro";
+async function moqProAssign(
+  env: Env,
+  streamId: string,
+  role: "publish" | "watch",
+  ttlSeconds: number
+): Promise<{ relay: string; path: string; jwt: string } | null> {
+  const k = env.MOQ_PRO_K;
+  if (!k) return null; // not configured — caller treats as offline/unavailable
+  const root = env.MOQ_PRO_ROOT || "erik";
+  const sub = `${streamId}.hang`;
+  const jwt = await mintMoqProToken(k, {
+    root,
+    put: role === "publish" ? [sub] : [],
+    get: [sub],
+    exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+  });
+  return { relay: MOQ_PRO_RELAY, path: `${root}/${sub}`, jwt };
 }
 
 // Generate a fresh 256-bit content encryption key (base64url, unpadded) for a
@@ -1051,12 +1036,11 @@ async function handleStatsRoutes(
     const geo = getGeoFromRequest(request);
     console.log("Broadcast geo data:", JSON.stringify(geo));
 
-    // Ask the tinymoq autoscaler which relay to publish to (sticky per broadcast
-    // name). Optional publisher_cdn picks which CDN destination to assign on (testing).
-    // No static fallback: if /assign is down, relay is null and the client retries.
-    const assigned = await assignRelay(env, body.stream_id, body.publisher_cdn, undefined, env.TINYMOQ_PROVISION_KEY);
-    const relayHost = assigned?.host ?? null;
-    const relayPort = assigned?.port ?? null;
+    // moq.pro: the relay is always cdn.moq.pro; mint a publish token scoped to THIS stream.
+    // relay_host="cdn.moq.pro" marks the broadcast live (viewers key off it in /route).
+    const mp = await moqProAssign(env, body.stream_id, "publish", PUBLISHER_TOKEN_TTL);
+    const relayHost = mp ? mp.relay : null;
+    const relayPort = null;
 
     // Relay-blind E2E media encryption is MANDATORY for every stream — the guarantee we
     // sell is that the relay/server only ever move ciphertext, so it cannot be opted out
@@ -1075,21 +1059,14 @@ async function handleStatsRoutes(
       .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort, contentKey)
       .first<{ id: number }>();
 
-    // Publisher token: may publish (and read acks on) its own broadcast only.
-    // Signed with the relay's per-stream key when /assign returned one, else MOQ_AUTH_K.
-    const b = broadcastName(body.stream_id);
-    const jwt = await tryMintMoqToken(env, {
-      put: [b],
-      get: [b],
-      exp: Math.floor(Date.now() / 1000) + PUBLISHER_TOKEN_TTL,
-    }, assigned?.key);
-
+    // Publisher token (moq.pro): may publish + read acks on its own broadcast only.
     return Response.json({
       id: result?.id,
       stream_id: body.stream_id,
       geo,
-      relay: assigned ? `${relayHost}:${relayPort}` : null,
-      jwt,
+      relay: mp?.relay ?? null, // "cdn.moq.pro"
+      path: mp?.path ?? null, // "<root>/<stream>.hang" — the broadcast path in the connect URL
+      jwt: mp?.jwt ?? null,
       encrypted,
       content_key: contentKey,
     });
