@@ -156,7 +156,9 @@ function mediaCryptoPatch(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [moqWebTransportOnly(), mediaCryptoPatch()],
+  // No @moq source patching: the hang elements run stock. Media flows in the clear
+  // (no E2E), and the WebSocket fallback is left intact for non-WebTransport browsers.
+  plugins: [],
   build: {
     outDir: "dist",
     emptyDirBeforeWrite: true,

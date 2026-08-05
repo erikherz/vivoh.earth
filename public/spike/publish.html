@@ -1,0 +1,12 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spike · Publish (E2E → moq.pro)</title><style>body{font:15px system-ui;margin:0;background:#0a0e16;color:#e6e9ef}.w{max-width:720px;margin:0 auto;padding:24px}
+video{width:100%;max-height:60vh;background:#000;border:1px solid #222b38;display:block}input{width:100%;padding:8px;margin:6px 0;background:#141a24;color:#e6e9ef;border:1px solid #222b38}
+button{padding:9px 16px;background:#141a24;color:#e6e9ef;border:1px solid #2b3a52;cursor:pointer}#status{color:#8a93a3;margin-top:8px}</style>  <script type="module" crossorigin src="/spike/assets/publish-ClXSeufJ.js"></script>
+  <link rel="modulepreload" crossorigin href="/spike/assets/moqpro-Cv_zcIhl.js">
+</head>
+<body><div class="w"><h1>Publish — E2E over moq.pro</h1><video id="preview" autoplay muted playsinline></video>
+<div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap"><button id="camBtn">Turn camera off</button><button id="scrBtn">Share screen</button><button id="micBtn" data-on="0">Turn mic on</button></div>
+<p style="color:#8a93a3;font-size:13px;margin:2px 0 8px">Screen + camera composite into one encrypted stream. Drag the camera inset to move it. Toggle either mid-broadcast.</p>
+<input id="jwt" placeholder="publish JWT (or pass ?jwt=…)"><input id="name" value="spike" placeholder="stream name">
+<button id="go">Go live</button><input id="share" readonly placeholder="viewer link appears here">
+<div id="status">ready</div></div></body></html>

@@ -82,6 +82,19 @@ function isOpenAccess(env: Env): boolean {
   return env.OPEN_ACCESS === "1" || env.OPEN_ACCESS === "true";
 }
 
+// Open-access anonymous attribution: ensure the shared sentinel "anonymous" user exists
+// and return its id, for rows (broadcast_events, streams) whose NOT NULL user_id FK needs
+// a user when nobody is signed in. Upserted by unique email (the live users table also has
+// google_id NOT NULL, hence the placeholder). Returns null if the upsert fails.
+async function anonUserId(env: Env): Promise<number | null> {
+  const anon = await env.DB
+    .prepare(
+      "INSERT INTO users (email, name, google_id) VALUES ('anonymous@open-access.local', 'Anonymous', 'anon-open-access') ON CONFLICT(email) DO UPDATE SET name = name RETURNING id"
+    )
+    .first<{ id: number }>();
+  return anon ? anon.id : null;
+}
+
 interface User {
   id: number;
   google_id: string | null;
@@ -606,11 +619,17 @@ async function handleStreamRoutes(
     });
   }
 
-  // POST /api/streams - Create or update stream settings (requires auth)
+  // POST /api/streams - Create or update stream settings (requires auth, or open-access)
   if (method === "POST" && path === "/api/streams") {
     const user = await getAuthenticatedUser(request, env);
-    if (!user) {
+    // TEMPORARY open-access mode lets anonymous broadcasters save stream settings (e.g.
+    // enabling chat); the row is attributed to the sentinel anonymous user.
+    if (!user && !isOpenAccess(env)) {
       return Response.json({ error: "Authentication required" }, { status: 401 });
+    }
+    const settingsOwnerId = user ? user.id : await anonUserId(env);
+    if (settingsOwnerId === null) {
+      return Response.json({ error: "could not attribute stream settings" }, { status: 500 });
     }
 
     const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; encrypted?: boolean; chat_enabled?: boolean };
@@ -641,7 +660,7 @@ async function handleStreamRoutes(
           chat_enabled = excluded.chat_enabled,
           updated_at = datetime('now')
       `)
-      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, isEncrypted ? 1 : 0, chatEnabled ? 1 : 0)
+      .bind(body.stream_id, settingsOwnerId, requireAuth ? 1 : 0, overlayHtml, isEncrypted ? 1 : 0, chatEnabled ? 1 : 0)
       .run();
 
     return Response.json({
@@ -734,17 +753,6 @@ async function moqProAssign(
     exp: Math.floor(Date.now() / 1000) + ttlSeconds,
   });
   return { relay: MOQ_PRO_RELAY, path: `${root}/${sub}`, jwt };
-}
-
-// Generate a fresh 256-bit content encryption key (base64url, unpadded) for a
-// broadcast session. Distinct from any relay/JWT secret; only ever sent to the
-// publisher and authorized viewers over TLS, never to the relay.
-function generateContentKey(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 // Resolve the autoscaler base URL, honoring an optional per-request CDN override
@@ -1059,34 +1067,19 @@ async function handleStatsRoutes(
     const relayHost = mp ? mp.relay : null;
     const relayPort = null;
 
-    // Relay-blind E2E media encryption is MANDATORY for every stream — the guarantee we
-    // sell is that the relay/server only ever move ciphertext, so it cannot be opted out
-    // of. Mint a fresh per-broadcast content key unconditionally, store it on the
-    // broadcast row (so authorized viewers get the SAME key via /route), and return it to
-    // the publisher. SEPARATE secret from the relay JWT-signing key; never goes to the relay.
-    const encrypted = true;
-    const contentKey = generateContentKey();
+    // Media flows through moq.pro's hang player in the clear (no E2E) — the CDN sees the
+    // media. content_key is no longer minted; the column is left NULL.
+    const encrypted = false;
+    const contentKey: string | null = null;
 
     // broadcast_events.user_id is a NOT NULL foreign key into users(id). In open-access
     // mode a broadcaster may be anonymous (user === null), so attribute the row to a
     // shared sentinel "anonymous" user — upserted by its unique email so SQLite assigns
     // the id (an AUTOINCREMENT table rejects a forced rowid of 0), and RETURNING gives us
     // that id whether the row was just created or already existed.
-    let broadcasterId: number;
-    if (user) {
-      broadcasterId = user.id;
-    } else {
-      // The live users table has google_id NOT NULL UNIQUE, so give the sentinel a fixed
-      // non-null google_id placeholder alongside its unique email.
-      const anon = await env.DB
-        .prepare(
-          "INSERT INTO users (email, name, google_id) VALUES ('anonymous@open-access.local', 'Anonymous', 'anon-open-access') ON CONFLICT(email) DO UPDATE SET name = name RETURNING id"
-        )
-        .first<{ id: number }>();
-      if (!anon) {
-        return Response.json({ error: "could not attribute anonymous broadcast" }, { status: 500 });
-      }
-      broadcasterId = anon.id;
+    const broadcasterId = user ? user.id : await anonUserId(env);
+    if (broadcasterId === null) {
+      return Response.json({ error: "could not attribute anonymous broadcast" }, { status: 500 });
     }
 
     const result = await env.DB
