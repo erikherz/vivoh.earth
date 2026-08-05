@@ -20,13 +20,44 @@ ciphertext it cannot read.
 - **OAuth sign-in** (Google / Microsoft / Discord) to broadcast.
 - **Default-deny broadcaster allow list** — only approved emails may publish; managed
   from the `/cleardata` admin page.
-- **Per-broadcast, server-minted relay tokens** — short-lived, scope-limited, **BYOK
-  Ed25519** (relay-blind: the relay can verify but never mint). See
-  [`TOKENS.md`](./TOKENS.md).
-- **Relay-blind E2E media encryption** (opt-in per stream) — the relay forwards only
-  ciphertext it cannot read. See [`MEDIA-ENCRYPTION.md`](./MEDIA-ENCRYPTION.md).
+- **Per-broadcast, server-minted CDN tokens** — the Worker signs short-lived **HS256** moq.pro
+  tokens scoped to a single stream (`put/get: ["<stream>.hang"]`); they authorize the *connection*
+  only, never decrypt media.
+- **Mandatory relay-blind E2E media encryption** — every frame is AES-256-GCM encrypted in the
+  browser before it leaves, so the CDN forwards only ciphertext it cannot read. See
+  [`MEDIA-ENCRYPTION.md`](./MEDIA-ENCRYPTION.md).
+- **Automatic reconnect** — broadcast and watch survive transient network / route drops (exponential
+  backoff), so a blip no longer ends the stream.
 - **Opt-in live chat** per stream (Cloudflare Durable Object + WebSocket).
 - **Auth-gated viewing** per stream (`require_auth`).
+
+## Media over moq.pro
+
+Media is carried by **[moq.pro](https://moq.pro)**, Luke Curley's hosted Media-over-QUIC CDN
+(`cdn.moq.pro`, protocol `moq-lite-05`). The browser media engine
+([`src/media/moqpro-engine.ts`](./src/media/moqpro-engine.ts)) talks to it directly with **`@moq/net`**
+— there is no self-hosted relay fleet.
+
+- **Connect + auth.** On go-live / on watch, the Worker returns
+  `{ relay: "cdn.moq.pro", path: "<root>/<stream>.hang", jwt, content_key }`. The browser connects to
+  `https://cdn.moq.pro/<root>/<stream>.hang?jwt=<jwt>` and publishes/consumes the empty path. The JWT is
+  a short-lived **HS256** token (kid `f865…`) minted per broadcast and **scoped to that one stream**
+  (`put/get: ["<stream>.hang"]`). Its signing key lives only as a Worker secret (`MOQ_PRO_K`) and never
+  reaches the browser.
+- **End-to-end encryption.** A fresh 256-bit **AES-256-GCM content key** is minted server-side per
+  broadcast, stored in D1, and delivered over TLS to the broadcaster and — auth-gated — to authorized
+  viewers. Every encoded frame is encrypted in the browser (`[varint ts][12-byte nonce][ciphertext+tag]`,
+  timestamp bound as GCM AAD) **before** it reaches `@moq/net`, so moq.pro only ever moves ciphertext.
+  The key is separate from the connection JWT; an unauthorized viewer can connect but, lacking the key,
+  only sees ciphertext (fail-closed).
+- **Transport + codecs.** `@moq/net` connects over **WebTransport**, racing a **WebSocket fallback** for
+  environments without it. A small cleartext catalog track advertises codec/resolution (re-published
+  every second so late joiners can start); video is VP8, audio Opus, both via native WebCodecs.
+- **Reconnect resilience** (from moq.pro *update-01*'s "seamless subscription resumption during route
+  changes"). Broadcast and watch each run inside a reconnect loop: `@moq/net`'s `Established.closed`
+  resolves when a live connection drops, and the engine re-establishes with **exponential backoff
+  (1s → 15s)**. A broadcaster reconnect forces a fresh keyframe so the new connection is immediately
+  decodable; a viewer reconnect keeps a single `AudioContext` so the audio clock stays continuous.
 
 ## Architecture
 
