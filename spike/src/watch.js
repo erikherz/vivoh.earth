@@ -1,6 +1,6 @@
 import * as Moq from "@moq/net";
 import { deriveKey, decryptFrame } from "./crypto.mjs";
-import { WATCH_HOST, connectUrl } from "./moqpro.js";
+import { connectUrl } from "./moqpro.js";
 
 const $ = (id) => document.getElementById(id);
 const set = (m) => ($("status").textContent = m);
@@ -14,22 +14,25 @@ const b64urlToBytes = (s) => { const n = s.replace(/-/g,"+").replace(/_/g,"/"); 
     if (!jwt || !path || !frag) return set("link is missing jwt, path, or #k=");
     const cv = $("video"), cx = cv.getContext("2d");
 
-    set("connecting to moq.watch…");
-    const conn = await Moq.Connection.connect(connectUrl(WATCH_HOST, jwt));
-    const broadcast = conn.consume(Moq.Path.from(path));
+    set("connecting to moq.watchâ¦");
+    const conn = await Moq.Connection.connect(connectUrl(path, jwt));
+    const broadcast = conn.consume(Moq.Path.empty());
+
+    set("waiting for catalog…");
+
 
     const cat = await broadcast.subscribe("catalog").readJson(); // { codec, codedWidth, codedHeight, salt }
-    if (!cat) return set("no catalog yet — is the broadcaster live?");
+    if (!cat) return set("no catalog yet â is the broadcaster live?");
     const key = await deriveKey(b64urlToBytes(frag), b64urlToBytes(cat.salt));
 
     const dec = new VideoDecoder({
-      output: (frame) => { if (cv.width!==frame.displayWidth){cv.width=frame.displayWidth;cv.height=frame.displayHeight;} cx.drawImage(frame,0,0); frame.close(); set("▶ playing"); },
+      output: (frame) => { if (cv.width!==frame.displayWidth){cv.width=frame.displayWidth;cv.height=frame.displayHeight;} cx.drawImage(frame,0,0); frame.close(); set("â¶ playing"); },
       error: (e) => set("decoder: " + e.message),
     });
     dec.configure({ codec: cat.codec, codedWidth: cat.codedWidth, codedHeight: cat.codedHeight });
 
     const sub = broadcast.subscribe("video");
-    set("connected — waiting for video…");
+    set("connected â waiting for videoâ¦");
     for (;;) {
       const group = await sub.nextGroup(); if (!group) break;
       let first = true;

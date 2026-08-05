@@ -1,6 +1,6 @@
 import * as Moq from "@moq/net";
 import { deriveKey, encryptFrame } from "./crypto.mjs";
-import { PUBLISH_HOST, connectUrl, jwtFromUrl } from "./moqpro.js";
+import { connectUrl, jwtFromUrl } from "./moqpro.js";
 
 const $ = (id) => document.getElementById(id);
 const set = (m) => ($("status").textContent = m);
@@ -27,20 +27,23 @@ $("go").addEventListener("click", async () => {
     const { width, height } = track0.getSettings();
 
     set("connecting to moq.pub…");
-    const conn = await Moq.Connection.connect(connectUrl(PUBLISH_HOST, jwt));
+    const conn = await Moq.Connection.connect(connectUrl(path, jwt));
     const broadcast = new Moq.Broadcast.Producer();
-    conn.publish(Moq.Path.from(path), broadcast);
+    conn.publish(Moq.Path.empty(), broadcast);
     const catalogTrack = broadcast.createTrack("catalog");
     const videoTrack = broadcast.createTrack("video");
 
-    let group = null, wroteCatalog = false;
+    let group = null, catalogObj = null;
     const enc = new VideoEncoder({
       output: async (chunk, meta) => {
-        if (!wroteCatalog && meta?.decoderConfig) {
-          wroteCatalog = true;
+        if (!catalogObj && meta?.decoderConfig) {
           const dc = meta.decoderConfig;
-          catalogTrack.writeJson({ codec: dc.codec, codedWidth: dc.codedWidth ?? width, codedHeight: dc.codedHeight ?? height,
-                                   salt: b64url(salt) }); // salt is PUBLIC (HKDF input); #k= stays in the link
+          catalogObj = { codec: dc.codec, codedWidth: dc.codedWidth ?? width, codedHeight: dc.codedHeight ?? height,
+                         salt: b64url(salt) }; // salt is PUBLIC (HKDF input); #k= stays in the link
+          catalogTrack.writeJson(catalogObj);
+          // Re-publish the catalog every second so a viewer who joins LATER still receives it
+          // (a single group written once at go-live isn't replayed to late subscribers).
+          setInterval(() => { try { catalogTrack.writeJson(catalogObj); } catch {} }, 1000);
           set("● live");
         }
         const bytes = new Uint8Array(chunk.byteLength); chunk.copyTo(bytes);

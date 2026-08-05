@@ -1,19 +1,17 @@
 // moq.pro (Luke Curley's hosted MoQ CDN) connection glue.
-//  - Publish host: https://moq.pub/     - Watch host: https://moq.watch/
-//  - Auth: HS256 JWT (?jwt=) with claims { root, put:[''], get:[''], exp }. Mint server-side
-//    from the account signing key; NEVER ship the signing key to the browser. For the spike the
-//    token is pasted / passed via ?jwt= and lives only in memory.
-//  - Broadcast path is <root>/<name> (the token's `root` claim scopes what you may publish/watch).
-export const PUBLISH_HOST = "https://moq.pub/";
-export const WATCH_HOST = "https://moq.watch/";
+//  - THE RELAY is https://cdn.moq.pro/ (moq.pub / moq.watch are just hosted web UIs that connect
+//    to it; the raw @moq/net client connects to cdn.moq.pro directly). Verified: ALPN moq-lite-05.
+//  - CONVENTION: the broadcast path lives IN the connect URL — cdn.moq.pro/<root>/<name>.hang —
+//    and you publish/consume the EMPTY path. Auth: HS256 JWT (?jwt=) with { root, put:[''], get:[''] }.
+export const RELAY_HOST = "https://cdn.moq.pro/";
 
-/** Build the connect URL: relay origin + ?jwt=. @moq/net connects here, then publish/consume by path. */
-export function connectUrl(host, jwt) {
-  const u = new URL(host);
+/** Connect URL = cdn.moq.pro/<path>.hang?jwt=. Publish/consume Path.empty(). */
+export function connectUrl(path, jwt) {
+  const u = new URL(RELAY_HOST);
+  u.pathname = "/" + String(path).replace(/^\/+/, "").replace(/\.hang$/, "") + ".hang";
   if (jwt) u.searchParams.set("jwt", jwt);
   return u;
 }
-/** Read the JWT from ?jwt= (spike convenience). In production the Worker mints + injects it. */
 export function jwtFromUrl() {
   return new URLSearchParams(location.search).get("jwt") || "";
 }
