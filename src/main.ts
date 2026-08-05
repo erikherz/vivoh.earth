@@ -1017,7 +1017,7 @@ function getCdnOverride(param: "publisher-cdn" | "viewer-cdn"): string | undefin
   return v || undefined;
 }
 
-function initBroadcastView(streamId: string, user: User | null) {
+function initBroadcastView(streamId: string, user: User | null, openAccess = false) {
   // The ".hang" suffix makes the catalog format explicit so the watcher can parse
   // the catalog and subscribe to video/audio tracks (otherwise detectFormat() is
   // undefined and the viewer only fetches catalog.json, never video/hd).
@@ -1032,8 +1032,9 @@ function initBroadcastView(streamId: string, user: User | null) {
   document.getElementById("broadcast-view")?.classList.remove("hidden");
   document.getElementById("watch-view")?.classList.add("hidden");
 
-  // If not logged in, show login required overlay
-  if (!user) {
+  // If not logged in, show login required overlay — UNLESS the deployment is in
+  // TEMPORARY open-access mode (env.OPEN_ACCESS), which lets anyone broadcast.
+  if (!user && !openAccess) {
     showLoginRequired();
     return;
   }
@@ -2777,11 +2778,11 @@ async function init() {
   const { view, streamId } = await getRouteInfo();
 
   // Get user first (needed for broadcast auth check)
-  const { user, geo } = await getCurrentUser();
+  const { user, geo, openAccess } = await getCurrentUser();
   updateAuthUI(user, geo);
 
   if (view === "broadcast") {
-    initBroadcastView(streamId, user);
+    initBroadcastView(streamId, user, openAccess);
   } else if (view === "stats") {
     await initStatsView(user);
   } else if (view === "stats-map") {

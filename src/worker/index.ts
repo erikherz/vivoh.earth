@@ -69,6 +69,17 @@ export interface Env {
   MOQ_AUTH_PRIVATE_JWK?: string;
   // Per-stream live chat rooms (one Durable Object instance per streamId).
   CHAT_ROOMS: DurableObjectNamespace;
+  // TEMPORARY open-access switch. When "1" or "true", the sign-in + broadcaster
+  // allow-list checks are bypassed (anyone may broadcast and watch, encrypted streams
+  // hand the content key to anyone). Flip live with `wrangler secret put OPEN_ACCESS`
+  // / `wrangler secret delete OPEN_ACCESS` — no rebuild needed; the frontend reads it
+  // from /api/auth/me. UNSET (the default) = normal auth-gated behavior.
+  OPEN_ACCESS?: string;
+}
+
+// TEMPORARY: is the deployment in open-access (no-auth) mode? See Env.OPEN_ACCESS.
+function isOpenAccess(env: Env): boolean {
+  return env.OPEN_ACCESS === "1" || env.OPEN_ACCESS === "true";
 }
 
 interface User {
@@ -357,6 +368,7 @@ function handleLogout(url: URL): Response {
 async function handleMe(request: Request, env: Env): Promise<Response> {
   const cookieHeader = request.headers.get("Cookie");
   const sessionToken = getSessionFromCookie(cookieHeader);
+  const open_access = isOpenAccess(env); // TEMPORARY: lets the frontend skip the sign-in gate
 
   // Get geolocation from Cloudflare request.cf object
   const cf = (request as Request & { cf?: IncomingRequestCfProperties }).cf;
@@ -372,13 +384,13 @@ async function handleMe(request: Request, env: Env): Promise<Response> {
   };
 
   if (!sessionToken) {
-    return Response.json({ user: null, geo });
+    return Response.json({ user: null, geo, open_access });
   }
 
   const session = await verifySessionToken(sessionToken, env.SESSION_SECRET);
 
   if (!session) {
-    return Response.json({ user: null, geo });
+    return Response.json({ user: null, geo, open_access });
   }
 
   const user = await getUserById(env.DB, session.userId);
@@ -393,6 +405,7 @@ async function handleMe(request: Request, env: Env): Promise<Response> {
         }
       : null,
     geo,
+    open_access,
   });
 }
 
@@ -575,7 +588,8 @@ async function handleStreamRoutes(
         .prepare("SELECT require_auth FROM streams WHERE stream_id = ?")
         .bind(streamId)
         .first<{ require_auth: number }>();
-      if (stream?.require_auth === 1) {
+      // TEMPORARY open-access mode hands the key to anyone, even for require_auth streams.
+      if (stream?.require_auth === 1 && !isOpenAccess(env)) {
         const viewer = await getAuthenticatedUser(request, env);
         if (viewer) contentKey = row.content_key;
       } else {
@@ -1016,16 +1030,19 @@ async function handleStatsRoutes(
   // POST /api/stats/broadcast - Start a broadcast (requires auth + allow list)
   if (method === "POST" && path === "/api/stats/broadcast") {
     const user = await getAuthenticatedUser(request, env);
-    if (!user) {
-      return Response.json({ error: "Authentication required" }, { status: 401 });
-    }
-
-    // Default-deny broadcaster allow list: only explicitly-allowed emails may publish.
-    if (!(await canBroadcast(env.DB, user.email))) {
-      return Response.json(
-        { error: "Your account is not approved to broadcast." },
-        { status: 403 }
-      );
+    // TEMPORARY open-access mode (env.OPEN_ACCESS) bypasses BOTH the sign-in requirement
+    // and the broadcaster allow list. When off (default), enforce them as before.
+    if (!isOpenAccess(env)) {
+      if (!user) {
+        return Response.json({ error: "Authentication required" }, { status: 401 });
+      }
+      // Default-deny broadcaster allow list: only explicitly-allowed emails may publish.
+      if (!(await canBroadcast(env.DB, user.email))) {
+        return Response.json(
+          { error: "Your account is not approved to broadcast." },
+          { status: 403 }
+        );
+      }
     }
 
     const body = await request.json() as { stream_id: string; publisher_cdn?: string };
@@ -1056,7 +1073,7 @@ async function handleStatsRoutes(
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
       `)
-      .bind(user.id, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort, contentKey)
+      .bind(user?.id ?? 0, body.stream_id, geo.country, geo.city, geo.region, geo.latitude, geo.longitude, geo.timezone, relayHost, relayPort, contentKey)
       .first<{ id: number }>();
 
     // Publisher token (moq.pro): may publish + read acks on its own broadcast only.

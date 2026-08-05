@@ -20,13 +20,15 @@ export interface Geo {
 
 export type Provider = "google" | "microsoft" | "discord";
 
-export async function getCurrentUser(): Promise<{ user: User | null; geo: Geo | null }> {
+export async function getCurrentUser(): Promise<{ user: User | null; geo: Geo | null; openAccess: boolean }> {
   try {
     const response = await fetch("/api/auth/me");
     const data = await response.json();
-    return { user: data.user, geo: data.geo };
+    // TEMPORARY: server-driven open-access switch (env.OPEN_ACCESS). When true, the
+    // broadcast view skips the sign-in gate. Flipping the Worker secret flips this.
+    return { user: data.user, geo: data.geo, openAccess: data.open_access === true };
   } catch {
-    return { user: null, geo: null };
+    return { user: null, geo: null, openAccess: false };
   }
 }
 
