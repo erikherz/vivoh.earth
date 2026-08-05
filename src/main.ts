@@ -678,6 +678,7 @@ import {
 } from "./auth";
 import { armPublisher, armViewer, setMediaKey, resetMediaKey } from "./crypto/media-crypto";
 import { createCompositor, type Compositor } from "./media/pip-compositor";
+import { startMoqProBroadcast, startMoqProWatch, moqProUrl, type EngineHandle } from "./media/moqpro-engine";
 import { initChat, type ChatHandle } from "./chat/chat-client";
 
 type View = "broadcast" | "watch" | "stats" | "stats-map" | "greet" | "stream-stats" | "stream-stats-map" | "admin";
@@ -1167,6 +1168,7 @@ function initBroadcastView(streamId: string, user: User | null) {
 
     let broadcastEventId: number | null = null;
     let goLivePromise: Promise<void> | null = null;
+    let moqProHandle: EngineHandle | null = null;
 
     // First device selection = go live: get the assigned relay, then connect to it.
     // logBroadcastStart hits POST /api/stats/broadcast which calls /assign and stores
@@ -1196,23 +1198,30 @@ function initBroadcastView(streamId: string, user: User | null) {
           goLivePromise = null;
           return;
         }
-        // Relay-blind E2E: install the per-broadcast content key BEFORE connecting,
-        // so the frames the armed publisher has been queuing get encrypted. The
-        // server is authoritative on whether the stream is encrypted.
-        if (res?.encrypted || streamEncrypted) {
-          if (!res?.contentKey) {
-            console.error("[crypto] stream is encrypted but no content key was returned; not going live");
-            publisher.source = null;
-            setActiveRelay(null);
-            goLivePromise = null;
-            return;
-          }
-          armPublisher(); // idempotent; covers the case where settings load lost the race
-          await setMediaKey(res.contentKey);
+        // moq.pro engine: connect to cdn.moq.pro, encrypt the compositor canvas + mixed audio
+        // with the server-minted content key, and publish. Replaces the legacy <moq-publish>
+        // element + build-time hang patch. The relay only ever moves ciphertext.
+        if (!res?.contentKey || !res?.path) {
+          console.error("[moqpro] missing content key or path; not going live");
+          setActiveRelay(null);
+          goLivePromise = null;
+          return;
         }
-        publisher.setAttribute("url", `https://${relay}/?jwt=${jwt}`);
+        if (!comp) {
+          console.error("[moqpro] no compositor active — pick a camera/screen/mic first");
+          setActiveRelay(null);
+          goLivePromise = null;
+          return;
+        }
+        try { moqProHandle?.stop(); } catch { /* */ }
+        moqProHandle = await startMoqProBroadcast(
+          moqProUrl(relay, res.path, jwt),
+          res.contentKey,
+          comp,
+          (m) => console.log("[moqpro pub]", m)
+        );
         setActiveRelay(relay);
-        console.log("[routing] broadcaster relay:", relay, "eventId:", broadcastEventId);
+        console.log("[routing] broadcaster on cdn.moq.pro:", res.path, "eventId:", broadcastEventId);
       });
       return goLivePromise;
     };
@@ -1225,10 +1234,9 @@ function initBroadcastView(streamId: string, user: User | null) {
         broadcastEventId = null;
       }
       goLivePromise = null; // a later device selection re-assigns
-      // Drop the content key (keep the publisher armed): a restarted broadcast
-      // gets a fresh key, and frames queue until it arrives — never encrypted
-      // with the previous session's key.
-      resetMediaKey();
+      // Tear down the moq.pro publish loop; a restarted broadcast gets a fresh key + connection.
+      try { moqProHandle?.stop(); } catch { /* */ }
+      moqProHandle = null;
     };
 
     // --- Combinable capture toggles: 📹 Camera (video) + 🎤 Audio + 🖥️ Screen ---
@@ -1661,17 +1669,19 @@ async function initWatchView(streamId: string, user: User | null) {
     // viewer not signed in) we can't decrypt — surface the sign-in requirement.
     // The content key is per-broadcast and relay-independent, so it survives any
     // later relay change in the refresh loop without re-fetching.
-    if (route.encrypted) {
-      if (!route.contentKey) {
-        console.warn("[crypto] stream is encrypted but the content key was withheld; sign-in required to decrypt");
-        showWatchLoginRequired();
-        return;
-      }
-      armViewer();
-      await setMediaKey(route.contentKey);
-      // Player overlay: "Relay-blind" (always) + the audience pill. When the stream is
-      // invite-only, attach the security-details disclosure so the key/metadata caveats
-      // are visible right where a viewer forms a privacy expectation.
+    if (route.encrypted && !route.contentKey) {
+      console.warn("[crypto] stream is encrypted but the content key was withheld; sign-in required to decrypt");
+      showWatchLoginRequired();
+      return;
+    }
+    if (!route.contentKey || !route.path) {
+      console.error("[moqpro] viewer route missing content key or path; cannot decrypt");
+      return;
+    }
+    // Player overlay: "Relay-blind" (always) + the audience pill. When the stream is
+    // invite-only, attach the security-details disclosure so the key/metadata caveats
+    // are visible right where a viewer forms a privacy expectation.
+    {
       const sec = document.querySelector("#watch-view section") as HTMLElement | null;
       if (sec) {
         if (!sec.style.position) sec.style.position = "relative";
@@ -1689,16 +1699,27 @@ async function initWatchView(streamId: string, user: User | null) {
       }
     }
     setActiveRelay(route.relay);
-    watcher.setAttribute("url", `https://${route.relay}/?jwt=${route.jwt}`);
-    watcher.setAttribute("name", streamName);
-    console.log(`[watch-timing] url set, connecting @ ${ms()}`);
+    // moq.pro engine: connect to cdn.moq.pro, decrypt + decode into the player canvas.
+    let vcanvas = watcher.querySelector("canvas") as HTMLCanvasElement | null;
+    if (!vcanvas) {
+      vcanvas = document.createElement("canvas");
+      vcanvas.style.cssText = "width:100%;height:auto;background:#000;display:block";
+      watcher.appendChild(vcanvas);
+    }
+    const wHandle = await startMoqProWatch(
+      moqProUrl(route.relay, route.path, route.jwt),
+      route.contentKey,
+      vcanvas,
+      (m) => console.log("[moqpro watch]", m)
+    );
+    console.log(`[watch-timing] moq.pro watch started @ ${ms()}`);
 
-    // Start muted; first click/tap on the player enables audio.
+    // First click/tap enables audio (autoplay policy).
     const enableAudio = () => {
-      watcher.muted = false;
-      watcher.removeEventListener("click", enableAudio);
+      (wHandle as unknown as { resumeAudio?: () => void }).resumeAudio?.();
+      window.removeEventListener("click", enableAudio);
     };
-    watcher.addEventListener("click", enableAudio);
+    window.addEventListener("click", enableAudio);
 
     // Log watch event
     let watchEventId: number | null = null;

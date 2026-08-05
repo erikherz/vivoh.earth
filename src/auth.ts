@@ -69,7 +69,8 @@ export interface BroadcastStart {
   relay: string | null; // assigned tinymoq relay "host:port", or null on failure
   jwt: string | null;   // per-broadcast publisher token to present to the relay
   encrypted?: boolean;  // true if this stream uses relay-blind E2E media encryption
-  contentKey?: string | null; // per-broadcast AES content key (base64url) when encrypted
+  contentKey?: string | null;
+  path?: string | null; // per-broadcast AES content key (base64url) when encrypted
   forbidden?: boolean;  // true if the account is not on the broadcaster allow list (403)
   error?: string;       // human-readable reason when blocked
 }
@@ -101,6 +102,7 @@ export async function logBroadcastStart(streamId: string, publisherCdn?: string)
       jwt: data.jwt ?? null,
       encrypted: data.encrypted ?? false,
       contentKey: data.content_key ?? null,
+      path: data.path ?? null,
     };
   } catch (e) {
     console.error("Error logging broadcast start:", e);
@@ -118,7 +120,8 @@ export interface StreamRoute {
   relay: string;        // "host:port"
   jwt: string | null;   // per-broadcast viewer token to present to the relay
   encrypted?: boolean;  // true if this stream uses relay-blind E2E media encryption
-  contentKey?: string | null; // per-broadcast AES content key (base64url); null if withheld (auth-gated)
+  contentKey?: string | null;
+  path?: string | null; // per-broadcast AES content key (base64url); null if withheld (auth-gated)
 }
 
 export async function getStreamRoute(streamId: string, viewerCdn?: string, origin?: string): Promise<StreamRoute | null> {
@@ -136,6 +139,7 @@ export async function getStreamRoute(streamId: string, viewerCdn?: string, origi
       jwt: data.jwt ?? null,
       encrypted: data.encrypted ?? false,
       contentKey: data.content_key ?? null,
+      path: data.path ?? null,
     };
   } catch {
     return null;
