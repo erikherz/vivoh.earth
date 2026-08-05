@@ -2,12 +2,19 @@
 
 Live, low-latency video streaming over **Media over QUIC (MoQ)** — publish from a
 browser, watch in a browser, with sign-in-gated broadcasting, per-broadcast relay
-tokens, opt-in end-to-end encryption, and opt-in live chat.
+tokens, mandatory end-to-end encryption, and opt-in live chat.
+
+Media is carried by **[moq.pro](https://moq.pro)** — Luke Curley's hosted MoQ CDN
+(`cdn.moq.pro`). The browser connects with `@moq/net` over WebTransport (with a
+WebSocket fallback); the Cloudflare Worker mints short-lived, per-broadcast HS256
+tokens for the CDN and keeps the auth-gated content key. Because every frame is
+AES-256-GCM encrypted in the browser before it leaves, the CDN only ever moves
+ciphertext it cannot read.
 
 ## Features
 
-- **Browser publish & watch** over MoQ (WebTransport), via the headless
-  `@moq/publish` / `@moq/watch` web components.
+- **Browser publish & watch** over MoQ (WebTransport) through **moq.pro** (`cdn.moq.pro`),
+  using `@moq/net` + native WebCodecs for capture/encode/decrypt/render.
 - **Combinable capture** — Camera, Audio, and Screen toggled independently, composited
   into one stable video track + audio mix (with an experimental draggable camera PiP).
 - **OAuth sign-in** (Google / Microsoft / Discord) to broadcast.

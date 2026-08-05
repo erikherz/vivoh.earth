@@ -1374,12 +1374,22 @@ function initBroadcastView(streamId: string, user: User | null) {
         toggleButtons[k]?.classList.toggle("toggle-on", capture[k]);
       });
     };
-    const makeToggle = (key: Toggle, emoji: string, label: string) => {
+    // Clean filled glyphs (inherit the button's currentColor: dim gray when off, white on blue when on).
+    const ICON_CAMERA =
+      '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="2" y="6.5" width="14" height="11" rx="2.5"/><path d="M22.3 8.2 17.5 11v2l4.8 2.8A1 1 0 0 0 23.8 15V9.07a1 1 0 0 0-1.5-.87z"/></svg>';
+    const ICON_MIC =
+      '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 14a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 0 0-7 0v5A3.5 3.5 0 0 0 12 14z"/><path d="M17.5 10.5a1 1 0 0 0-2 0 3.5 3.5 0 0 1-7 0 1 1 0 0 0-2 0 5.5 5.5 0 0 0 4.5 5.41V19H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-3.09a5.5 5.5 0 0 0 4.5-5.41z"/></svg>';
+    const ICON_SCREEN =
+      '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2"/><rect x="8.5" y="19" width="7" height="1.8" rx=".9"/><rect x="11" y="16.5" width="2" height="2.5"/></svg>';
+    const ICON_STOP =
+      '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>';
+
+    const makeToggle = (key: Toggle, icon: string, label: string) => {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "publish-btn toggle-btn";
       b.title = label;
-      b.textContent = emoji;
+      b.innerHTML = icon;
       b.addEventListener("click", () => {
         capture[key] = !capture[key];
         syncButtons();
@@ -1388,9 +1398,9 @@ function initBroadcastView(streamId: string, user: User | null) {
       toggleButtons[key] = b;
       bar.appendChild(b);
     };
-    makeToggle("camera", "📹", "Camera");
-    makeToggle("audio", "🎤", "Audio (microphone; also mixes in tab/system audio when screen sharing)");
-    makeToggle("screen", "🖥️", "Screen");
+    makeToggle("camera", ICON_CAMERA, "Camera");
+    makeToggle("audio", ICON_MIC, "Audio (microphone; also mixes in tab/system audio when screen sharing)");
+    makeToggle("screen", ICON_SCREEN, "Screen");
 
     const stopBtn = document.createElement("button");
     stopBtn.type = "button";
