@@ -3,7 +3,7 @@
 video{width:100%;max-height:60vh;background:#000;border:1px solid #222b38;display:block}input{width:100%;padding:8px;margin:6px 0;background:#141a24;color:#e6e9ef;border:1px solid #222b38}
 button{padding:9px 16px;background:#141a24;color:#e6e9ef;border:1px solid #2b3a52;cursor:pointer}#status{color:#8a93a3;margin-top:8px}</style></head>
 <body><div class="w"><h1>Publish — E2E over moq.pro</h1><video id="preview" autoplay muted playsinline></video>
-<div style="display:flex;gap:8px;margin:8px 0"><button id="camBtn">Turn camera off</button><button id="scrBtn">Share screen</button></div>
+<div style="display:flex;gap:8px;margin:8px 0;flex-wrap:wrap"><button id="camBtn">Turn camera off</button><button id="scrBtn">Share screen</button><button id="micBtn" data-on="0">Turn mic on</button></div>
 <p style="color:#8a93a3;font-size:13px;margin:2px 0 8px">Screen + camera composite into one encrypted stream. Drag the camera inset to move it. Toggle either mid-broadcast.</p>
 <input id="jwt" placeholder="publish JWT (or pass ?jwt=…)"><input id="name" value="spike" placeholder="stream name">
 <button id="go">Go live</button><input id="share" readonly placeholder="viewer link appears here">

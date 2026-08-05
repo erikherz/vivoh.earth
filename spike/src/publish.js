@@ -12,8 +12,9 @@ const b64url = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replac
 const CANVAS_W = 1280;
 const CANVAS_H = 720;
 
-// Build the compositor up front so Camera / Screen toggles work before (and during) going live.
-// It composites screen (full) + camera (draggable inset) onto one canvas; we encode THAT canvas.
+// Build the compositor up front so Camera / Screen / Mic toggles work before (and during) going live.
+// It composites screen (full) + camera (draggable inset) onto one canvas, and mixes mic + system
+// audio into one stable audio track. We encode THAT canvas + THAT audio track.
 const comp = createCompositor();
 comp.canvas.style.cssText = "width:100%;max-height:60vh;background:#000;border:1px solid #222b38;display:block";
 $("preview").replaceWith(comp.canvas);
@@ -26,9 +27,17 @@ $("camBtn").addEventListener("click", async () => {
 $("scrBtn").addEventListener("click", async () => {
   if (comp.hasScreen()) { comp.disableScreen(); $("scrBtn").textContent = "Share screen"; }
   else {
-    try { await comp.enableScreen({ onEnded: () => ($("scrBtn").textContent = "Share screen") }); $("scrBtn").textContent = "Stop screen"; }
-    catch (e) { set("screen: " + (e?.message || e)); }
+    try {
+      await comp.enableScreen({ onEnded: () => ($("scrBtn").textContent = "Share screen") });
+      comp.setSystemAudioEnabled(true); // mix the shared tab/window's audio, if any
+      $("scrBtn").textContent = "Stop screen";
+    } catch (e) { set("screen: " + (e?.message || e)); }
   }
+});
+$("micBtn").addEventListener("click", async () => {
+  const on = $("micBtn").dataset.on === "1";
+  try { await comp.setMicEnabled(!on); $("micBtn").dataset.on = on ? "0" : "1"; $("micBtn").textContent = on ? "Turn mic on" : "Turn mic off"; }
+  catch (e) { set("mic: " + (e?.message || e)); }
 });
 
 $("go").addEventListener("click", async () => {
@@ -51,6 +60,7 @@ $("go").addEventListener("click", async () => {
     conn.publish(Moq.Path.empty(), broadcast);
     const catalogTrack = broadcast.createTrack("catalog");
     const videoTrack = broadcast.createTrack("video");
+    const audioMoqTrack = broadcast.createTrack("audio");
 
     let group = null, catalogObj = null;
     const enc = new VideoEncoder({
@@ -60,9 +70,10 @@ $("go").addEventListener("click", async () => {
           catalogObj = { codec: dc.codec, codedWidth: dc.codedWidth ?? CANVAS_W, codedHeight: dc.codedHeight ?? CANVAS_H,
                          salt: b64url(salt) }; // salt is PUBLIC (HKDF input); #k= stays in the link
           catalogTrack.writeJson(catalogObj);
-          // Re-publish the catalog every second so a viewer who joins LATER still receives it.
+          // Re-publish the catalog every second so a viewer who joins LATER still receives it
+          // (and picks up the audio config once the audio encoder has produced its first chunk).
           setInterval(() => { try { catalogTrack.writeJson(catalogObj); } catch {} }, 1000);
-          set("● live — screen + camera composited, then encrypted");
+          set("● live — screen + camera + audio, all encrypted");
         }
         const bytes = new Uint8Array(chunk.byteLength); chunk.copyTo(bytes);
         const wire = await encryptFrame(key, chunk.timestamp, bytes); // AES-256-GCM (our code) BEFORE the track
@@ -73,8 +84,63 @@ $("go").addEventListener("click", async () => {
     });
     enc.configure({ codec: "vp8", width: CANVAS_W, height: CANVAS_H, bitrate: 2_500_000, latencyMode: "realtime" });
 
-    // Encode the COMPOSITED canvas (screen + camera inset). The compositor keeps it fresh via rAF,
-    // so we just snapshot it ~30fps. Compositing happens BEFORE encryption — the relay sees ciphertext.
+    // ── Audio: encode the compositor's mixed track (mic + system audio) → Opus → encrypt → "audio"
+    // track (one group per frame). Compositing + mixing happen BEFORE encryption; relay sees ciphertext.
+    let aEnc = null;
+    const makeAudioEncoder = (sampleRate, numberOfChannels) => {
+      const e = new AudioEncoder({
+        output: async (chunk) => {
+          if (catalogObj && !catalogObj.audio) catalogObj.audio = { codec: "opus", sampleRate, numberOfChannels };
+          const bytes = new Uint8Array(chunk.byteLength); chunk.copyTo(bytes);
+          const wire = await encryptFrame(key, chunk.timestamp, bytes);
+          const g = audioMoqTrack.appendGroup();
+          g.writeFrame({ payload: wire, timestamp: Moq.Time.Timestamp.fromMicros(chunk.timestamp) });
+          g.close();
+        },
+        error: (er) => set("audio encoder: " + er.message),
+      });
+      e.configure({ codec: "opus", sampleRate, numberOfChannels, bitrate: 64_000 });
+      return e;
+    };
+    (async () => {
+      try {
+        if (typeof MediaStreamTrackProcessor !== "undefined") { // Chromium
+          const reader = new MediaStreamTrackProcessor({ track: comp.audioTrack }).readable.getReader();
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done || !value) break;
+            if (!aEnc) aEnc = makeAudioEncoder(value.sampleRate, value.numberOfChannels);
+            try { aEnc.encode(value); } catch {}
+            value.close();
+          }
+        } else { // Safari/iOS: AudioWorklet → AudioData
+          const ac = new AudioContext();
+          await ac.resume().catch(() => {});
+          const sampleRate = ac.sampleRate;
+          const source = ac.createMediaStreamSource(new MediaStream([comp.audioTrack]));
+          const code = "class Cap extends AudioWorkletProcessor{process(i){const c=i[0];if(c&&c[0])this.port.postMessage(c[0].slice(0));return true}}registerProcessor('sp-cap',Cap)";
+          const url = URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
+          await ac.audioWorklet.addModule(url);
+          URL.revokeObjectURL(url);
+          const node = new AudioWorkletNode(ac, "sp-cap");
+          source.connect(node); // NOT to destination — no local echo
+          aEnc = makeAudioEncoder(sampleRate, 1);
+          let tsSamples = 0;
+          node.port.onmessage = (ev) => {
+            const block = ev.data;
+            if (!block?.length || !aEnc) return;
+            try {
+              const ad = new AudioData({ format: "f32-planar", sampleRate, numberOfFrames: block.length, numberOfChannels: 1,
+                                         timestamp: Math.round((tsSamples / sampleRate) * 1e6), data: block });
+              aEnc.encode(ad); ad.close();
+            } catch {}
+            tsSamples += block.length;
+          };
+        }
+      } catch { set("audio unavailable — video only"); }
+    })();
+
+    // Encode the COMPOSITED canvas ~30fps. The compositor keeps it fresh via rAF.
     const t0 = performance.now();
     let key0 = -1;
     setInterval(() => {
