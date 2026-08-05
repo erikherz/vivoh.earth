@@ -1,17 +1,42 @@
 import * as Moq from "@moq/net";
 import { deriveKey, encryptFrame } from "./crypto.mjs";
 import { connectUrl, jwtFromUrl } from "./moqpro.js";
+import { createCompositor } from "./pip-compositor";
 
 const $ = (id) => document.getElementById(id);
 const set = (m) => ($("status").textContent = m);
-const b64url = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+const b64url = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+// FIXED composite size — matches the compositor's canvas. Keeping it constant means toggling
+// screen/camera mid-stream never reconfigures the encoder (no catalog reset / viewer freeze).
+const CANVAS_W = 1280;
+const CANVAS_H = 720;
+
+// Build the compositor up front so Camera / Screen toggles work before (and during) going live.
+// It composites screen (full) + camera (draggable inset) onto one canvas; we encode THAT canvas.
+const comp = createCompositor();
+comp.canvas.style.cssText = "width:100%;max-height:60vh;background:#000;border:1px solid #222b38;display:block";
+$("preview").replaceWith(comp.canvas);
+comp.enableCamera().catch((e) => set("camera: " + (e?.message || e)));
+
+$("camBtn").addEventListener("click", async () => {
+  if (comp.hasCamera()) { comp.disableCamera(); $("camBtn").textContent = "Turn camera on"; }
+  else { try { await comp.enableCamera(); $("camBtn").textContent = "Turn camera off"; } catch (e) { set("camera: " + (e?.message || e)); } }
+});
+$("scrBtn").addEventListener("click", async () => {
+  if (comp.hasScreen()) { comp.disableScreen(); $("scrBtn").textContent = "Share screen"; }
+  else {
+    try { await comp.enableScreen({ onEnded: () => ($("scrBtn").textContent = "Share screen") }); $("scrBtn").textContent = "Stop screen"; }
+    catch (e) { set("screen: " + (e?.message || e)); }
+  }
+});
 
 $("go").addEventListener("click", async () => {
   try {
     $("go").disabled = true;
     const jwt = jwtFromUrl() || $("jwt").value.trim();
     if (!jwt) { set("paste a publish JWT (or pass ?jwt=)"); $("go").disabled = false; return; }
-    const root = JSON.parse(atob(jwt.split(".")[1].replace(/-/g,"+").replace(/_/g,"/"))).root || "erik";
+    const root = JSON.parse(atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).root || "erik";
     const stream = $("name").value.trim() || "spike";
     const path = `${root}/${stream}`;
 
@@ -20,13 +45,7 @@ $("go").addEventListener("click", async () => {
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const key = await deriveKey(frag, salt);
 
-    set("starting camera…");
-    const stream_ = await navigator.mediaDevices.getUserMedia({ video: { width: {ideal:1280}, height:{ideal:720} }, audio: false });
-    $("preview").srcObject = stream_;
-    const track0 = stream_.getVideoTracks()[0];
-    const { width, height } = track0.getSettings();
-
-    set("connecting to moq.pub…");
+    set("connecting to cdn.moq.pro…");
     const conn = await Moq.Connection.connect(connectUrl(path, jwt));
     const broadcast = new Moq.Broadcast.Producer();
     conn.publish(Moq.Path.empty(), broadcast);
@@ -38,34 +57,35 @@ $("go").addEventListener("click", async () => {
       output: async (chunk, meta) => {
         if (!catalogObj && meta?.decoderConfig) {
           const dc = meta.decoderConfig;
-          catalogObj = { codec: dc.codec, codedWidth: dc.codedWidth ?? width, codedHeight: dc.codedHeight ?? height,
+          catalogObj = { codec: dc.codec, codedWidth: dc.codedWidth ?? CANVAS_W, codedHeight: dc.codedHeight ?? CANVAS_H,
                          salt: b64url(salt) }; // salt is PUBLIC (HKDF input); #k= stays in the link
           catalogTrack.writeJson(catalogObj);
-          // Re-publish the catalog every second so a viewer who joins LATER still receives it
-          // (a single group written once at go-live isn't replayed to late subscribers).
+          // Re-publish the catalog every second so a viewer who joins LATER still receives it.
           setInterval(() => { try { catalogTrack.writeJson(catalogObj); } catch {} }, 1000);
-          set("● live");
+          set("● live — screen + camera composited, then encrypted");
         }
         const bytes = new Uint8Array(chunk.byteLength); chunk.copyTo(bytes);
-        const wire = await encryptFrame(key, chunk.timestamp, bytes);   // AES-256-GCM (our code) BEFORE the track
+        const wire = await encryptFrame(key, chunk.timestamp, bytes); // AES-256-GCM (our code) BEFORE the track
         if (chunk.type === "key") { group?.close(); group = videoTrack.appendGroup(); }
         group?.writeFrame({ payload: wire, timestamp: Moq.Time.Timestamp.fromMicros(chunk.timestamp) });
       },
       error: (e) => set("encoder: " + e.message),
     });
-    enc.configure({ codec: "vp8", width, height, bitrate: 2_000_000, latencyMode: "realtime" });
+    enc.configure({ codec: "vp8", width: CANVAS_W, height: CANVAS_H, bitrate: 2_500_000, latencyMode: "realtime" });
 
-    // Capture via <video>+canvas (upright on every browser; same trick as earthseed).
-    const cap = document.createElement("video"); cap.srcObject = new MediaStream([track0]); cap.muted = true; cap.playsInline = true;
-    cap.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0"; document.body.appendChild(cap); await cap.play();
-    const cv = document.createElement("canvas"); cv.width = width; cv.height = height; const cx = cv.getContext("2d");
-    let last = -1, key0 = 0;
+    // Encode the COMPOSITED canvas (screen + camera inset). The compositor keeps it fresh via rAF,
+    // so we just snapshot it ~30fps. Compositing happens BEFORE encryption — the relay sees ciphertext.
+    const t0 = performance.now();
+    let key0 = -1;
     setInterval(() => {
-      if (cap.readyState < 2 || cap.currentTime === last || enc.encodeQueueSize > 2) return;
-      last = cap.currentTime; cx.drawImage(cap, 0, 0, width, height);
-      const ts = Math.round(cap.currentTime * 1e6);
-      const keyf = ts - key0 >= 2_000_000; if (keyf) key0 = ts;
-      enc.encode(new VideoFrame(cv, { timestamp: ts }), { keyFrame: keyf });
+      if (enc.encodeQueueSize > 2) return;
+      const ts = Math.round((performance.now() - t0) * 1000); // microseconds, strictly increasing
+      const keyf = key0 < 0 || ts - key0 >= 2_000_000; // first frame + every 2s
+      if (keyf) key0 = ts;
+      let frame;
+      try { frame = new VideoFrame(comp.canvas, { timestamp: ts }); } catch { return; }
+      try { enc.encode(frame, { keyFrame: keyf }); } catch {}
+      frame.close();
     }, 33);
 
     const link = new URL("watch.html", location.href);
