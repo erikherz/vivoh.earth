@@ -555,29 +555,15 @@ function setActiveRelay(relay: string | null) {
   updateServerStatusPanel();
 }
 
-// Status pills shown in the publisher header and on the player. We make a claim at each
-// layer and nothing more: "Relay-blind" is an INFRASTRUCTURE property (encryption is
-// mandatory, so it shows on every stream and says nothing about who may watch); the
-// audience pill carries the ACCESS claim (Public vs Invite-only); and "Security details"
-// hangs the honest caveats (static key, metadata, not-DRM) off the access affordance.
-const SHIELD_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>`;
+// Status pills shown in the publisher header and on the player. The audience pill carries
+// the ACCESS claim (Public vs Invite-only); "Security details" hangs the honest caveats
+// (static key, metadata, not-DRM) off the access affordance. (The "Relay-blind"/encrypted
+// pill was removed — on the moq.pro CDN media is transport-encrypted, not relay-blind E2E.)
 const GLOBE_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`;
 const LOCK_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
 const PILL_CSS =
   "display:inline-flex;align-items:center;gap:4px;font-size:0.72rem;font-weight:600;" +
   "border:1px solid;border-radius:999px;padding:2px 8px;line-height:1;white-space:nowrap;";
-
-// "Relay-blind" — shown on EVERY stream (encryption is mandatory). States that the relay
-// and server only ever move ciphertext they can't read. Deliberately NOT a privacy claim
-// about who may watch — that is the audience pill's job.
-function createRelayBlindBadge(): HTMLSpanElement {
-  const badge = document.createElement("span");
-  badge.className = "relay-blind-badge";
-  badge.title = "Encrypted in your browser, decrypted in viewers' browsers. The relay and server only move ciphertext they can't read.";
-  badge.innerHTML = SHIELD_SVG + `<span>Relay-blind</span>`;
-  badge.style.cssText = PILL_CSS + "color:#22c55e;border-color:rgba(34,197,94,0.5);";
-  return badge;
-}
 
 // Audience pill — carries the ACCESS claim, driven by require_auth. Public = anyone with
 // the link; Invite-only = viewers must sign in to receive the key. Mutated in place so a
