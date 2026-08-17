@@ -2762,10 +2762,44 @@ async function initWatchView(streamId: string, user: User | null) {
 
     // Start muted; first click/tap on the player enables audio. Declared before the swap so a
     // replacement element can re-arm it — `live` changes identity, this handler must follow.
+    //
+    // ── Why this is more than `live.muted = false` ────────────────────────────────────────
+    //
+    // <moq-watch> resumes its AudioContext from a reactive EFFECT keyed on the muted signal,
+    // and @moq/signals BATCHES within a microtask, comparing the final value against the one
+    // captured at the start of that batch. Both facts matter here:
+    //
+    //   1. After a token renewal, swapInPlayer restores `muted = false` programmatically —
+    //      with no user gesture. The browser refuses the resulting resume() (audio needs user
+    //      activation), so the context stays suspended. The picture comes back; the sound
+    //      does not.
+    //   2. A tap then sets muted = false when it is ALREADY false. No value change means no
+    //      notification, so the effect never re-runs and resume() is never retried. The tap
+    //      appears to do nothing, because it does nothing.
+    //
+    // So when the state is "unmuted but silent" we force a REAL edge, across a batch
+    // boundary. Setting true then false in one tick would be coalesced (old false, final
+    // false) into no notification at all — a fix that looks right and changes nothing.
+    // Transient user activation is time-based rather than call-stack-based, so the deferred
+    // half still counts as user-activated.
+    //
+    // `audioNeedsKick` is what keeps this from doing harm: without it, a permanently attached
+    // handler would briefly MUTE a perfectly good player whenever someone clicked the video.
+    // Only a swap that restored audio without a gesture arms it.
+    let audioNeedsKick = false;
     const enableAudio = () => {
-      live.muted = false;
-      live.removeEventListener("click", enableAudio);
+      if (live.muted) {
+        live.muted = false; // ordinary first unmute — a real edge already, inside the gesture
+        audioNeedsKick = false;
+        return;
+      }
+      if (!audioNeedsKick) return; // unmuted and audible; a stray click must not disturb it
+      audioNeedsKick = false;
+      live.muted = true;
+      window.setTimeout(() => { live.muted = false; }, 0);
     };
+    // Deliberately NOT removed after the first unmute: every renewal can strand audio again,
+    // so the recovery has to stay available for the life of the page.
     watcher.addEventListener("click", enableAudio);
 
     /**
@@ -2832,6 +2866,12 @@ async function initWatchView(streamId: string, user: User | null) {
       // The audio enabler lived on the retired element; without re-arming it, a click after a
       // swap silently stops unmuting the stream.
       live.muted = !wasUnmuted;
+      // Restoring audio here happens on a TIMER, not a gesture, so the element's resume() may
+      // well be refused and leave the viewer watching in silence. Arm the recovery so their
+      // next tap can force a real edge — see enableAudio. On browsers that accept the resume
+      // (sticky activation is usually enough on desktop Chrome) audio simply continues and the
+      // flag is never used.
+      if (wasUnmuted) audioNeedsKick = true;
       live.addEventListener("click", enableAudio);
       old.remove();
       console.log(`[${why}] swapped in a fresh player in ${(performance.now() - started).toFixed(0)}ms`);
