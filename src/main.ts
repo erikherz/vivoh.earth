@@ -2974,18 +2974,23 @@ async function initWatchView(streamId: string, user: User | null) {
 
         // "Stalled" here means the two counters that should never stop both stopped. Reported
         // in seconds so the freeze can be timed against whatever else was happening.
+        // Order matters, and getting it wrong made this panel lie: the "moved Ns ago" fields
+        // below compare against lastBytes/lastOk, so those must NOT be overwritten until the
+        // comparison has happened. A first version assigned them here and every audio/decrypt
+        // field then reported the full session length, which is exactly the sort of confident
+        // wrong number that sends an investigation down a blind alley.
+        const nowSec = (performance.now() - t0) / 1000;
+        if (bytes !== lastBytes) lastAudioMove = nowSec;
+        if (successes !== lastOk) lastDecMove = nowSec;
+        if (vbytes !== lastVBytes) lastVideoMove = nowSec;
+
         const frozen = bytes === lastBytes && successes === lastOk;
         stalledFor = frozen ? stalledFor + 1 : 0;
         lastBytes = bytes;
         lastOk = successes;
-
-        // Which counter froze FIRST is the diagnosis, so record when each last moved.
-        const nowS = (performance.now() - t0) / 1000;
-        if (bytes !== lastBytes) lastAudioMove = nowS;
-        if (vbytes !== lastVBytes) lastVideoMove = nowS;
-        if (successes !== lastOk) lastDecMove = nowS;
         lastVBytes = vbytes;
 
+        const nowS = nowSec;
         const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
         panel.style.color = stalledFor >= 3 ? "#f87171" : "#4ade80";
         panel.textContent =
