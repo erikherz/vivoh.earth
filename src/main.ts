@@ -2786,17 +2786,38 @@ async function initWatchView(streamId: string, user: User | null) {
     // `audioNeedsKick` is what keeps this from doing harm: without it, a permanently attached
     // handler would briefly MUTE a perfectly good player whenever someone clicked the video.
     // Only a swap that restored audio without a gesture arms it.
-    let audioNeedsKick = false;
+    /**
+     * Resume the element's AudioContext directly, from inside a user gesture.
+     *
+     * This is the part that actually fixes silence after a renewal, and it has to reach past
+     * the `muted` property to do it. In @moq/watch's emitter:
+     *
+     *     run(() => { const on = !get(paused) && !get(muted); source.enabled.set(on); })
+     *     run(() => { const [on, ctx] = getAll([enabled, context]); ctx.resume(); })
+     *
+     * so resume() is only ever attempted when `enabled` CHANGES. The swap restores
+     * `muted = false` on a timer, with no user gesture; the browser refuses that resume, the
+     * context stays suspended, and because muted is now already false a later tap changes
+     * nothing, re-runs no effect, and never asks again. Silence with no way back.
+     *
+     * Toggling muted to manufacture an edge is not reliable either — @moq/signals batches
+     * within a microtask and compares against the value captured at the start of the batch,
+     * so an off/on inside one tick collapses to no notification at all.
+     *
+     * `backend.audio.context` is a public signal holding the real AudioContext (the backend
+     * proxies it out of the emitter), so we just resume it. Suspended contexts resume only on
+     * user activation, which is exactly what a click is.
+     */
+    const resumeAudioContext = () => {
+      const ctx = (live as unknown as {
+        backend?: { audio?: { context?: { peek?: () => AudioContext | undefined } } };
+      })?.backend?.audio?.context?.peek?.();
+      if (ctx && ctx.state !== "running") void ctx.resume().catch(() => { /* refused; the next tap tries again */ });
+    };
+
     const enableAudio = () => {
-      if (live.muted) {
-        live.muted = false; // ordinary first unmute — a real edge already, inside the gesture
-        audioNeedsKick = false;
-        return;
-      }
-      if (!audioNeedsKick) return; // unmuted and audible; a stray click must not disturb it
-      audioNeedsKick = false;
-      live.muted = true;
-      window.setTimeout(() => { live.muted = false; }, 0);
+      live.muted = false;  // idempotent — a no-op when already unmuted
+      resumeAudioContext(); // the part that matters after a swap
     };
     // Deliberately NOT removed after the first unmute: every renewal can strand audio again,
     // so the recovery has to stay available for the life of the page.
@@ -2866,13 +2887,15 @@ async function initWatchView(streamId: string, user: User | null) {
       // The audio enabler lived on the retired element; without re-arming it, a click after a
       // swap silently stops unmuting the stream.
       live.muted = !wasUnmuted;
-      // Restoring audio here happens on a TIMER, not a gesture, so the element's resume() may
-      // well be refused and leave the viewer watching in silence. Arm the recovery so their
-      // next tap can force a real edge — see enableAudio. On browsers that accept the resume
-      // (sticky activation is usually enough on desktop Chrome) audio simply continues and the
-      // flag is never used.
-      if (wasUnmuted) audioNeedsKick = true;
       live.addEventListener("click", enableAudio);
+      if (wasUnmuted) {
+        // Try immediately: on a browser where the document already has sticky activation
+        // (desktop Chrome, typically, since the viewer tapped to unmute in the first place)
+        // this succeeds and audio simply continues across the renewal with nothing to notice.
+        // Where it is refused — Safari and iOS want a *transient* activation — the catch
+        // inside leaves the context suspended and the click handler above is the way back.
+        resumeAudioContext();
+      }
       old.remove();
       console.log(`[${why}] swapped in a fresh player in ${(performance.now() - started).toFixed(0)}ms`);
       return true;
