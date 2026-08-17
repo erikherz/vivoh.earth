@@ -1,159 +1,182 @@
 # Vivoh.Earth
 
-Live, low-latency video streaming over **Media over QUIC (MoQ)** — publish from a
-browser, watch in a browser, with sign-in-gated broadcasting, per-broadcast relay
-tokens, mandatory end-to-end encryption, and opt-in live chat.
+Live, low-latency video streaming over **Media over QUIC (MoQ)** — publish from a browser,
+watch in a browser, with sign-in-gated broadcasting, per-broadcast relay tokens, mandatory
+end-to-end encryption, and opt-in live chat.
 
-Media is carried by **[moq.pro](https://moq.pro)** — Luke Curley's hosted MoQ CDN
-(`cdn.moq.pro`). The browser connects with `@moq/net` over WebTransport (with a
-WebSocket fallback); the Cloudflare Worker mints short-lived, per-broadcast HS256
-tokens for the CDN and keeps the auth-gated content key. Because every frame is
-AES-256-GCM encrypted in the browser before it leaves, the CDN only ever moves
-ciphertext it cannot read.
+Media is carried by a **self-hosted MoQ relay fleet, managed through the fleet manager at
+[tinymoq.com/cdnadmin](https://tinymoq.com/cdnadmin)**. Vivoh.Earth is registered there as a
+tenant; on go-live the Cloudflare Worker asks the broker for a relay and mints a short-lived,
+per-broadcast token signed with our own Ed25519 key. **Media always flows browser ↔ relay
+box** — the broker is consulted only to choose a box and never carries video.
+
+Because every frame is AES-256-GCM encrypted in the browser before it leaves, the relay only
+ever moves ciphertext it cannot read.
+
+> **Migrated off moq.pro on 17 August 2026.** Earlier versions of this app streamed through
+> Luke Curley's hosted CDN at `cdn.moq.pro`. The change is config, not code — see
+> [`docs/wallflower-port.md`](./docs/wallflower-port.md) §8 for what the swap exposed and how
+> to roll it back.
 
 ## Features
 
-- **Browser publish & watch** over MoQ (WebTransport) through **moq.pro** (`cdn.moq.pro`),
-  using `@moq/net` + native WebCodecs for capture/encode/decrypt/render.
-- **Combinable capture** — Camera, Audio, and Screen toggled independently, composited
-  into one stable video track + audio mix (with an experimental draggable camera PiP).
-- **OAuth sign-in** (Google / Microsoft / Discord) to broadcast.
-- **Default-deny broadcaster allow list** — only approved emails may publish; managed
-  from the `/cleardata` admin page.
-- **Per-broadcast, server-minted CDN tokens** — the Worker signs short-lived **HS256** moq.pro
-  tokens scoped to a single stream (`put/get: ["<stream>.hang"]`); they authorize the *connection*
-  only, never decrypt media.
-- **Mandatory relay-blind E2E media encryption** — every frame is AES-256-GCM encrypted in the
-  browser before it leaves, so the CDN forwards only ciphertext it cannot read. See
-  [`MEDIA-ENCRYPTION.md`](./MEDIA-ENCRYPTION.md).
-- **Automatic reconnect** — broadcast and watch survive transient network / route drops (exponential
-  backoff), so a blip no longer ends the stream.
-- **Opt-in live chat** per stream (Cloudflare Durable Object + WebSocket).
-- **Auth-gated viewing** per stream (`require_auth`).
+- **Browser publish & watch** over MoQ, using the `@moq` hang elements with native WebCodecs
+  for capture/encode/decrypt/render.
+- **Combinable capture** — Camera, Audio, and Screen toggled independently, composited into
+  one stable video track + audio mix, with a draggable camera PiP.
+- **OAuth sign-in** (Google / Microsoft / Discord) — and it is the **only** way to broadcast.
+- **Default-deny broadcaster allow list** — only approved emails may publish.
+- **Per-broadcast, server-minted relay tokens** — the Worker signs short-lived tokens scoped
+  to a single stream. They authorize the *connection* only, and never decrypt media.
+- **Mandatory relay-blind E2E media encryption.** Every frame is AES-256-GCM encrypted in the
+  browser before it leaves. See [`MEDIA-ENCRYPTION.md`](./MEDIA-ENCRYPTION.md).
+- **Require sign-in to watch, on by default** — the broadcaster ticks a box, and the
+  broadcaster can see **who** is watching, by name.
+- **Overlays** — a location/UTC burn-in and an @handle watermark drawn into the composite,
+  plus an "Extras" panel of broadcaster-supplied HTML below the video.
+- **Opt-in live chat** per stream, end-to-end encrypted (Cloudflare Durable Object).
+- **Kill switch and abuse reports** — an operator can terminate a live stream.
 
-## Media over moq.pro
+## Where the keys live, and where they do not
 
-Media is carried by **[moq.pro](https://moq.pro)**, Luke Curley's hosted Media-over-QUIC CDN
-(`cdn.moq.pro`, protocol `moq-lite-05`). The browser media engine
-([`src/media/moqpro-engine.ts`](./src/media/moqpro-engine.ts)) talks to it directly with **`@moq/net`**
-— there is no self-hosted relay fleet.
+This is the part worth reading carefully, because it is the difference between this app and
+most video products — and because Vivoh.Earth makes a **different trade than its sibling
+[Wallflower.tv](https://wallflower.tv)**, which shares this codebase.
 
-- **Connect + auth.** On go-live / on watch, the Worker returns
-  `{ relay: "cdn.moq.pro", path: "<root>/<stream>.hang", jwt, content_key }`. The browser connects to
-  `https://cdn.moq.pro/<root>/<stream>.hang?jwt=<jwt>` and publishes/consumes the empty path. The JWT is
-  a short-lived **HS256** token (kid `f865…`) minted per broadcast and **scoped to that one stream**
-  (`put/get: ["<stream>.hang"]`). Its signing key lives only as a Worker secret (`MOQ_PRO_K`) and never
-  reaches the browser.
-- **End-to-end encryption.** A fresh 256-bit **AES-256-GCM content key** is minted server-side per
-  broadcast, stored in D1, and delivered over TLS to the broadcaster and — auth-gated — to authorized
-  viewers. Every encoded frame is encrypted in the browser (`[varint ts][12-byte nonce][ciphertext+tag]`,
-  timestamp bound as GCM AAD) **before** it reaches `@moq/net`, so moq.pro only ever moves ciphertext.
-  The key is separate from the connection JWT; an unauthorized viewer can connect but, lacking the key,
-  only sees ciphertext (fail-closed).
-- **Transport + codecs.** `@moq/net` connects over **WebTransport**, racing a **WebSocket fallback** for
-  environments without it. A small cleartext catalog track advertises codec/resolution (re-published
-  every second so late joiners can start); video is VP8, audio Opus, both via native WebCodecs.
-- **Reconnect resilience** (from moq.pro *update-01*'s "seamless subscription resumption during route
-  changes"). Broadcast and watch each run inside a reconnect loop: `@moq/net`'s `Established.closed`
-  resolves when a live connection drops, and the engine re-establishes with **exponential backoff
-  (1s → 15s)**. A broadcaster reconnect forces a fresh keyframe so the new connection is immediately
-  decodable; a viewer reconnect keeps a single `AudioContext` so the audio clock stays continuous.
+**The content key never reaches the server.** It is derived in the browser from the secret
+after the `#` in the share link, and browsers never transmit a fragment. There is no content
+key in D1 — the column was dropped in migration `0010`. We could not decrypt your broadcast
+if we were compelled to.
+
+**Who may watch is a separate question, and we answer it.** With *Require sign-in* on (the
+default), the Worker refuses to mint a viewer token to anyone without a session. That is real
+access control, and unlike the encryption it **depends on us**: we are in a position to grant
+it, and in principle to be compelled to.
+
+Wallflower makes the opposite trade — it mixes a passcode into key derivation, so that nobody,
+including its operators, can let a viewer in. That is right for an anonymous audience and
+wrong here, where broadcasters need to know who is in the room. **Vivoh.Earth has no
+passcode.**
+
+Consequences worth stating plainly:
+
+- Anyone the share link reaches can decrypt the video. Treat forwarding the link as granting
+  access.
+- Viewing is **attributed**: `watch_events` carries a real account id, so "who watched what,
+  and when" is answerable by anyone holding the database. Still not collected: IP, IP hashes,
+  fingerprints, location. See [`public/audience.html`](./public/audience.html).
 
 ## Architecture
 
 ```
-                         ┌───────────────────────────────────────────────┐
-                         │  Cloudflare Worker + D1  (vivoh.earth)          │
-                         │  • serves the app (static assets)              │
-   ┌─────────────┐       │  • OAuth sign-in, broadcaster allow list       │       ┌─────────────┐
-   │   Browser   │ ────▶ │  • /assign → autoscaler, mints per-broadcast   │ ◀──── │   Browser   │
-   │ (Publisher) │  API  │    relay token, records broadcast→relay        │  API  │  (Watcher)  │
-   │ moq-publish │       │  • live chat Durable Object                    │       │  moq-watch  │
-   └─────────────┘       └───────────────────────────────────────────────┘       └─────────────┘
-          │                                                                               │
-          │  WebTransport (moq-lite-04), ?jwt=<token>          WebTransport, ?jwt=<token>  │
-          ▼                                                                               ▼
-        ┌──────────────────────────────────────────────────────────────────────────────────┐
-        │  TinyMoQ relay  —  autoscaler at gpc-01.tinymoq.com assigns a relay per broadcast   │
-        │  (dynamic gpc-01.tinymoq.com:<port>). Forwards MoQ objects; never holds media keys. │
-        └──────────────────────────────────────────────────────────────────────────────────┘
+                       ┌─────────────────────────────────────────────────┐
+                       │  Cloudflare Worker + D1  (vivoh.earth)          │
+                       │  • serves the app (static assets)               │
+ ┌─────────────┐       │  • OAuth sign-in, broadcaster allow list        │       ┌─────────────┐
+ │   Browser   │ ────▶ │  • asks the broker for a relay, mints the       │ ◀──── │   Browser   │
+ │ (Publisher) │  API  │    per-broadcast token, records broadcast→relay │  API  │  (Watcher)  │
+ │ moq-publish │       │  • kill switch, reports, chat Durable Object    │       │  moq-watch  │
+ └─────────────┘       └───────────────────┬─────────────────────────────┘       └─────────────┘
+        │                                  │ POST /cdn/assign (control plane only)
+        │                                  ▼
+        │                    ┌─────────────────────────────┐
+        │                    │  tinymoq.com/cdnadmin       │
+        │                    │  fleet manager / broker     │
+        │                    │  picks a box; sees no media │
+        │                    └─────────────────────────────┘
+        │  WebTransport (WebSocket fallback), ?jwt=<token>                                │
+        ▼                                                                                 ▼
+      ┌──────────────────────────────────────────────────────────────────────────────────┐
+      │  MoQ relay fleet (e.g. dal.moqcdn.net:<port>). Forwards ciphertext objects.       │
+      │  Never holds a media key; the token authorizes the connection only.               │
+      └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- The **Worker** is the broadcast→relay directory: on go-live it calls the autoscaler's
-  `/assign` (sticky per broadcast), stores the relay on the broadcast record, and mints
-  the publisher token. Viewers call `GET /api/streams/:id/route` to resolve the same
-  relay + a viewer token.
-- There is **no static relay**: every media connection uses a dynamic `host:port` from
-  `/assign` / `/route`.
+- The **Worker** is the broadcast→relay directory: on go-live it asks the broker for a box
+  (sticky per broadcast name), stores it on the broadcast record, and mints the publisher
+  token. Viewers call `GET /api/streams/:id/route` for the same box plus a viewer token.
+- Viewers must prove they hold the share link. A **route tag** derived from the link secret
+  (with different HKDF inputs than the content key, so it decrypts nothing) is required before
+  a viewer token is issued — otherwise sweeping the five-character id space would collect
+  tokens to every live broadcast.
+- There is **no static relay**: every media connection uses a `host:port` from the broker.
+- Viewer tokens are short-lived and renewed through the Worker, which declines to renew a
+  terminated stream. That is what makes the kill switch enforceable rather than merely
+  requested. See the caveat in [`docs/wallflower-port.md`](./docs/wallflower-port.md) §8.
 
 ## Tech stack
 
-- **Frontend:** Vite + TypeScript; `@moq/publish` + `@moq/watch` (moq-lite-04),
-  WebTransport-only.
-- **Backend:** Cloudflare Worker (`src/worker/index.ts`) + D1 (`vivoh-earth-db`) for
-  users, stream settings, stats, the broadcast→relay directory, and the allow list;
-  plus a `ChatRoom` Durable Object.
-- **Relay:** TinyMoQ MoQ relay, autoscaled at `gpc-01.tinymoq.com`.
+- **Frontend:** Vite + TypeScript; `@moq/publish` + `@moq/watch`. WebTransport with a
+  **WebSocket fallback** — the fallback is load-bearing for iOS and older Safari, which is why
+  `moqWebTransportOnly()` in `vite.config.ts` stays switched off.
+- **Encryption seam:** `mediaCryptoPatch` in `vite.config.ts` patches `@moq` at build time,
+  because no public API exposes the frame boundary. It is **fail-closed**: the build throws if
+  any seam fails to patch, so an unencrypted bundle cannot ship.
+- **Backend:** Cloudflare Worker (`src/worker/index.ts`) + D1 (`vivoh-earth-db`) for users,
+  stream settings, audience, the broadcast→relay directory and the allow list; plus a
+  `ChatRoom` Durable Object and a cron-driven session reaper.
 - **Auth:** OAuth providers with HMAC-signed session cookies (WebCrypto).
 
 ## Requirements
 
-- **Browser with WebTransport:** Chrome/Edge 97+, Firefox 114+, or Safari 18+
-  (native WebTransport). There is no WebSocket fallback.
+- **Browser:** Chrome/Edge 97+, Firefox 114+, Safari 18+ for native WebTransport; older
+  Safari and iOS work via the WebSocket fallback.
 - **Node.js 20+** for development.
 
 ## Development
 
 ```bash
 npm install
-npm run dev      # Vite dev server on localhost:3000
+npm run dev      # Vite dev server
 ```
 
-Worker secrets (see [`TOKENS.md`](./TOKENS.md) §7) go in `.dev.vars` for local dev.
+Copy [`.dev.vars.example`](./.dev.vars.example) to `.dev.vars` and fill it in; it documents
+every secret and what happens when each is missing. With no OAuth secrets set, nobody can
+sign in — and since sign-in is the only publisher door, nobody can broadcast. That is the
+intended failure direction.
 
 ## Deploy
 
-Deploys run via **GitHub Action on push to `main`** (`vite build` + `wrangler deploy`).
-That is the canonical path — just commit and push to `main`.
-
 ```bash
-npm run deploy   # manual build + deploy (normally unnecessary)
+npm run deploy   # vite build + wrangler deploy
 ```
 
+`.github/workflows/deploy.yml` also deploys on push to `main`, and needs
+`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` in the repository secrets. Deploys during
+the August 2026 port were run manually with the command above; if you merge to `main`,
+expect the action to fire.
+
 D1 migrations live in `src/worker/db/migrations/`; apply new ones with
-`wrangler d1 execute vivoh-earth-db --remote --file=<migration>` before deploying code
-that depends on them.
+`wrangler d1 execute vivoh-earth-db --remote --file=<migration>` **before** deploying code
+that depends on them. Note that `schema.sql` alone is not a complete database — several
+tables, including `stream_salts` where the kill switch lives, arrive only by migration.
 
 ## Usage
 
-### Stream-based sessions
-Each session uses a unique 5-character stream ID:
-
-- **Visit `vivoh.earth`** → auto-generates a stream (e.g. `https://vivoh.earth/ab3x9`).
-- **Share the URL** → others open it to watch.
-- **"+ New Stream"** → a fresh stream.
-
-The relay namespace for a stream is `vivoh.earth/{streamId}.hang`.
+Each session uses a unique 5-character stream ID.
 
 ### Broadcasting
-1. Sign in (Google / Microsoft / Discord). Your email must be on the broadcaster allow
-   list (managed at `/cleardata`); otherwise broadcasting is blocked.
+1. Sign in (Google / Microsoft / Discord). Your email must be on the broadcaster allow list.
 2. Open your stream URL and toggle **Camera / Audio / Screen**.
-3. Optionally enable **end-to-end encryption** and/or **live chat** per stream.
-4. Share the URL with viewers.
+3. Leave **Require sign-in to watch** ticked unless you genuinely want an open stream.
+4. Share the URL — including everything after the `#`, which is the key.
 
 ### Watching
-1. Open the shared URL. Playback starts automatically once the broadcaster is live
-   (the viewer waits/polls until the stream is routed).
-2. For an encrypted stream, an authorized viewer decrypts transparently (🔒 indicator);
-   for an auth-gated stream, viewers must sign in.
+1. Open the shared link. Playback starts once the broadcaster is live.
+2. If the broadcaster requires sign-in, you will be asked to; you are returned to the stream
+   afterwards.
 
 ## Security & docs
 
-- [`TOKENS.md`](./TOKENS.md) — per-broadcast relay access tokens (BYOK Ed25519,
-  relay-blind), scopes, access-control model.
-- [`MEDIA-ENCRYPTION.md`](./MEDIA-ENCRYPTION.md) — relay-blind end-to-end media
-  encryption (AES-GCM), threat model, integration points.
+- [`docs/wallflower-port.md`](./docs/wallflower-port.md) — how this app relates to Wallflower,
+  what differs deliberately, and what is still unproven.
+- [`MEDIA-ENCRYPTION.md`](./MEDIA-ENCRYPTION.md) — relay-blind E2E media encryption, threat
+  model, integration points.
+- [`TOKENS.md`](./TOKENS.md) — per-broadcast relay access tokens, scopes, access-control model.
+
+> `MEDIA-ENCRYPTION.md`, `TOKENS.md` and `PER-BROADCAST-TOKENS.md` predate the August 2026
+> port and describe the pre-migration architecture in places. Treat `docs/wallflower-port.md`
+> as authoritative where they disagree.
 
 ## Links
 
