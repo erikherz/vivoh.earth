@@ -2769,6 +2769,73 @@ async function initWatchView(streamId: string, user: User | null) {
     watcher.addEventListener("click", enableAudio);
 
     /**
+     * EXPERIMENT — does a tap revive an AudioContext that was rebuilt by a token renewal?
+     *
+     * This is the untested assumption behind "just show a tap-to-restore button", and it is
+     * worth isolating rather than assuming: on Safari/iOS a renewal rebuilds the context with
+     * no transient gesture behind it, so it starts suspended. Whether a LATER tap can resume
+     * that specific context is exactly what nobody has measured, and a button that cannot fix
+     * it would be worse than no button.
+     *
+     * Deliberately kept off the initial-unmute path. Earlier attempts called resume() from the
+     * ordinary player click and that BROKE audio at start on Safari — so this appears only
+     * after a renewal has actually left the context suspended, and never runs otherwise. The
+     * working path is untouched by construction.
+     *
+     * The button reports what happened, so the tester can say more than "it didn't work".
+     */
+    const audioCtxNow = (): AudioContext | undefined =>
+      (live as unknown as {
+        backend?: { audio?: { context?: { peek?: () => AudioContext | undefined } } };
+      })?.backend?.audio?.context?.peek?.();
+
+    let restoreBtn: HTMLButtonElement | null = null;
+
+    const offerAudioRestore = () => {
+      const ctx = audioCtxNow();
+      if (!ctx || ctx.state === "running") return; // nothing to restore
+      if (restoreBtn) return; // already offered
+
+      const host = document.querySelector("#watch-view section") as HTMLElement | null;
+      if (!host) return;
+      if (!host.style.position) host.style.position = "relative";
+
+      const btn = document.createElement("button");
+      restoreBtn = btn;
+      btn.type = "button";
+      btn.textContent = `🔇 Tap to restore audio (${ctx.state})`;
+      btn.style.cssText =
+        "position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:20;" +
+        "padding:0.7rem 1.3rem;border:0;border-radius:999px;background:#f59e0b;color:#0a0a0a;" +
+        "font:inherit;font-weight:700;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,0.4);";
+
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation(); // do not also trigger enableAudio on the player beneath
+        const c = audioCtxNow();
+        if (!c) { btn.textContent = "no audio context"; return; }
+        const before = c.state;
+        try {
+          await c.resume();
+        } catch (err) {
+          btn.textContent = `resume refused (${before} -> ${c.state})`;
+          console.warn("[audio-restore] resume rejected", err);
+          return;
+        }
+        // Report the honest outcome rather than assuming success.
+        console.log(`[audio-restore] resume: ${before} -> ${c.state}`);
+        if (c.state === "running") {
+          btn.textContent = "✅ audio restored";
+          window.setTimeout(() => { btn.remove(); restoreBtn = null; }, 1500);
+        } else {
+          btn.textContent = `still ${c.state} after resume`;
+        }
+      });
+
+      host.appendChild(btn);
+      console.log(`[audio-restore] offering restore; context is ${ctx.state}`);
+    };
+
+    /**
      * Replace the player with a freshly built one pointed at `url`, and only retire the old
      * element once the new one is genuinely painting.
      *
@@ -2881,6 +2948,12 @@ async function initWatchView(streamId: string, user: User | null) {
         await swapInPlayer(url, "token", form);
       }
       scheduleRenewal(fresh.jwt);
+
+      // Give the rebuilt pipeline a moment to construct its context, then — only if it really
+      // did come back suspended — offer the restore. On Chrome this never fires, because
+      // sticky activation lets the new context auto-start; on Safari/iOS it is the whole
+      // point. Checked rather than assumed, so the button's presence is itself evidence.
+      window.setTimeout(offerAudioRestore, 2500);
     }
 
     /**
