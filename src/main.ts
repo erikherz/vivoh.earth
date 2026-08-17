@@ -2798,8 +2798,87 @@ async function initWatchView(streamId: string, user: User | null) {
       live.addEventListener("click", enableAudio);
       old.remove();
       console.log(`[${why}] swapped in a fresh player in ${(performance.now() - started).toFixed(0)}ms`);
+
+      // The rebuild just created a new AudioContext with no user gesture behind it. On iOS
+      // that context is suspended and the viewer has no way back — video returns, sound does
+      // not, and tapping the player cannot help because muted is already false. Give it a
+      // moment to exist, then offer the restore IF it really did come back suspended.
+      //
+      // Only when audio was on before the swap: someone watching muted has nothing to restore
+      // and should not be shown a button about it.
+      if (wasUnmuted) window.setTimeout(offerAudioRestore, 2000);
       return true;
     }
+
+    /**
+     * Give a viewer their audio back after the player has been rebuilt.
+     *
+     * WHY THIS EXISTS, from a measurement rather than a theory. When the stuck-player watchdog
+     * recovers a stalled stream it builds a fresh <moq-watch>, and a fresh element builds a
+     * fresh AudioContext. On iOS that context has no transient user gesture behind it, so it
+     * starts SUSPENDED — captured on an iPhone as `audio suspended t=0.0` while video flowed
+     * normally, t=0.0 being proof the context is new. Tapping the player does nothing there,
+     * because enableAudio only sets muted=false and it is already false.
+     *
+     * A tap CAN revive such a context — confirmed on the device before this was made
+     * permanent. So offer one, and only when it is genuinely needed.
+     *
+     * Deliberately kept OFF the initial-unmute path. Earlier attempts called resume() from the
+     * ordinary player click and BROKE audio at start on Safari. This appears only once a
+     * rebuild has actually left the context suspended, so the working path cannot be affected.
+     *
+     * It reports the transition it achieved, so a failure is legible rather than mysterious.
+     */
+    const audioCtxNow = (): AudioContext | undefined =>
+      (live as unknown as {
+        backend?: { audio?: { context?: { peek?: () => AudioContext | undefined } } };
+      })?.backend?.audio?.context?.peek?.();
+
+    let restoreBtn: HTMLButtonElement | null = null;
+
+    const offerAudioRestore = () => {
+      const ctx = audioCtxNow();
+      if (!ctx || ctx.state === "running") return; // nothing to restore
+      if (restoreBtn) return; // already offered
+
+      const host = document.querySelector("#watch-view section") as HTMLElement | null;
+      if (!host) return;
+      if (!host.style.position) host.style.position = "relative";
+
+      const btn = document.createElement("button");
+      restoreBtn = btn;
+      btn.type = "button";
+      btn.textContent = `🔇 Tap to restore audio (${ctx.state})`;
+      btn.style.cssText =
+        "position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:20;" +
+        "padding:0.7rem 1.3rem;border:0;border-radius:999px;background:#f59e0b;color:#0a0a0a;" +
+        "font:inherit;font-weight:700;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,0.4);";
+
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation(); // do not also trigger enableAudio on the player beneath
+        const c = audioCtxNow();
+        if (!c) { btn.textContent = "no audio context"; return; }
+        const before = c.state;
+        try {
+          await c.resume();
+        } catch (err) {
+          btn.textContent = `resume refused (${before} -> ${c.state})`;
+          console.warn("[audio-restore] resume rejected", err);
+          return;
+        }
+        // Report the honest outcome rather than assuming success.
+        console.log(`[audio-restore] resume: ${before} -> ${c.state}`);
+        if (c.state === "running") {
+          btn.textContent = "✅ audio restored";
+          window.setTimeout(() => { btn.remove(); restoreBtn = null; }, 1500);
+        } else {
+          btn.textContent = `still ${c.state} after resume`;
+        }
+      });
+
+      host.appendChild(btn);
+      console.log(`[audio-restore] offering restore; context is ${ctx.state}`);
+    };
 
     // --- On-device diagnostics: add ?diag=1 to the watch URL ---------------------------------
     //
