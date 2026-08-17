@@ -30,11 +30,20 @@
 		"directory": "./dist",
 		"binding": "ASSETS"
 	},
-	// DORMANT unless every MOQ_PRO_* secret is unset — see the header note. Kept wired so the
-	// eventual move to the broker/fleet is config, not a port.
+	// Path 2 — BROKERED assign. Vivoh.Earth is a registered tenant; the Worker POSTs to the
+	// assign URL with CDN_API_TOKEN as a Bearer and the operator picks the box. Media always
+	// goes browser <-> box and never through the broker, so this endpoint is a control-plane
+	// call on the way to going live, not a media path.
+	//
+	// NOTE the host: tinymoq.com, not moqcdn.net. The moqcdn.net value was inherited from
+	// Wallflower's config and is the wrong broker for this tenant — the credential below is
+	// issued against tinymoq.com and would simply be refused elsewhere.
+	//
+	// DORMANT while any MOQ_PRO_* secret is set: moqProAssign() returns first, so none of this
+	// is reached. That is deliberate — it makes the flip (and the rollback) a secret change.
 	"vars": {
 		"FLEET_MODE": "brokered",
-		"FLEET_ENDPOINT": "https://moqcdn.net/cdn/assign"
+		"FLEET_ENDPOINT": "https://tinymoq.com/cdn/assign"
 	},
 	// Closes viewing sessions whose heartbeat stopped (see scheduled() in the worker). One
 	// minute is the floor Cloudflare offers and the right one: the reaper's threshold is

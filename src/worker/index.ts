@@ -909,12 +909,34 @@ async function handleStreamRoutes(
         : null;
       const relay = await assignViaBroker(env, broadcastName(streamId), request, origin ? { origin, pull } : undefined);
       if (!relay) return new Response("offline", { status: 404 });
-      const viewerJwt = await tryMintMoqToken(env, { put: [], get: [broadcastName(streamId)], exp: now + VIEWER_TOKEN_TTL });
+      // `viewerTtl`, NOT VIEWER_TOKEN_TTL. This branch used to hardcode the 6h default and
+      // ignore ?ttl= entirely, which had two consequences worth stating plainly:
+      //
+      //   1. A viewer held a six-hour token that nothing renewed, so someone ignoring the
+      //      `killed` flag kept watching for up to six hours. Termination was cooperative
+      //      here while the moq.pro path made it enforceable within 120s.
+      //   2. token-expiry.mjs works by asking for a short token via ?ttl=. Pointed at this
+      //      path it would silently be handed 6h and measure nothing — a test that passes
+      //      by not testing.
+      //
+      // viewerTtl defaults to VIEWER_TOKEN_TTL_RENEWED (120s), so the renewal loop in the
+      // client now drives this path exactly as it drives moq.pro. Mid-session expiry is
+      // moq-relay's documented behaviour, so our own boxes enforce it the same way.
+      const viewerJwt = await tryMintMoqToken(env, { put: [], get: [broadcastName(streamId)], exp: now + viewerTtl });
       // Link-held keys: nothing to release here. Kept as constants so the response shape below is unchanged.
           const encrypted = true;
           const contentKey = null;
-      console.log(`[route] mode=brokered stream=${streamId} origin=${origin} relay=${relay.host}:${relay.port}`);
-      return Response.json({ relay: `${relay.host}:${relay.port}`, jwt: viewerJwt, encrypted, content_key: contentKey });
+      console.log(`[route] mode=brokered stream=${streamId} origin=${origin} relay=${relay.host}:${relay.port} ttl=${viewerTtl}`);
+      return Response.json({
+        relay: `${relay.host}:${relay.port}`,
+        jwt: viewerJwt,
+        encrypted,
+        content_key: contentKey,
+        salt: viewerSalt.salt,
+        // Echoed for the same reason the moq.pro branch echoes it: so a test can assert it
+        // received the short token it asked for rather than a quiet 6h default.
+        token_ttl: viewerTtl,
+      });
     }
     // ────────────────────────────────────────────────────────────────────────
 
@@ -1940,6 +1962,17 @@ async function handleStatsRoutes(
       jwt: publisherJwt,
       encrypted,
       content_key: contentKey,
+      // This was MISSING, and its absence was invisible rather than fatal.
+      //
+      // deriveFor() falls back to `wf-salt|<streamId>` when no salt is supplied. Publisher and
+      // viewer both fell back to the same value, so media decrypted fine and the path looked
+      // healthy — while the salt, the entire mechanism behind re-keying, was never read by
+      // either side. "New link" would have reported success and locked nobody out.
+      //
+      // A control that claims to revoke access and does not is worse than no control, so this
+      // has to be right before the fleet path carries anyone. See the matching field in the
+      // brokered /route branch: the two must agree or nothing decrypts at all.
+      salt: saltInfo.salt,
     });
   }
 

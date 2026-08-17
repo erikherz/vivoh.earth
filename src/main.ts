@@ -2834,9 +2834,13 @@ async function initWatchView(streamId: string, user: User | null) {
     // choke point is token ISSUANCE, not client behaviour. A custom client that never ran any
     // of this still cannot mint its own token.
     //
-    // Scheduled from the token's OWN exp claim, so at the current 6h VIEWER_TOKEN_TTL this
-    // never fires, and it becomes the mechanism the moment that default is lowered. There is
-    // nothing to switch on.
+    // Scheduled from the token's OWN exp claim, so it adapts to whatever the Worker issued.
+    // Both the moq.pro and fleet paths now receive VIEWER_TOKEN_TTL_RENEWED (120s) by default,
+    // so this fires on both. Mid-session expiry is moq-relay's DOCUMENTED behaviour rather
+    // than a moq.pro feature — upstream: "the relay closes the connection once exp passes" —
+    // so running our own boxes keeps the property rather than forfeiting it. That said, it is
+    // documented-on-main for a relay we pin months earlier, which makes it the one claim in
+    // this chain worth re-measuring on the fleet rather than inferring. See token-expiry.mjs.
     let renewTimer = 0;
     const tokenExpiry = (jwt: string | undefined): number | null => {
       if (!jwt) return null;
@@ -2903,7 +2907,24 @@ async function initWatchView(streamId: string, user: User | null) {
      * existing element achieves nothing (measured: the picture freezes on its last frame).
      * Used both to renew a token and to recover a decoder killed by undecryptable frames.
      */
-    async function swapInPlayer(url: string, why: string): Promise<boolean> {
+    /**
+     * `form` is the connect shape, and the two paths genuinely differ:
+     *
+     *   moq.pro — a full connect URL carrying the broadcast path, an EMPTY name, and an
+     *             explicit `catalog-format=hang`.
+     *   fleet   — `https://<relay>/?jwt=<token>` with the broadcast NAME as an attribute and
+     *             no catalog-format override.
+     *
+     * This used to hardcode the moq.pro shape, which is why renewal refused to run anywhere
+     * else: a swapped-in element would have connected with an empty name and subscribed to
+     * nothing. Mirror whatever the initial connect above does, or the renewal silently
+     * produces a black player instead of a fresh one.
+     */
+    async function swapInPlayer(
+      url: string,
+      why: string,
+      form: { name: string; catalogFormat: string | null } = { name: "", catalogFormat: "hang" }
+    ): Promise<boolean> {
       const parent = live.parentElement;
       if (!parent) return false;
       const started = performance.now();
@@ -2911,8 +2932,8 @@ async function initWatchView(streamId: string, user: User | null) {
       const next = document.createElement("moq-watch");
       next.setAttribute("muted", "");
       next.setAttribute("visible", "always");
-      next.setAttribute("catalog-format", "hang");
-      next.setAttribute("name", "");
+      if (form.catalogFormat) next.setAttribute("catalog-format", form.catalogFormat);
+      next.setAttribute("name", form.name);
       next.appendChild(document.createElement("canvas"));
       // Stacked underneath rather than hidden: display:none would give the element no layout,
       // and a canvas with no box does not decode.
@@ -2957,14 +2978,18 @@ async function initWatchView(streamId: string, user: User | null) {
         console.warn("[token] renewal refused — no new token; the relay will drop this session");
         return;
       }
-      if (!fresh.path) {
-        console.warn("[token] renewal only implemented for the moq.pro path");
-        return;
-      }
+      // Both paths renew. This used to bail out for anything without a moq.pro `path`, which
+      // meant the fleet path held a token nothing ever replaced — and since the Worker also
+      // minted it for six hours there, termination degraded from enforceable to a polite
+      // request. The choke point has to be token ISSUANCE on every path, or it is not a
+      // choke point: a client that ignores the killed flag is exactly the client this is for.
+      const [url, form] = fresh.path
+        ? [moqUrl(fresh.relay, fresh.path, fresh.jwt ?? ""), { name: "", catalogFormat: "hang" }]
+        : [`https://${fresh.relay}/?jwt=${fresh.jwt}`, { name: streamName, catalogFormat: null }];
 
       // Either way we reschedule: on failure the old element still has a few seconds of token
       // left, and the next attempt tries again with a newer one.
-      await swapInPlayer(moqUrl(fresh.relay, fresh.path, fresh.jwt ?? ""), "token");
+      await swapInPlayer(url, "token", form);
       scheduleRenewal(fresh.jwt);
     }
 
