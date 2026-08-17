@@ -86,10 +86,23 @@ console.log(`${stamp()} after click   ${JSON.stringify(await snap())}`);
 // renewed TTL that is roughly every 90 seconds, so a few minutes covers several.
 const started = Date.now();
 let last = "";
+let lastBytes = null;
+let stalls = 0;
 while ((Date.now() - started) / 1000 < RUN_SECONDS) {
   await settle(5000);
   const s = await snap();
   const line = JSON.stringify(s);
+  // A freeze shows up as values that STOP changing, which as plain dedup would look like
+  // silence — indistinguishable from the script having died. So say it out loud.
+  const bytes = (s.audioStats || "").match(/(\d+)/)?.[1] ?? null;
+  if (bytes && bytes === lastBytes) {
+    stalls++;
+    if (stalls === 2) console.log(`${stamp()} *** STALLED: audio bytes stuck at ${bytes} *** ${line}`);
+  } else if (bytes) {
+    if (stalls >= 2) console.log(`${stamp()} *** RECOVERED after ${stalls * 5}s ***`);
+    stalls = 0;
+  }
+  lastBytes = bytes;
   if (line !== last) {
     console.log(`${stamp()} ${line}`);
     last = line;

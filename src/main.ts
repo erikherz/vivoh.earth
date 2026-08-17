@@ -2801,6 +2801,74 @@ async function initWatchView(streamId: string, user: User | null) {
       return true;
     }
 
+    // --- On-device diagnostics: add ?diag=1 to the watch URL ---------------------------------
+    //
+    // Exists because a freeze reproduces on an iPhone and NOT in the headless harness. Seven
+    // minutes of scripts/e2e/audio-across-renewal.mjs against the same stream showed continuous
+    // flow — context running, currentTime and byte counters climbing, one element, no rebuild —
+    // so whatever stops on the device is invisible from here. The device has to report it.
+    //
+    // Deliberately opt-in by query parameter: no ordinary viewer sees this, and it reads state
+    // without touching any of it. Everything shown is already in the page; nothing is sent
+    // anywhere, which matters on a product whose whole claim is that we cannot see your stream.
+    //
+    // What to look for when it freezes: WHICH counter stops first is the diagnosis.
+    //   bytes stop      -> nothing is arriving; publisher, relay, or the OS suspended the socket
+    //   bytes climb but
+    //     ok stops      -> arriving but not decrypting; a key or salt problem
+    //   ok climbs but
+    //     painted stops -> decrypting but not rendering; the decoder died
+    //   ctxTime stops   -> the AudioContext itself was suspended, typically by iOS
+    if (new URLSearchParams(location.search).get("diag") === "1") {
+      const panel = document.createElement("div");
+      panel.style.cssText =
+        "position:fixed;left:6px;bottom:6px;z-index:9999;max-width:96vw;padding:7px 9px;" +
+        "background:rgba(0,0,0,0.82);color:#0f0;font:11px/1.45 ui-monospace,Menlo,monospace;" +
+        "border-radius:6px;white-space:pre;pointer-events:none;";
+      document.body.appendChild(panel);
+
+      const t0 = performance.now();
+      let lastBytes = -1;
+      let lastOk = -1;
+      let stalledFor = 0;
+
+      const tick = () => {
+        const a = (live as unknown as {
+          backend?: {
+            audio?: {
+              context?: { peek?: () => AudioContext | undefined };
+              stats?: { peek?: () => { bytesReceived?: number } | undefined };
+            };
+          };
+        })?.backend?.audio;
+        const ctx = a?.context?.peek?.();
+        const bytes = a?.stats?.peek?.()?.bytesReceived ?? -1;
+        const { successes, failures } = decryptStats();
+        const canvas = live.querySelector("canvas") as HTMLCanvasElement | null;
+
+        // "Stalled" here means the two counters that should never stop both stopped. Reported
+        // in seconds so the freeze can be timed against whatever else was happening.
+        const frozen = bytes === lastBytes && successes === lastOk;
+        stalledFor = frozen ? stalledFor + 1 : 0;
+        lastBytes = bytes;
+        lastOk = successes;
+
+        panel.style.color = stalledFor >= 3 ? "#f87171" : "#4ade80";
+        panel.textContent =
+          `up ${((performance.now() - t0) / 1000).toFixed(0)}s   ` +
+          `${stalledFor >= 3 ? `STALLED ${stalledFor}s` : "flowing"}\n` +
+          `bytes   ${bytes}\n` +
+          `decrypt ok ${successes}  fail ${failures}\n` +
+          `canvas  ${canvas ? `${canvas.width}x${canvas.height}` : "none"}\n` +
+          `audio   ${ctx ? `${ctx.state} t=${ctx.currentTime.toFixed(1)}` : "no context"}  muted=${live.muted}\n` +
+          `page    ${document.visibilityState}`;
+      };
+
+      tick();
+      const diagTimer = window.setInterval(tick, 1000);
+      window.addEventListener("beforeunload", () => window.clearInterval(diagTimer));
+    }
+
     // --- Stuck-player watchdog --------------------------------------------------------------
     //
     // A viewer had no way back from either failure this page can produce, and both end in the
