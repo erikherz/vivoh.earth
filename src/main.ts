@@ -2880,6 +2880,25 @@ async function initWatchView(streamId: string, user: User | null) {
       console.log(`[audio-restore] offering restore; context is ${ctx.state}`);
     };
 
+    // --- Bare mode: add ?bare=1 to the watch URL ---------------------------------------------
+    //
+    // Turns OFF every background loop this page runs, leaving nothing but connect-and-play.
+    // It exists to answer one question that repeated fixes could not: is the stalling caused
+    // by OUR JavaScript, or by the transport underneath it?
+    //
+    // Disabled in bare mode:
+    //   • the stuck-player watchdog  — polls decrypt counters and REBUILDS the player, which
+    //     is the loudest suspect: a false positive here would itself produce a stall, and the
+    //     rebuild is what strands audio on iOS
+    //   • the viewing-session heartbeat — a fetch every 30s
+    //   • the settings poll — a fetch every 5s, which also carries kill detection
+    //
+    // Consequences worth knowing while testing: a killed stream will NOT stop for this viewer,
+    // the audience count will not include them, and a genuinely dead decoder will not recover
+    // on its own. That is the point — it is a diagnostic, not a mode to ship anyone into.
+    const BARE = new URLSearchParams(location.search).get("bare") === "1";
+    if (BARE) console.warn("[bare] all background loops disabled: no watchdog, no heartbeat, no settings poll");
+
     // --- On-device diagnostics: add ?diag=1 to the watch URL ---------------------------------
     //
     // Exists because a freeze reproduces on an iPhone and NOT in the headless harness. Seven
@@ -2972,6 +2991,7 @@ async function initWatchView(streamId: string, user: User | null) {
     let keyMismatchReported = false;
 
     const watchdog = window.setInterval(async () => {
+      if (BARE) return;
       if (recovering) return;
       const now = decryptStats();
       const gotFrames = now.successes - lastStats.successes;
@@ -3057,6 +3077,7 @@ async function initWatchView(streamId: string, user: User | null) {
       if (!watchSession) return;
       stopHeartbeat();
       heartbeat = window.setInterval(async () => {
+        if (BARE) return;
         if (!watchSession) return;
         if (await logWatchHeartbeat(watchSession)) return;
         // The server has forgotten this session — the tab was suspended long enough to be
@@ -3116,6 +3137,7 @@ async function initWatchView(streamId: string, user: User | null) {
 
     // Poll for setting changes (auth and overlay)
     const settingsCheckInterval = setInterval(async () => {
+      if (BARE) return;
       const currentSettings = await getStreamSettings(streamId);
 
       // Terminated: checked first, because nothing below it matters afterwards.
