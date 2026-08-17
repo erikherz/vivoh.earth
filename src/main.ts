@@ -745,6 +745,7 @@ import {
   loginWithGoogle,
   loginWithMicrosoft,
   loginWithDiscord,
+  consumeReturnTo,
   logout,
   logBroadcastStart,
   logBroadcastEnd,
@@ -3137,6 +3138,16 @@ async function init() {
 
   // Wallflower harvests ?pk= into localStorage here, before routing rewrites the URL. There
   // is no publish key to harvest in this deployment — admission is the session cookie.
+
+  // Just back from an OAuth round trip? Go where they were actually trying to go.
+  //
+  // The callback can only redirect to the origin, because the share link's key is in the
+  // fragment and no server ever sees it — so without this, a viewer who signed in because a
+  // stream demanded it landed on the landing page and had to find their link again.
+  //
+  // Checked BEFORE routing, so the landing page never renders and there is no flash of the
+  // wrong view. Returns true only when it is actually navigating away.
+  if (consumeReturnTo()) return;
 
   const { view, streamId } = await getRouteInfo();
 

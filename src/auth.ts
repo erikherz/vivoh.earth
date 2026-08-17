@@ -44,11 +44,67 @@ export function countryToFlag(countryCode: string | null): string {
   return String.fromCodePoint(...codePoints);
 }
 
-// Sign-in is a full navigation, not a fetch: the OAuth dance needs the browser to follow
-// redirects to the provider and back, and the session arrives as a Set-Cookie on the return
-// leg. An XHR would drop both.
+/**
+ * Where to send the viewer back to after the OAuth round trip.
+ *
+ * This CANNOT be done by the Worker, and the reason is the whole design: the share link's
+ * key lives in the `#k=` fragment, and browsers never transmit a fragment to a server. The
+ * OAuth callback therefore has no way to know which broadcast the viewer was trying to
+ * watch, let alone the key for it — it can only bounce them to the origin, which is exactly
+ * the bug this fixes. Redirecting server-side to `/{streamId}` would be worse than the
+ * landing page: the viewer would arrive at the right stream with no key and be told their
+ * link is broken.
+ *
+ * So the client remembers, across the trip to the provider and back. sessionStorage is the
+ * right store: same tab, same origin on return, and gone when the tab closes.
+ *
+ * It does mean the content key sits in sessionStorage for the duration of the round trip.
+ * That is a smaller exposure than it sounds — the same key is in the address bar and in
+ * browser history either way — but it is why this is consumed and deleted on the first read
+ * rather than left lying around.
+ */
+const RETURN_KEY = "vivoh.returnTo";
+
 export function loginWith(provider: Provider): void {
+  try {
+    // location.href, not pathname: the fragment is the part that matters.
+    sessionStorage.setItem(RETURN_KEY, window.location.href);
+  } catch {
+    // Private mode with storage disabled. Sign-in still works; the viewer just lands on the
+    // landing page afterwards and has to click their link again.
+  }
   window.location.href = `/api/auth/${provider}/login`;
+}
+
+/**
+ * Consume a pending return-to and navigate there. Returns true if it navigated, so the
+ * caller can stop rendering the page it is about to leave.
+ *
+ * Deleted BEFORE navigating, not after: a stored URL that somehow fails to load would
+ * otherwise bounce the viewer back to it on every subsequent visit.
+ */
+export function consumeReturnTo(): boolean {
+  let target: string | null = null;
+  try {
+    target = sessionStorage.getItem(RETURN_KEY);
+    if (target) sessionStorage.removeItem(RETURN_KEY);
+  } catch {
+    return false;
+  }
+  if (!target) return false;
+
+  // Same-origin only. This value is under our control, but it ends up in a location
+  // assignment, and an open redirect is not something to leave one bug away.
+  try {
+    const u = new URL(target, window.location.origin);
+    if (u.origin !== window.location.origin) return false;
+    // Already there (fragment included)? Do not navigate — that would be a reload loop.
+    if (u.href === window.location.href) return false;
+    window.location.replace(u.href);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Default provider for a bare "Sign in" affordance. */
