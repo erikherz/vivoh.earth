@@ -289,18 +289,8 @@ export async function setMediaKey(b64url: string): Promise<void> {
 /** Context version. Bumping it re-keys every stream, invalidating existing share links. */
 const HKDF_INFO = "wallflower-content-key-v1";
 
-/**
- * An 8-character passcode, drawn from an alphabet with no visually ambiguous characters
- * (no O/0, no I/l/1). It is meant to be spoken aloud or typed from a text message, so
- * legibility matters more than density. 31^8 is ~10^12 combinations, which is ample given
- * that guessing is unverifiable: there is no oracle anywhere to test a guess against, so an
- * attacker learns nothing except that a stream failed to play.
- */
-export function generatePasscode(): string {
-  const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
-  const raw = crypto.getRandomValues(new Uint8Array(8));
-  return Array.from(raw, (b) => ALPHABET[b % ALPHABET.length]).join("");
-}
+// generatePasscode() lived here. Removed with the passcode itself — see DeriveOpts below.
+
 
 /** A fresh 32-byte link secret, base64url. This value is the whole capability. */
 export function generateLinkSecret(): string {
@@ -318,43 +308,43 @@ export function generateLinkSecret(): string {
  * The secret is HKDF input rather than the key itself so that other material can be mixed
  * in without changing the link format:
  *   - `salt`   — a rotatable per-stream value; rotating it re-keys the stream and revokes
- *                existing viewers. Until that is wired up, the stream id stands in, which
- *                is public and needs no storage.
- *   - `passcode` — an optional second secret deliberately kept OUT of the link and sent by
- *                another channel, so the link alone is not sufficient.
+ *                existing viewers.
  *
- * A wrong passcode or a stale salt yields a wrong key rather than an error: decryption
- * simply fails, and no server is ever in a position to confirm or deny a guess.
+ * A stale salt yields a wrong key rather than an error: decryption simply fails, and no
+ * server is ever in a position to confirm or deny a guess.
+ *
+ * ── The passcode is gone, and this is the load-bearing difference from Wallflower ──────
+ *
+ * Wallflower mixes a `passcode` in here: a second secret deliberately kept OUT of the link
+ * and sent by another channel, so that holding the link alone is not sufficient. Crucially,
+ * because it is an input to KEY DERIVATION, no server can grant access without it — not a
+ * compromised Worker, not a subpoena, not the operator.
+ *
+ * Vivoh.Earth replaces that with `require_auth`: the broadcaster ticks a box and the Worker
+ * refuses to mint a viewer token to anyone without a session. That is a real access control
+ * and it is the right one for a known audience, but be exact about what changed:
+ *
+ *   access control moved OUT of cryptography and INTO server policy.
+ *
+ * The operator can now grant and revoke viewing. Under the passcode model they could do
+ * neither. What did NOT change: the content key is still derived here, in the browser, from
+ * the link fragment that browsers never transmit — so the relay and the Worker still cannot
+ * decrypt anything. Relay-blind survives; the second factor does not.
+ *
+ * Do not reintroduce a passcode field here without also restoring the UI and the viewer
+ * prompt — a half-wired one would silently derive a key nobody else can match.
  */
 export interface DeriveOpts {
   streamId: string;
   salt?: string;
-  passcode?: string;
 }
 
 /**
- * Shared input keying material: the link secret, optionally with a stretched passcode mixed
- * in. Both the media key and the chat key derive from this, so a passcode protects the whole
- * session and rotating a salt re-keys all of it at once.
+ * Shared input keying material: the link secret. Both the media key and the chat key derive
+ * from this, so rotating a salt re-keys all of it at once.
  */
-async function deriveIkm(secretB64url: string, opts: DeriveOpts): Promise<Uint8Array> {
-  const enc = new TextEncoder();
-  const ikm = b64urlToBytes(secretB64url);
-  if (!opts.passcode) return ikm;
-
-  // Stretch the passcode before mixing so a short, human-chosen value is not the weak link.
-  const pk = await crypto.subtle.importKey("raw", enc.encode(opts.passcode), "PBKDF2", false, ["deriveBits"]);
-  const stretched = new Uint8Array(
-    await crypto.subtle.deriveBits(
-      { name: "PBKDF2", hash: "SHA-256", salt: enc.encode(`wf-pass|${opts.streamId}`), iterations: 210000 },
-      pk,
-      256
-    )
-  );
-  const mixed = new Uint8Array(ikm.length + stretched.length);
-  mixed.set(ikm, 0);
-  mixed.set(stretched, ikm.length);
-  return mixed;
+async function deriveIkm(secretB64url: string, _opts: DeriveOpts): Promise<Uint8Array> {
+  return b64urlToBytes(secretB64url);
 }
 
 /**

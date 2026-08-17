@@ -754,7 +754,11 @@ async function handleStreamRoutes(
 
     return Response.json({
       stream_id: streamId,
-      require_auth: stream?.require_auth === 1,
+      // Same default as /route and the checkbox: no row means REQUIRED, so the box a
+      // broadcaster sees ticked matches what the Worker will actually enforce. These three
+      // defaults have to agree — if the UI and the gate ever disagree, the UI is the one
+      // that lies.
+      require_auth: (stream?.require_auth ?? 1) === 1,
       overlay_html: stream?.overlay_html || "",
       encrypted: true, // mandatory for every stream; the column is retained but no longer authoritative
       chat_enabled: stream?.chat_enabled === 1,
@@ -843,11 +847,22 @@ async function handleStreamRoutes(
     // (require_auth = 0) mint for anyone. Checked before we assign any relay so an
     // unauthorized viewer never provisions capacity. Future policies (allow-list, paid,
     // geo) are just additional "decide whether to mint" checks here; the relay has no ACL.
+    // FAILS CLOSED on a missing row, and that is the whole point of the `?? 1`.
+    //
+    // A `streams` row only exists once settings have been saved. Wallflower reads
+    // `streamCfg?.require_auth === 1`, so a stream nobody saved settings for is OPEN — which
+    // is harmless there because the passcode is doing the protecting regardless. Here the
+    // passcode is gone, so the same expression would mean a stream with no access control at
+    // all, reachable by anyone the link was forwarded to, at exactly the moment a broadcaster
+    // has done the least configuration.
+    //
+    // Unknown therefore means REQUIRED. A broadcaster who genuinely wants an open stream
+    // unticks the box, which writes a row saying so.
     const streamCfg = await env.DB
       .prepare("SELECT require_auth FROM streams WHERE stream_id = ?")
       .bind(streamId)
       .first<{ require_auth: number }>();
-    if (streamCfg?.require_auth === 1) {
+    if ((streamCfg?.require_auth ?? 1) === 1) {
       const user = await getAuthenticatedUser(request, env);
       if (!user) {
         return Response.json({ error: "Authentication required" }, { status: 401 });
@@ -1096,7 +1111,11 @@ async function handleStreamRoutes(
       return Response.json({ error: "That stream belongs to another account." }, { status: 403 });
     }
 
-    const requireAuth = body.require_auth !== undefined ? body.require_auth : (current?.require_auth === 1);
+    // Default TRUE when this stream has no row yet, matching the checkbox's default state and
+    // the fail-closed read in /route. `current?.require_auth === 1` would default a brand-new
+    // stream to open the first time any OTHER setting (chat, overlay) was saved.
+    const requireAuth =
+      body.require_auth !== undefined ? body.require_auth : (current ? current.require_auth === 1 : true);
     const overlayHtml = body.overlay_html !== undefined ? body.overlay_html : (current?.overlay_html || "");
     const isEncrypted = body.encrypted !== undefined ? body.encrypted : (current?.encrypted === 1);
     const chatEnabled = body.chat_enabled !== undefined ? body.chat_enabled : (current?.chat_enabled === 1);

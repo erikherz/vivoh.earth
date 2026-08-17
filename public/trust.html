@@ -84,7 +84,7 @@
     </tr>
     <tr>
       <td>Your viewers</td>
-      <td>The stream, if you gave them both the link and the passcode</td>
+      <td>The stream, if you gave them the link &mdash; and, when sign-in is required, if they are signed in</td>
       <td>Anything else</td>
     </tr>
     <tr>
@@ -154,24 +154,30 @@
     key, and send it through a channel you trust.
   </p>
 
-  <h3>The passcode is the second lock, and it is always on</h3>
+  <h3>Requiring sign-in is the second lock, and it is on by default</h3>
   <p>
-    Every broadcast has a passcode from the moment you open the page. There is nothing to switch
-    on, and no way to turn it off, so the link alone is never enough to watch. It is deliberately
-    not part of the link — send it separately, by a different app or out loud. Intercepting one
-    channel gets an eavesdropper nothing.
+    The link carries the key, so anyone it reaches can decrypt the video. What decides whether
+    they can <em>receive</em> it is <strong>Require sign-in</strong>, which is ticked for every
+    new broadcast: we refuse to connect anyone who is not signed in to Vivoh.Earth, and the
+    broadcaster can see exactly who is watching, by name.
   </p>
   <p>
-    It used to be optional and off by default, which failed twice over: a protection nobody
-    enables protects nobody, and switching it on <em>after</em> sharing left the links already
-    sent without the marker that tells a viewer to ask for it — so those people were never
-    prompted and simply saw a black player. Making it mandatory removes both failures, because
-    there is no longer an "after".
+    Be exact about the difference between the two locks, because it matters more than it looks.
+    The encryption does not depend on us and cannot be undone by us — the key never arrives here,
+    so we could not decrypt your stream if we were compelled to. The sign-in requirement is the
+    opposite: <strong>we</strong> enforce it, which means we are in a position to grant it, and in
+    principle to be compelled to.
   </p>
   <p>
-    Re-keying it mid-broadcast takes effect within a second or two: anyone watching with the old
-    passcode stops being able to decrypt, and your link doesn't change. (The change lands on the
-    next keyframe, so the picture they already have finishes first.)
+    Wallflower.tv, which shares this code, makes the other trade: a passcode mixed into the key
+    itself, so that nobody — including its operators — can let a viewer in. That is the right
+    design for an anonymous audience and the wrong one here, where broadcasters need to know who
+    is in the room. Vivoh.Earth does not have a passcode.
+  </p>
+  <p>
+    Turning a viewer's access off stops them joining immediately, and stops them continuing within
+    about two minutes, when the short-lived pass their browser holds expires and we decline to
+    issue another.
   </p>
 
   <h3>Or start a new link</h3>
@@ -213,8 +219,9 @@
       or is forwarded it — can watch. We can't revoke it for one person, because we can't decrypt
       it either. What you can do is cut off <em>everyone</em>: <strong>New link</strong> starts a
       fresh broadcast under a new address and a new key, so every copy of the old link stops
-      working — including ours, if we had kept one. A passcode is the finer instrument: it cuts
-      people off without changing your link or interrupting the broadcast.
+      working — including ours, if we had kept one. Requiring sign-in is the finer instrument: it
+      cuts off anyone without an account, and lets you see who the rest are, without changing
+      your link or interrupting the broadcast.
     </p>
   </div>
 

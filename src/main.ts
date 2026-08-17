@@ -668,16 +668,22 @@ function createAudienceBadge(inviteOnly: boolean): HTMLSpanElement {
 // surfaced at the moment a user reasons about privacy. Click toggles a small popover;
 // an outside click closes it.
 // The disclosure itself, without any affordance for revealing it. Split out so it can be
-// dropped into the passcode info panel (where it now lives) as well as behind the legacy
-// "Security details" link below.
+// dropped into the access-control info panel as well as behind the legacy "Security
+// details" link below.
+//
+// This text is the honest description of a DIFFERENT security model from Wallflower's, and
+// the differences are the whole point of it. Wallflower's says "it takes both halves" and
+// "we cannot lock anyone out of it for you". Neither is true here, and leaving that wording
+// in place would be the single most misleading thing on the page.
 function createSecurityBody(): HTMLDivElement {
   const body = document.createElement("div");
   body.className = "security-body";
   body.innerHTML =
     `<strong style="color:#f3f4f6;display:block;margin-bottom:6px;">What encryption does and doesn't cover</strong>` +
     `<ul style="margin:0;padding-left:16px;display:flex;flex-direction:column;gap:6px;">` +
-    `<li><strong>It takes both halves.</strong> The link carries a secret after the <code>#</code>, and the passcode is the other half — every broadcast has one, so a link on its own will not play. Send them by different routes; whoever ends up holding both can watch, and neither can be recalled. We cannot decrypt your stream, and equally cannot lock anyone out of it for you.</li>` +
-    `<li><strong>Revoking mid-stream.</strong> A passcode re-keys within a second or two and viewers holding the old one stop decrypting, without your link changing. (The change lands on the next keyframe, so the picture they already have finishes first.) <strong>New link</strong> is the blunter option: it starts a fresh broadcast, so every copy of the old link dies and everyone watching drops.</li>` +
+    `<li><strong>The link is the key.</strong> Everything after the <code>#</code> is the secret that decrypts your video, and your browser never sends it to us — so we cannot decrypt your stream even if we are asked to. It also means anyone the link reaches can decrypt it, so treat forwarding the link as granting access.</li>` +
+    `<li><strong>Who may watch is a separate question, and we answer it.</strong> With <strong>Require sign-in</strong> on, we refuse to connect anyone who is not signed in, and you can see exactly who is watching. That is real access control — and unlike the encryption, it depends on us: we are in a position to grant it, and could in principle be compelled to.</li>` +
+    `<li><strong>Revoking.</strong> Turning off a viewer's access stops them joining, and stops them continuing within about two minutes when their access pass expires. <strong>New link</strong> is the blunter option: it starts a fresh broadcast, so every copy of the old link dies and everyone watching drops.</li>` +
     `<li><strong>Metadata in the clear.</strong> Codec, resolution, frame timing and sizes, and track names are visible to the relay.</li>` +
     `<li><strong>Not DRM.</strong> Anyone allowed to watch can screen-capture the decoded video.</li>` +
     `</ul>`;
@@ -768,7 +774,6 @@ import {
   deriveMediaKey,
   deriveRouteTag,
   generateLinkSecret,
-  generatePasscode,
   decryptStats,
   resetMediaKey,
 } from "./crypto/media-crypto";
@@ -1111,28 +1116,20 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   // we cannot revoke that or recover it if the broadcaster loses it.
   let linkSecret = generateLinkSecret();
 
-  // The second secret, and MANDATORY — every broadcast has one from the moment this page
-  // loads. It is deliberately NOT in the link: the link travels by one channel and this by
-  // another, so intercepting either alone is insufficient. It is never sent to or checked by
-  // any server — it is mixed into the key derivation, so a wrong passcode simply produces a
-  // wrong key and the video fails to decrypt. Nothing anywhere can confirm a guess.
-  //
-  // It used to be a checkbox, off by default. Two things were wrong with that. A protection
-  // nobody switches on protects nobody, and worse, turning it on AFTER sharing left every
-  // already-distributed link without `&p=1` — so those viewers were never asked, derived the
-  // wrong key, and saw a black player with no explanation. Minting it up front means the flag
-  // is in the link from the first copy, and there is no "after" for it to be missed in.
-  let passcode: string = generatePasscode();
-
-  // Public HKDF salt, handed to us at go-live and to viewers by /route. Held here so a
-  // passcode change re-derives with the SAME salt — deriving with a different one would
-  // silently break the stream for everyone.
+  // Public HKDF salt, handed to us at go-live and to viewers by /route. Held here so that a
+  // re-key uses the SAME salt across both sides — deriving with different ones would silently
+  // break the stream for everyone.
   let activeSalt: string | undefined;
 
-  // `&p=1` tells a viewer to ask for the passcode. Not a secret, and carrying it in the
-  // fragment keeps the server entirely uninvolved in the question. Unconditional now.
+  // No `&p=1`. Wallflower appends it to tell a viewer to ask for a passcode; there is no
+  // passcode here, so the link carries the content key and nothing else.
+  //
+  // Which means the link is now the whole of the CRYPTOGRAPHIC story, and `require_auth` —
+  // on by default, see the checkbox below — is the access control. Anyone the link is
+  // forwarded to can decrypt the media; whether they can obtain a viewer token to receive it
+  // in the first place is a question the Worker answers, and it answers no without a session.
   const shareUrl = () =>
-    `${window.location.origin}/${streamId}#k=${linkSecret}&p=1`;
+    `${window.location.origin}/${streamId}#k=${linkSecret}`;
 
   console.log(`MoQplay Broadcast - Stream: ${streamId}`);
 
@@ -1221,25 +1218,16 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   const streamEncrypted = true;
   armPublisher();
 
-  // Passcode control. Re-deriving on every change is intentional and needs no knowledge of
-  // whether we are live yet: before go-live it is redundant (go-live derives again with the
-  // same inputs), and after go-live it re-keys the stream in place — which IS the revocation
-  // mechanism. Viewers holding the old passcode keep their connection and stop being able to
-  // decrypt, without the link changing.
+  // The passcode control lived here: a second secret, minted per broadcast, sent by another
+  // channel, mixed into key derivation. It is gone — see the note in crypto/media-crypto.ts
+  // for what that trades away. Access control is now the require-auth checkbox below.
+  //
+  // The security disclosure it carried is NOT gone; it moves to the access checkbox, which is
+  // the control a broadcaster now reasons about privacy with. Losing that disclosure entirely
+  // is how a page ends up quietly claiming more than it does.
   {
-    const value = document.getElementById("passcode-value");
-    const regen = document.getElementById("passcode-new");
-
-    // The honest caveats belong beside the access affordance. They used to hang off the
-    // require-auth toggle, which no longer exists in the markup — so this disclosure has been
-    // silently absent. The passcode control is now the thing a broadcaster reasons about
-    // privacy with, so it goes here.
-    // Both the guidance and the security disclosure live inside ONE panel behind the ⓘ
-    // button. They were a permanently visible sentence and a separate "Security details"
-    // link; together they made a control bar look like a document, and the disclosure is
-    // read-once material rather than something to keep on screen while broadcasting.
-    const info = document.getElementById("passcode-info");
-    const panel = document.getElementById("passcode-hint");
+    const info = document.getElementById("access-info");
+    const panel = document.getElementById("access-hint");
     panel?.appendChild(createSecurityBody());
     const setPanel = (open: boolean) => {
       panel?.classList.toggle("hidden", !open);
@@ -1250,53 +1238,8 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       setPanel(panel?.classList.contains("hidden") ?? false);
     });
 
-    const apply = async () => {
-      if (value) value.textContent = passcode;
-      copyBtn?.setAttribute("data-share-url", shareUrl());
-      await deriveMediaKey(linkSecret, { streamId, salt: activeSalt, passcode });
-    };
-
-    // Paint the passcode minted above, so the row is populated before anything is shared.
-    void apply();
-
-    regen?.addEventListener("click", () => {
-      passcode = generatePasscode();
-      spin(regen);
-      void apply();
-    });
-
-    // Copy. The passcode is deliberately sent through a different channel than the link, and
-    // retyping eight characters into that other channel is where a broadcaster gets it wrong.
-    const copyPass = document.getElementById("passcode-copy");
-    copyPass?.addEventListener("click", () => {
-      // Report through `title` and a class, NOT textContent: this button's content is an
-      // <svg>, and writing text into it would delete the icon permanently.
-      const original = copyPass.getAttribute("title") ?? "Copy passcode";
-      const done = (label: string) => {
-        copyPass.setAttribute("title", label);
-        copyPass.classList.add("copied");
-        window.setTimeout(() => {
-          copyPass.setAttribute("title", original);
-          copyPass.classList.remove("copied");
-        }, 1500);
-      };
-      // The clipboard API rejects when the document is not focused or permission is refused.
-      // Failing silently would leave the button looking broken, so fall back to selecting the
-      // passcode — the user can then copy it themselves, which is the thing they wanted.
-      navigator.clipboard?.writeText(passcode).then(
-        () => done("Copied"),
-        () => {
-          const range = document.createRange();
-          if (value) {
-            range.selectNodeContents(value);
-            const sel = window.getSelection();
-            sel?.removeAllRanges();
-            sel?.addRange(range);
-          }
-          done("Select & copy");
-        }
-      );
-    });
+    copyBtn?.setAttribute("data-share-url", shareUrl());
+    void deriveMediaKey(linkSecret, { streamId, salt: activeSalt });
   }
 
   // "Encrypted" is shown unconditionally again: media is encrypted in this browser and
@@ -1373,7 +1316,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       user,
       // Same secret and salt as the video, different HKDF context. Derived per use so a
       // passcode change or a go-live salt arriving late is picked up automatically.
-      chatKey: () => deriveChatKey(linkSecret, { streamId, salt: activeSalt, passcode }),
+      chatKey: () => deriveChatKey(linkSecret, { streamId, salt: activeSalt }),
     });
   };
   const closeChat = () => {
@@ -1434,9 +1377,22 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       const rows = vsViewers.length === 0
         ? `<tr><td colspan="2" class="empty">No active viewers</td></tr>`
         : vsViewers.map((v) => {
-            // Viewer locations are no longer collected, so there is nothing to place here
-            // beyond the fact that someone is watching. See renderGeoFlag below.
-            return `<tr><td>Viewer</td><td>${fmtDuration(v.started_at)}</td></tr>`;
+            // WHO, not just how many. This is the visible half of the security model: with
+            // Require sign-in on, every viewer holds an account, so a broadcaster sees their
+            // audience rather than a count of anonymous sessions.
+            //
+            // Anonymous rows are SHOWN, not hidden. They occur only when the requirement is
+            // off, and hiding them would let the count and the list disagree — leaving someone
+            // convinced they knew who was watching when they did not. Seeing "Anonymous" is
+            // precisely the cue to turn the checkbox back on.
+            //
+            // Escaped: name and email come from the OAuth provider and are chosen by the
+            // account holder. Same reasoning as the sign-in header.
+            const who = v.user_name
+              ? `<span class="viewer-name">${escapeHtml(v.user_name)}</span>` +
+                (v.user_email ? ` <span class="viewer-email">${escapeHtml(v.user_email)}</span>` : "")
+              : `<span class="viewer-anon">Anonymous</span>`;
+            return `<tr><td>${who}</td><td>${fmtDuration(v.started_at)}</td></tr>`;
           }).join("");
       vsPanel.innerHTML = `<table class="stats-table"><tbody>${rows}</tbody></table>`;
     };
@@ -1517,7 +1473,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         if (res?.encrypted || streamEncrypted) {
           activeSalt = res?.salt ?? undefined;
           armPublisher(); // idempotent; covers the case where settings load lost the race
-          await deriveMediaKey(linkSecret, { streamId, salt: activeSalt, passcode });
+          await deriveMediaKey(linkSecret, { streamId, salt: activeSalt });
         }
         if (res?.path) {
           // moq.pro (Mode A): the broadcast path travels in the connect URL, so `name`
@@ -2100,75 +2056,10 @@ function showWatchKeyMissing() {
     </div>`;
 }
 
-/**
- * Ask for the passcode the broadcaster sent by another channel. Resolves with what was
- * typed; nothing validates it here, because nothing can — the value is mixed into key
- * derivation and a wrong one just yields a key that does not decrypt. No request is made,
- * so no server learns that a guess happened, or whether it was right.
- */
-// Wallflower prompts for a publish key here. Nothing corresponds to it in this deployment:
-// a broadcaster is admitted by being signed in and on the allow list, and neither of those
-// is something they can supply from a dialog. Refusals surface as an error from go-live.
-
-/**
- * `first`   — we know from the link that a passcode is needed and have not asked yet.
- * `wrong`   — nothing has ever decrypted, so what they typed is not the passcode.
- * `rotated` — frames WERE decrypting and then stopped, which only happens when the
- *             broadcaster cycled the passcode mid-stream. Saying "didn't work" there blames
- *             the viewer for something that happened at the other end.
- */
-type PasscodeAsk = "first" | "wrong" | "rotated";
-
-function promptPasscode(ask: PasscodeAsk = "first"): Promise<string | null> {
-  const TITLE: Record<PasscodeAsk, string> = {
-    first: "This stream needs a passcode",
-    wrong: "That passcode didn't work",
-    rotated: "The broadcaster changed the passcode",
-  };
-  const BODY: Record<PasscodeAsk, string> = {
-    first: "The broadcaster set a passcode and sent it to you separately from this link.",
-    wrong: "The stream is playing, but not with that passcode. Check it and try again.",
-    rotated: "This stream re-keyed while you were watching. Enter the new passcode to carry on.",
-  };
-  // Overlay, NOT a replacement for the section's contents. Rewriting the section's innerHTML
-  // destroys the <moq-watch> element the player lives in, so the stream can never render
-  // afterwards however correct the passcode is.
-  const overlay = document.createElement("div");
-  overlay.style.cssText =
-    "position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;" +
-    "background:rgba(0,0,0,0.82);backdrop-filter:blur(2px);padding:20px;";
-  overlay.innerHTML = `
-    <div style="max-width:26em;text-align:center;color:#e5e5e5;">
-      <h2 style="margin:0 0 10px;font-size:1.25rem;">${TITLE[ask]}</h2>
-      <p style="margin:0 0 16px;color:#a3a3a3;line-height:1.5;">${BODY[ask]}</p>
-      <div style="display:flex;gap:8px;justify-content:center;">
-        <input id="passcode-entry" type="text" autocomplete="off" autocapitalize="characters"
-               spellcheck="false" placeholder="passcode"
-               style="padding:9px 12px;font-family:ui-monospace,monospace;font-size:1.05rem;
-                      letter-spacing:0.12em;text-transform:uppercase;width:11em;border-radius:4px;
-                      border:1px solid #4a4a4a;background:#1a1a1a;color:#e5e5e5;">
-        <button id="passcode-go"
-                style="padding:9px 18px;border-radius:4px;border:0;background:#33ddc0;
-                       color:#0a0a0a;font:inherit;font-weight:600;cursor:pointer;">Watch</button>
-      </div>
-    </div>`;
-  document.body.appendChild(overlay);
-
-  return new Promise((resolve) => {
-    const input = overlay.querySelector("#passcode-entry") as HTMLInputElement | null;
-    const submit = () => {
-      const v = input?.value.trim().toUpperCase();
-      if (!v) return;
-      overlay.remove();
-      resolve(v);
-    };
-    overlay.querySelector("#passcode-go")?.addEventListener("click", submit);
-    input?.addEventListener("keypress", (e) => {
-      if ((e as KeyboardEvent).key === "Enter") submit();
-    });
-    input?.focus();
-  });
-}
+// promptPasscode() and its first/wrong/rotated variants lived here. There is no second
+// secret to ask for: the key is the link. A viewer whose link does not decrypt is told so
+// by the stuck-player watchdog, which can distinguish a stale salt (re-derivable) from a
+// genuinely wrong link (not), rather than asking them to type something that cannot help.
 
 // ── Reacting to a kill ────────────────────────────────────────────────────────────────
 // Kill is enforced server-side at /route and at go-live, but both are request-time checks and
@@ -2361,27 +2252,17 @@ function openReportDialog(streamId: string): void {
     select.appendChild(opt);
   }
 
-  // What the link actually gives away depends on whether this stream has a passcode. The link
-  // carries `#k=` and, when a passcode is set, only the marker `p=1` — never the passcode
-  // itself, which the viewer typed and which is mixed into key derivation separately. So on a
-  // passcode stream the link ALONE decrypts nothing, and describing it as "the key" would be
-  // asking someone to hand something over under a false account of what it unlocks.
-  const passcodeProtected = new URLSearchParams(location.hash.replace(/^#/, "")).get("p") === "1";
-
-  // Name everything decryption actually requires. On a passcode stream the link is only half
-  // of it, and saying "the link" alone understates what protects this broadcaster.
-  const takes = card.querySelector("#report-what-it-takes");
-  if (takes && passcodeProtected) takes.textContent = "the link and the passcode you were given";
-
+  // There is no passcode variant to account for any more: the link carries `#k=` and that is
+  // the whole of the key material, so attaching it really does hand over the ability to
+  // decrypt. Wallflower has to hedge this text because on a passcode stream the link alone
+  // unlocks nothing — asking someone to share it under a false account of what it unlocks
+  // would be the wrong way round. Here the plain statement is the accurate one.
   const detail = card.querySelector("#report-evidence-detail");
   if (detail) {
-    detail.textContent = passcodeProtected
-      ? " This stream also has a passcode, which is not part of your link — so the link alone " +
-        "will not let them watch. Put the passcode in the box above too if you want them to be " +
-        "able to check. Otherwise they will act on your description alone."
-      : " Your link contains the key that decrypts this stream. Ticking this shares it with the " +
-        "operator, letting them see the stream before deciding. Leave it unticked and they will " +
-        "act on your description alone.";
+    detail.textContent =
+      " Your link contains the key that decrypts this stream. Ticking this shares it with the " +
+      "operator, letting them see the stream before deciding. Leave it unticked and they will " +
+      "act on your description alone.";
   }
 
   // Reconcile with the server. The evidence option appears only if there is a webhook to send
@@ -2590,11 +2471,10 @@ async function initWatchView(streamId: string, user: User | null) {
 
   console.log(`MoQplay Watch - Stream: ${streamId}`);
 
-  // Link secret and passcode, populated once the encryption block below runs. Declared here
-  // because the chat panel is created earlier in this function and derives its key lazily
-  // from whatever these hold at the moment a message is sent or received.
+  // Link secret, populated once the encryption block below runs. Declared here because the
+  // chat panel is created earlier in this function and derives its key lazily from whatever
+  // these hold at the moment a message is sent or received.
   let watchLinkSecret = "";
-  let watchPasscode: string | undefined;
   let watchSalt: string | undefined;
 
   // Show watch view, hide broadcast view
@@ -2627,7 +2507,7 @@ async function initWatchView(streamId: string, user: User | null) {
       streamId,
       container: watchChatPanel,
       user,
-      chatKey: () => deriveChatKey(watchLinkSecret, { streamId, salt: watchSalt, passcode: watchPasscode }),
+      chatKey: () => deriveChatKey(watchLinkSecret, { streamId, salt: watchSalt }),
     });
   };
   const closeWatchChat = () => {
@@ -2744,23 +2624,12 @@ async function initWatchView(streamId: string, user: User | null) {
         showWatchKeyMissing();
         return;
       }
-      // `p=1` means the broadcaster mixed a passcode in. Ask before connecting so the key is
-      // complete when the first frame arrives.
-      let passcode: string | undefined;
-      if (frag.get("p") === "1") {
-        const entered = await promptPasscode();
-        if (!entered) return;
-        passcode = entered;
-        watchPasscode = entered;
-        // A wrong passcode looks exactly like a stalled stream at the pixel level. The
-        // stuck-player watchdog further down owns saying so: it polls the decrypt counters, so
-        // it can tell a wrong key from a dead decoder and re-prompt without a reload. A
-        // one-shot timer here used to do it, and had to go — it fired on a timer rather than on
-        // evidence, and would now race the watchdog into a second overlay.
-      }
+      // No passcode prompt. Wallflower asks here when the link carries `p=1`; this deployment
+      // has no second secret, so the `#k=` fragment is the whole of the key material and the
+      // stream decrypts (or does not) on the strength of the link alone.
       watchSalt = routeInfo.salt ?? undefined;
       armViewer();
-      await deriveMediaKey(linkSecret, { streamId, salt: watchSalt, passcode });
+      await deriveMediaKey(linkSecret, { streamId, salt: watchSalt });
 
       // Tell the viewer what protects what, where they form the expectation.
       const sec = document.querySelector("#watch-view section") as HTMLElement | null;
@@ -3015,6 +2884,9 @@ async function initWatchView(streamId: string, user: User | null) {
     let lastStats = decryptStats();
     let blankPolls = 0;
     let recovering = false;
+    // Latched, so a link that cannot decrypt says so ONCE rather than rebuilding the overlay
+    // every poll for as long as the tab is open.
+    let keyMismatchReported = false;
 
     const watchdog = window.setInterval(async () => {
       if (recovering) return;
@@ -3028,16 +2900,30 @@ async function initWatchView(streamId: string, user: User | null) {
       // the settings poll owns "terminated" and the route poll owns "offline".
       if (gotFrames === 0 && failed === 0) { blankPolls = 0; return; }
 
+      // Frames are arriving and every one is failing authentication: the key we derived does
+      // not match the key they were encrypted with.
+      //
+      // Wallflower re-prompts for the passcode here, because that was the input a viewer could
+      // fix. Nothing here is fixable by asking — the key comes from the link, and a link that
+      // does not decrypt is the wrong link or a stale one. The remaining honest cause is a
+      // salt rotation we have not picked up yet, so re-derive once from the CURRENT route
+      // before concluding anything; only if that still fails do we say so.
       if (gotFrames === 0 && failed > 0) {
         recovering = true;
         try {
-          const entered = await promptPasscode(watchPasscode ? "rotated" : "wrong");
-          if (entered) {
-            watchPasscode = entered;
-            await deriveMediaKey(watchLinkSecret, { streamId, salt: watchSalt, passcode: entered });
-            // The decoder may already have died on the frames that failed before this. Let the
-            // painting branch below notice on a later tick and swap the element.
+          const fresh = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag });
+          const freshSalt = fresh?.salt ?? undefined;
+          if (fresh && freshSalt !== watchSalt) {
+            // The broadcaster re-keyed. Pick up the new salt and carry on without bothering
+            // the viewer, which is the whole point of the salt riding on /route.
+            watchSalt = freshSalt;
+            await deriveMediaKey(watchLinkSecret, { streamId, salt: watchSalt });
             blankPolls = 0;
+          } else if (!keyMismatchReported) {
+            // Same salt, still nothing decrypts. This link cannot play this stream, and
+            // saying "still loading" forever would be the dishonest answer.
+            keyMismatchReported = true;
+            showWatchKeyMissing();
           }
         } finally {
           recovering = false;

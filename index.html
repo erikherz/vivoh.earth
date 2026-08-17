@@ -480,6 +480,24 @@
         }
         /* Matches the toggle labels beside it, minus the checkbox affordance — this one
            states a fact rather than offering a choice. */
+        /* The access checkbox reads as a sentence, not a bare tickbox: "Require sign-in to
+           watch" says what happens, where "Auth" would need decoding. Same lesson as the
+           control bar under the video. */
+        .viewer-name { color: var(--text-primary); }
+        .viewer-email { color: var(--text-secondary); font-size: 0.8em; }
+        /* Deliberately dimmer and italic: an unidentified viewer should look like the
+           exception it is, not like a person called Anonymous. */
+        .viewer-anon { color: var(--text-secondary); font-style: italic; }
+        .access-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            cursor: pointer;
+            user-select: none;
+        }
+        .access-label input { cursor: pointer; }
         .passcode-label {
             font-size: 0.875rem;
             color: var(--text-secondary);
@@ -1727,7 +1745,7 @@
                     <div class="info-card">
                         <span class="card-icon">🔒</span>
                         <h4><a href="/trust" class="card-link">How you're protected</a></h4>
-                        <p>Your browser encrypts every frame before it leaves. The key is derived from two secrets we never receive &mdash; the one in your share link, and a passcode you send by another route &mdash; so we cannot watch your broadcast, and could not hand it over if we were asked. No account, no email, no location data. <a href="/trust">What we can and cannot see &rarr;</a></p>
+                        <p>Your browser encrypts every frame before it leaves. The key lives in your share link and never reaches us, so we cannot watch your broadcast and could not hand it over if we were asked. Who may watch is a separate question, and one you control: require sign-in and only people you can see get in. <a href="/trust">What we can and cannot see &rarr;</a></p>
                     </div>
                 </div>
             </div>
@@ -1767,37 +1785,30 @@
                      next to the stream id and the passcode. It is something the broadcaster
                      switches on for the room, alongside the camera and the overlay editor, so
                      its button lives in the capture control bar under the video. -->
+                <!-- Access control. This replaces the passcode row Wallflower carries here, and
+                     it is a different KIND of protection: a passcode was a second secret mixed
+                     into key derivation that no server could work around, whereas this asks US
+                     to refuse the connection. Checked by default — with no passcode, an
+                     unchecked box would leave the link as the only thing between a stream and
+                     whoever it gets forwarded to. -->
                 <div class="toggle-row">
-                    <!-- Not a toggle. Every broadcast carries a passcode, so the link alone is
-                         never sufficient to watch. -->
-                    <span class="passcode-label">Passcode</span>
-                    <div id="passcode-box" class="passcode-box">
-                        <code id="passcode-value"></code>
-                        <button type="button" id="passcode-copy" class="copy-icon-btn icon-sm" title="Copy passcode">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-                            </svg>
-                        </button>
-                        <button type="button" id="passcode-new" class="copy-icon-btn icon-sm" title="New passcode — re-keys the stream and cuts off viewers using the old one">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
-                                <polyline points="21 3 21 9 15 9"/>
-                            </svg>
-                        </button>
-                        <button type="button" id="passcode-info" class="copy-icon-btn icon-sm" aria-expanded="false" aria-controls="passcode-hint" title="How this protects you">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <circle cx="12" cy="12" r="10"/>
-                                <line x1="12" y1="16" x2="12" y2="12"/>
-                                <line x1="12" y1="8" x2="12.01" y2="8"/>
-                            </svg>
-                        </button>
-                    </div>
+                    <label class="access-label">
+                        <input type="checkbox" id="require-auth-checkbox" checked>
+                        <span>Require sign-in to watch</span>
+                    </label>
+                    <button type="button" id="access-info" class="copy-icon-btn icon-sm" aria-expanded="false" aria-controls="access-hint" title="How this protects you">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"/>
+                            <line x1="12" y1="16" x2="12" y2="12"/>
+                            <line x1="12" y1="8" x2="12.01" y2="8"/>
+                        </svg>
+                    </button>
                 </div>
-                <div id="passcode-hint" class="passcode-hint hidden" role="region" aria-label="How this protects you">
+                <div id="access-hint" class="passcode-hint hidden" role="region" aria-label="How this protects you">
                     <p class="passcode-hint-lead">
-                        Send this separately from the link. The refresh icon re-keys the stream
-                        and cuts off viewers using the old passcode.
+                        On, only people signed in to Vivoh.Earth can watch, and the eye icon
+                        above shows you who they are. Off, anyone with the link can watch
+                        anonymously.
                     </p>
                 </div>
             </div>
@@ -1835,7 +1846,7 @@
             <div id="howitworks-panel" class="server-panel hidden">
                 <div class="security-panel">
                     <p>When you go live, your browser captures and encodes the media with native <strong>WebCodecs</strong>, <strong>encrypts every frame</strong>, and publishes it to the <strong>moq.pro</strong> CDN over <strong>QUIC</strong>. Viewers subscribe from the nearest relay and decrypt in the page. The CDN carries only ciphertext it cannot read.</p>
-                    <p>The key never reaches us. It is derived in your browser from two secrets, and we receive neither: one lives in the part of the share link after the <code>#</code>, which browsers never send to a server, and the other is the <strong>passcode</strong> &mdash; every broadcast has one, and it is deliberately not in the link. So a link tunes a viewer in but will not decrypt on its own; send the two by different routes and intercepting either alone is worthless. <strong>We could not watch your broadcast if we were asked to.</strong></p>
+                    <p>The key never reaches us. It is derived in your browser from the part of the share link after the <code>#</code>, which browsers never send to a server. <strong>We could not watch your broadcast if we were asked to.</strong></p><p>The other side of that: the link <em>is</em> the key, so anyone it reaches can decrypt. What stops them is <strong>Require sign-in</strong>, which is on by default &mdash; we refuse to connect anyone who is not signed in, and you see exactly who is watching. Be clear about the difference: the encryption does not depend on us and cannot be undone by us, while the access control does and can. We are in a position to grant it, and in principle to be compelled to.</p>
                     <p>Each broadcast is reached through a short-lived <strong>moq.pro</strong> access token minted by Vivoh.Earth's own Cloudflare Worker. It is signed with a key whose public half alone was given to moq.pro, so the CDN can check our tokens and cannot forge one. Live chat is encrypted the same way: messages and display names are sealed in your browser under a key derived from the same link, so the chat server relays text it cannot read. That also means there is no moderation of chat &mdash; there is nothing for us to moderate.</p>
                     <!-- Both further-reading links sit at the foot of this panel rather than in
                          the footer row. Someone who has just read what the transport is and what

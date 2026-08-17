@@ -6,18 +6,28 @@
   a share link; the admin password has no business in that document, and nothing here should
   ever be imported into the bundle.
 
-  What this page can and cannot show, because the distinction is the whole design:
+  What this page shows, and what that costs — because Vivoh.Earth made a different trade
+  here than Wallflower did, and the page must not describe the other one.
 
-    A row is a SESSION — one browser tab that watched, and for how long. It is NOT a person.
-    Nothing stored anywhere in Vivoh.Earth is stable across sessions: no IP, no IP hash, no
-    cookie, no fingerprint. So "how many watched and for how long" is answerable here, and
-    "which of these rows is the same human", or "did this person also watch that stream", is
-    not — not by this page, not by a query, not by whoever ends up holding the database.
+    A row is a SESSION, and where the viewer was signed in it is ATTRIBUTED: watch_events
+    carries a user_id, a foreign key to a real account. So "which of these rows is the same
+    human" and "did this person also watch that stream" ARE answerable here — by this page,
+    by a query, and by whoever ends up holding the database.
 
-    That is a deliberate ceiling, not a missing feature. One reload looks like two viewers,
-    and that inaccuracy is the price of the property. Anything that fixed it would be a
-    cross-session identifier, which for a journalist's audience is the difference between
-    being counted and being catalogued.
+    That is deliberate. Broadcasters here require sign-in and expect to see who is watching;
+    an audience they cannot name is not the feature they asked for. But it is the opposite of
+    Wallflower's design, whose text this file used to carry: it claimed nothing stored was
+    stable across sessions and that cross-stream correlation was impossible. That stopped
+    being true the moment OAuth was switched on, and leaving the claim in place would have
+    been the most misleading sentence on the site.
+
+    What is still NOT collected: no IP, no IP hash, no fingerprint, no location. The
+    identifier here is an account someone chose to sign in with, not something inferred about
+    them. And the session token in each row is stored only as a hash, so a leaked database
+    cannot be replayed as a viewing session.
+
+    Anonymous rows appear when a broadcaster turned the sign-in requirement off. They carry no
+    user_id and cannot be correlated with anything.
 -->
 <html lang="en">
 <head>
