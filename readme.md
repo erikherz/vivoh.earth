@@ -141,10 +141,11 @@ intended failure direction.
 npm run deploy   # vite build + wrangler deploy
 ```
 
-`.github/workflows/deploy.yml` also deploys on push to `main`, and needs
-`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` in the repository secrets. Deploys during
-the August 2026 port were run manually with the command above; if you merge to `main`,
-expect the action to fire.
+That command is the whole deploy path. There is deliberately **no CI deploy**: a GitHub
+Action used to run on push to `main`, and it had never once succeeded — `CLOUDFLARE_API_TOKEN`
+was never set, so every push produced a red X while the build itself was fine. It was removed
+rather than fixed, because a workflow one secret away from deploying to production on every
+push is a thing to opt into consciously, not to inherit.
 
 D1 migrations live in `src/worker/db/migrations/`; apply new ones with
 `wrangler d1 execute vivoh-earth-db --remote --file=<migration>` **before** deploying code
