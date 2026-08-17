@@ -2857,10 +2857,66 @@ async function initWatchView(streamId: string, user: User | null) {
         ? [moqUrl(fresh.relay, fresh.path, fresh.jwt ?? ""), { name: "", catalogFormat: "hang" }]
         : [`https://${fresh.relay}/?jwt=${fresh.jwt}`, { name: streamName, catalogFormat: null }];
 
-      // Either way we reschedule: on failure the old element still has a few seconds of token
-      // left, and the next attempt tries again with a newer one.
-      await swapInPlayer(url, "token", form);
+      // Renew WITHOUT rebuilding the player if we possibly can, because the rebuild is what
+      // silences Safari and iOS.
+      //
+      // Measured (scripts/e2e/audio-across-renewal.mjs): every swap builds a NEW AudioContext.
+      // The context's own currentTime resets — 87.5 then 1.9 — which is proof, where an
+      // earlier comparison of sampleRate was not, since both are 48000. On Chrome that new
+      // context auto-starts because the document still holds sticky activation, so the harness
+      // reads perfectly healthy. Safari and iOS want TRANSIENT activation, so a context built
+      // ninety seconds later by a timer starts suspended, and no amount of resuming it from
+      // outside recovers it — five attempts, three of which broke working audio outright.
+      //
+      // CAVEAT, measured after writing this: re-pointing does NOT save the AudioContext.
+      // Changing the url resets source.config, which re-runs the effect that builds the
+      // context, so it is rebuilt either way and Safari is no better off. What this DOES buy
+      // is avoiding the element swap entirely — one element throughout, no video interruption,
+      // bytes flowing continuously across the renewal. Keep it for that; do not mistake it for
+      // a fix to the Safari audio problem, which needs a product decision about token TTL or a
+      // visible tap-to-restore affordance.
+      if (!(await renewInPlace(url))) {
+        // Either way we reschedule: on failure the old element still has a few seconds of
+        // token left, and the next attempt tries again with a newer one.
+        await swapInPlayer(url, "token", form);
+      }
       scheduleRenewal(fresh.jwt);
+    }
+
+    /**
+     * Point the EXISTING element at a new URL and confirm frames genuinely resume.
+     *
+     * The success check is the whole difficulty, and a previous version got it wrong in a way
+     * worth not repeating: it sampled the decrypt counter immediately, but the OLD connection
+     * keeps delivering for a moment after the url changes, so those in-flight frames read as
+     * success. The renewal then skipped its own fallback and the player froze permanently when
+     * the old connection finally died.
+     *
+     * So: let the old connection drain first, THEN start counting. Frames arriving after the
+     * drain window can only be coming from the new connection.
+     *
+     * Renewal fires at 75% of token lifetime — around 30s of headroom — so spending 8s here
+     * is free, and the fallback still has plenty of time to run.
+     */
+    async function renewInPlace(url: string): Promise<boolean> {
+      const started = performance.now();
+      live.setAttribute("url", url);
+
+      // Drain: anything still arriving from the old subscription lands in here and is not
+      // counted as evidence of anything.
+      await new Promise((r) => setTimeout(r, 2500));
+      const baseline = decryptStats().successes;
+
+      const deadline = performance.now() + 5500;
+      while (performance.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 250));
+        if (decryptStats().successes > baseline + 10) {
+          console.log(`[token] renewed in place in ${(performance.now() - started).toFixed(0)}ms (no player swap; the audio pipeline IS still rebuilt)`);
+          return true;
+        }
+      }
+      console.warn("[token] in-place renewal produced no post-drain frames; falling back to a player swap");
+      return false;
     }
 
     scheduleRenewal(routeInfo.jwt);
