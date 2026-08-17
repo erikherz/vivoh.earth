@@ -1021,22 +1021,8 @@ function showLoginRequired() {
   overlay.id = "login-overlay";
   overlay.innerHTML = `
     <div class="login-required">
-      <div class="watch-stream-section">
-        <h2>Enter Stream ID to Watch</h2>
-        <div class="watch-stream-input-row">
-          <input type="text" id="watch-stream-id-input" maxlength="5" placeholder="xxxxx" autocomplete="off" spellcheck="false">
-          <button id="watch-stream-go-btn" type="button" title="Go to stream">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10"/>
-              <polyline points="12 16 16 12 12 8"/>
-              <line x1="8" y1="12" x2="16" y2="12"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-      <div class="login-divider"><span>or</span></div>
-      <h2>Sign in to Broadcast</h2>
-      <p>Please sign in with one of the following to start broadcasting:</p>
+      <h2>Sign in to broadcast</h2>
+      <p>Watching needs no account — just the link someone sent you. Broadcasting does.</p>
       <div class="auth-buttons">
         <button id="overlay-login-google" class="btn btn-google">
           <svg viewBox="0 0 24 24" width="18" height="18">
@@ -1071,30 +1057,18 @@ function showLoginRequired() {
   document.getElementById("overlay-login-microsoft")?.addEventListener("click", loginWithMicrosoft);
   document.getElementById("overlay-login-discord")?.addEventListener("click", loginWithDiscord);
 
-  // Watch stream functionality
-  const watchInput = document.getElementById("watch-stream-id-input") as HTMLInputElement;
-  const watchGoBtn = document.getElementById("watch-stream-go-btn");
-
-  const goToStream = () => {
-    const streamId = watchInput.value.trim().toLowerCase();
-    if (streamId.length !== 5) {
-      alert("Stream IDs are five characters long");
-      watchInput.focus();
-      return;
-    }
-    window.open(`/${streamId}`, "_blank");
-  };
-
-  watchGoBtn?.addEventListener("click", goToStream);
-  watchInput?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      goToStream();
-    }
-  });
-  // Auto-lowercase input
-  watchInput?.addEventListener("input", () => {
-    watchInput.value = watchInput.value.toLowerCase();
-  });
+  // REMOVED: an "Enter Stream ID to Watch" box that navigated to `/<id>` with no fragment.
+  //
+  // It could not work, and failed dishonestly. A live broadcast registers a route_tag derived
+  // from the link secret, and /api/streams/:id/route answers 404 "offline" to anyone who
+  // cannot present it — deliberately, so that sweeping the id space reveals nothing. A bare
+  // id has no fragment, so no tag, so a correct and currently-live stream id was reported as
+  // offline. Past that it would still have had no `#k=`, hence no content key, hence nothing
+  // to decrypt.
+  //
+  // The share link is not one way in among several. It is the only one, because it carries
+  // both the decryption key and the proof that you were given it. Do not reinstate a
+  // watch-by-id control without changing that design first.
 }
 
 // Initialize broadcast view
