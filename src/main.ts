@@ -2927,20 +2927,48 @@ async function initWatchView(streamId: string, user: User | null) {
 
       const t0 = performance.now();
       let lastBytes = -1;
+      let lastVBytes = -1;
       let lastOk = -1;
       let stalledFor = 0;
+      let lastAudioMove = 0;
+      let lastVideoMove = 0;
+      let lastDecMove = 0;
+      // Which transport the page ACTUALLY chose. iOS Safari has no WebTransport and falls back
+      // to the WebSocket polyfill; every clean headless run used native WebTransport, so this
+      // is the single most important line for telling those two worlds apart.
+      const TRANSPORT = needsPolyfill ? "TRANSPORT=websocket-polyfill" : "TRANSPORT=native-webtransport";
 
       const tick = () => {
-        const a = (live as unknown as {
+        const el = live as unknown as {
           backend?: {
             audio?: {
               context?: { peek?: () => AudioContext | undefined };
               stats?: { peek?: () => { bytesReceived?: number } | undefined };
+              buffered?: { peek?: () => unknown };
+            };
+            video?: {
+              stats?: { peek?: () => { bytesReceived?: number } | undefined };
+              stalled?: { peek?: () => boolean };
+              timestamp?: { peek?: () => number };
             };
           };
-        })?.backend?.audio;
+          connection?: { established?: { peek?: () => unknown }; url?: { peek?: () => URL | undefined } };
+          broadcast?: { status?: { peek?: () => string }; active?: { peek?: () => unknown } };
+        };
+        const a = el?.backend?.audio;
+        const v = el?.backend?.video;
         const ctx = a?.context?.peek?.();
         const bytes = a?.stats?.peek?.()?.bytesReceived ?? -1;
+        // VIDEO bytes separately from audio. If both stop together the connection died; if
+        // only one stops it is that track's pipeline, which is a completely different fault.
+        const vbytes = v?.stats?.peek?.()?.bytesReceived ?? -1;
+        const vstalled = v?.stalled?.peek?.() ?? null;
+        const vts = v?.timestamp?.peek?.() ?? null;
+        // Is the CONNECTION still up? A live socket with no bytes means the relay stopped
+        // sending; a dead one means the transport dropped and nothing re-established it.
+        const conn = el?.connection?.established?.peek?.() ? "up" : "DOWN";
+        const bstatus = el?.broadcast?.status?.peek?.() ?? "?";
+        const bactive = el?.broadcast?.active?.peek?.() ? "yes" : "no";
         const { successes, failures } = decryptStats();
         const canvas = live.querySelector("canvas") as HTMLCanvasElement | null;
 
@@ -2951,15 +2979,26 @@ async function initWatchView(streamId: string, user: User | null) {
         lastBytes = bytes;
         lastOk = successes;
 
+        // Which counter froze FIRST is the diagnosis, so record when each last moved.
+        const nowS = (performance.now() - t0) / 1000;
+        if (bytes !== lastBytes) lastAudioMove = nowS;
+        if (vbytes !== lastVBytes) lastVideoMove = nowS;
+        if (successes !== lastOk) lastDecMove = nowS;
+        lastVBytes = vbytes;
+
+        const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
         panel.style.color = stalledFor >= 3 ? "#f87171" : "#4ade80";
         panel.textContent =
-          `up ${((performance.now() - t0) / 1000).toFixed(0)}s   ` +
-          `${stalledFor >= 3 ? `STALLED ${stalledFor}s` : "flowing"}\n` +
-          `bytes   ${bytes}\n` +
-          `decrypt ok ${successes}  fail ${failures}\n` +
+          `up ${nowS.toFixed(0)}s   ${stalledFor >= 3 ? `STALLED ${stalledFor}s` : "flowing"}\n` +
+          `conn    ${conn}  bcast=${bstatus}/${bactive}  ${TRANSPORT}\n` +
+          `audio B ${bytes}  (moved ${(nowS - lastAudioMove).toFixed(0)}s ago)\n` +
+          `video B ${vbytes}  (moved ${(nowS - lastVideoMove).toFixed(0)}s ago)  stalled=${vstalled}\n` +
+          `decrypt ok ${successes} fail ${failures}  (moved ${(nowS - lastDecMove).toFixed(0)}s ago)\n` +
+          `vts     ${vts === null ? "?" : Math.round(vts as number)}\n` +
           `canvas  ${canvas ? `${canvas.width}x${canvas.height}` : "none"}\n` +
-          `audio   ${ctx ? `${ctx.state} t=${ctx.currentTime.toFixed(1)}` : "no context"}  muted=${live.muted}\n` +
-          `page    ${document.visibilityState}`;
+          `actx    ${ctx ? `${ctx.state} t=${ctx.currentTime.toFixed(1)}` : "none"}  muted=${live.muted}\n` +
+          `page    ${document.visibilityState}` +
+          (mem ? `  heap ${(mem.usedJSHeapSize / 1048576).toFixed(0)}MB` : "");
       };
 
       tick();

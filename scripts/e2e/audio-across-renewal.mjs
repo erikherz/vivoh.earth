@@ -26,6 +26,23 @@ const browser = await puppeteer.launch({
 const page = await browser.newPage();
 await page.setViewport({ width: 1280, height: 720 });
 
+// WS_FALLBACK=1 reproduces what iOS Safari actually does.
+//
+// This matters more than it sounds. Headless Chrome has native WebTransport, so every run so
+// far exercised a transport an iPhone never uses: iOS Safari has no WebTransport and falls
+// back to the WebSocket polyfill (@moq/web-transport-ws, installed in main.ts when the global
+// is absent). A stall that only appears on iPhone, and never in 7 clean minutes here, is
+// exactly what a fallback-only problem looks like.
+//
+// Deleting the global BEFORE any page script runs is what makes the client take that branch.
+if (process.env.WS_FALLBACK === "1") {
+  await page.evaluateOnNewDocument(() => {
+    // @ts-ignore - removing it is the point
+    delete window.WebTransport;
+  });
+  console.log("(WS_FALLBACK: WebTransport removed; the client should install the WebSocket polyfill)");
+}
+
 // The client's own logs are the narrative: swaps, renewals, decoder errors.
 page.on("console", (m) => {
   const t = m.text();
