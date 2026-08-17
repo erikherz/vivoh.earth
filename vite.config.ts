@@ -156,9 +156,17 @@ function mediaCryptoPatch(): Plugin {
 }
 
 export default defineConfig({
-  // No @moq source patching: the hang elements run stock. Media flows in the clear
-  // (no E2E), and the WebSocket fallback is left intact for non-WebTransport browsers.
-  plugins: [],
+  // moq.pro (Mode A): the media-crypto seams are patched back IN, so media is encrypted in
+  // the browser and cdn.moq.pro carries ciphertext it cannot read.
+  //
+  // moqWebTransportOnly() stays OFF, deliberately. The two patches are independent: that one
+  // disabled @moq's WebSocket-vs-WebTransport race because the old tinymoq fleet had no WS
+  // endpoint. moq.pro does, so leaving it off keeps the WebSocket fallback working for
+  // iPhone and older Safari. Encryption does not conflict with it — the seams encrypt the
+  // frame payload beneath MoQ's framing, so whatever carries the session moves opaque bytes.
+  plugins: [mediaCryptoPatch()],
+  // The `buffer: "buffer/"` alias that used to live here existed only for pkarr's DHT record
+  // encoder. Nothing in the browser bundle touches node builtins now.
   build: {
     outDir: "dist",
     emptyDirBeforeWrite: true,

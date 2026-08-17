@@ -1,45 +1,75 @@
+/**
+ * Vivoh.Earth — MoQ broadcast/watch frontend + worker.
+ *
+ * Ported from Wallflower (2026-08-17). The client, Worker, schema and UX are Wallflower's;
+ * what differs, deliberately, is authentication: OAuth is ON here and is the ONLY publisher
+ * door. See the OAUTH section in src/worker/index.ts.
+ *
+ * Relay backend: moq.pro (Mode A). MOQ_PRO_JWK (preferred) or MOQ_PRO_K is set as a secret,
+ * so moqProAssignment() returns first and every broadcast goes through cdn.moq.pro with a
+ * per-broadcast token this Worker mints. The FLEET_* vars below are the DORMANT alternative
+ * path — they are read only when no MOQ_PRO_* secret is set. Moving to the tinymoq
+ * broker/fleet is a secret change plus these vars, not a code change.
+ *
+ *   wrangler secret put MOQ_PRO_JWK          (moq.pro asymmetric signing key)
+ *   wrangler secret put GOOGLE_CLIENT_ID     + GOOGLE_CLIENT_SECRET
+ *   wrangler secret put MICROSOFT_CLIENT_ID  + MICROSOFT_CLIENT_SECRET
+ *   wrangler secret put DISCORD_CLIENT_ID    + DISCORD_CLIENT_SECRET
+ *   wrangler secret put SESSION_SECRET       (signs the session cookie)
+ *   wrangler secret put ADMIN_PASSWORD       (bearer for /api/admin/*)
+ *
+ * Fail-closed: with no OAuth secrets set nobody can sign in, and with OAuth the only
+ * publisher door that means nobody can publish. That is the intended failure direction.
+ */
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "vivoh-earth",
-  "compatibility_date": "2025-01-01",
-  "main": "src/worker/index.ts",
-  "assets": {
-    "directory": "./dist",
-    "binding": "ASSETS"
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "vivoh-earth-db",
-      "database_id": "d59f23d3-8f25-4b1b-aef3-bf3a93a2a58e"
-    }
-  ],
-  "routes": [
-    {
-      "pattern": "vivoh.earth",
-      "custom_domain": true
-    },
-    {
-      "pattern": "www.vivoh.earth",
-      "custom_domain": true
-    }
-  ],
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "CHAT_ROOMS",
-        "class_name": "ChatRoom"
-      }
-    ]
-  },
-  "migrations": [
-    {
-      "tag": "v2",
-      "deleted_classes": ["MoqRelay"]
-    },
-    {
-      "tag": "v3",
-      "new_sqlite_classes": ["ChatRoom"]
-    }
-  ]
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "vivoh-earth",
+	"compatibility_date": "2025-01-01",
+	"main": "src/worker/index.ts",
+	"assets": {
+		"directory": "./dist",
+		"binding": "ASSETS"
+	},
+	// DORMANT unless every MOQ_PRO_* secret is unset — see the header note. Kept wired so the
+	// eventual move to the broker/fleet is config, not a port.
+	"vars": {
+		"FLEET_MODE": "brokered",
+		"FLEET_ENDPOINT": "https://moqcdn.net/cdn/assign"
+	},
+	// Closes viewing sessions whose heartbeat stopped (see scheduled() in the worker). One
+	// minute is the floor Cloudflare offers and the right one: the reaper's threshold is
+	// SESSION_STALE_SECONDS, so a slower tick would leave dead sessions counted as live for
+	// however long the gap is. Sessions are closed at their last heartbeat, not at reap time,
+	// so a late tick costs accuracy in the live badge but never in the recorded duration.
+	"triggers": {
+		"crons": ["* * * * *"]
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "vivoh-earth-db",
+			"database_id": "d59f23d3-8f25-4b1b-aef3-bf3a93a2a58e"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "CHAT_ROOMS",
+				"class_name": "ChatRoom"
+			}
+		]
+	},
+	// KEEP these tags as they are. This deployment has already applied v2 and v3; renumbering
+	// to match Wallflower's single "v1" would make Cloudflare try to re-create a class that
+	// already exists. The tag history is per-deployment state, not source you can port.
+	"migrations": [
+		{
+			"tag": "v2",
+			"deleted_classes": ["MoqRelay"]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": ["ChatRoom"]
+		}
+	]
 }

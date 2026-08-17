@@ -1,0 +1,271 @@
+<!doctype html>
+<!--
+  Public trust page. Written for a broadcaster deciding whether to use this, not for an
+  engineer — but it must never buy reassurance with a claim that is not true.
+  Every "cannot" here is a structural property with a test behind it, and the limits section
+  exists because a page that only lists strengths is not trustworthy.
+
+  Kept deliberately in sync with ~/Desktop/vivoh-security-*.pdf. If they disagree, the
+  PDF is the audited one and this is wrong.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How you're protected · Vivoh.Earth</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 5vh 20px 12vh; background: #0a0a0a; color: #e5e5e5;
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; justify-content: center;
+  }
+  main { width: 100%; max-width: 40em; }
+  h1 { font-size: 1.75rem; margin: 0 0 0.3em; font-weight: 650; letter-spacing: -0.01em; }
+  .lede { color: #a3a3a3; font-size: 1.05rem; margin: 0 0 2.2em; }
+  h2 { font-size: 1.1rem; margin: 2.4em 0 0.6em; font-weight: 600; color: #f5f5f5; }
+  h3 { font-size: 0.95rem; margin: 1.6em 0 0.3em; font-weight: 600; color: #d4d4d4; }
+  p { margin: 0 0 1em; color: #b5b5b5; }
+  a { color: #33ddc0; }
+  strong { color: #e5e5e5; font-weight: 600; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em;
+         background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 3px; padding: 1px 5px; }
+  .key { border-left: 2px solid #33ddc0; background: #101816; padding: 14px 18px; margin: 0 0 1.6em; }
+  .key p:last-child { margin-bottom: 0; }
+  .limit { border-left: 2px solid #8a6a2a; background: #17140e; padding: 14px 18px; margin: 0 0 1.2em; }
+  .limit p:last-child { margin-bottom: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 0.6em 0 1.6em; font-size: 0.92rem; }
+  th { text-align: left; padding: 8px 10px; background: #1a1a1a; color: #d4d4d4; font-weight: 600;
+       border-bottom: 1px solid #2a2a2a; }
+  td { padding: 8px 10px; border-bottom: 1px solid #1c1c1c; vertical-align: top; color: #b5b5b5; }
+  td:first-child { color: #d4d4d4; white-space: nowrap; }
+  ul { margin: 0 0 1.2em; padding-left: 1.2em; color: #b5b5b5; }
+  li { margin-bottom: 0.4em; }
+  .foot { margin-top: 3em; padding-top: 1em; border-top: 1px solid #222; color: #737373; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<main>
+
+  <h1>How you're protected</h1>
+  <p class="lede">
+    What Vivoh.Earth can and cannot see when you broadcast — and the parts we can't protect you
+    from, stated as plainly as the parts we can.
+  </p>
+
+  <div class="key">
+    <p>
+      <strong>We cannot watch your broadcast.</strong> Not as a policy we promise to keep, but
+      because the key doesn't exist on our side. Your browser encrypts every frame before it
+      leaves, using a key derived from a secret that lives only in the part of your share link
+      after the <code>#</code> — and browsers never send that part to a server.
+    </p>
+    <p>
+      So it never reaches our servers, our database, our logs, or the CDN that carries your
+      video. If we were asked for your stream, by anyone, we would have nothing to give.
+    </p>
+  </div>
+
+  <h2>What each party sees</h2>
+
+  <table>
+    <tr><th>Who</th><th>Sees</th><th>Cannot see</th></tr>
+    <tr>
+      <td>Us</td>
+      <td>That a broadcast happened, when, and how long</td>
+      <td>Your video, your audio, your chat, your location</td>
+    </tr>
+    <tr>
+      <td>The CDN</td>
+      <td>Encrypted bytes, your IP address, timing</td>
+      <td>Anything inside those bytes</td>
+    </tr>
+    <tr>
+      <td>Your viewers</td>
+      <td>The stream, if you gave them both the link and the passcode</td>
+      <td>Anything else</td>
+    </tr>
+    <tr>
+      <td>Everyone else</td>
+      <td>Nothing at all</td>
+      <td>Even encrypted bytes are out of reach without the link</td>
+    </tr>
+  </table>
+
+  <p>
+    Your broadcast is also not <em>announced</em> anywhere. There is no directory, no index, no
+    public listing, and nothing published to any outside network that would reveal a stream
+    exists or where it is being carried. The only way anyone learns about your broadcast is
+    because you sent them the link.
+  </p>
+
+  <h2>You are not an account</h2>
+
+  <p>
+    There is no sign-up, no email address, no password, and no profile. Broadcasting needs a
+    <strong>publish code</strong>, which you can <a href="/request">request in a few seconds</a>
+    without telling us anything about yourself. We don't store the code, so there is no record
+    connecting you to anything you broadcast — nothing for us to look up, and nothing for anyone
+    to compel from us.
+  </p>
+  <p>
+    Each broadcast also identifies itself with a fresh cryptographic key that is created in your
+    browser and never leaves it. That means your broadcasts are not linkable to each other, even
+    by us.
+  </p>
+
+  <h2>We collect no location data</h2>
+
+  <p>
+    None — not country, not city, not coordinates, for broadcasters or viewers. Earlier versions
+    of Vivoh.Earth did record broadcaster location. Those records were deleted, the columns that
+    held them were removed from the database, and the backup taken beforehand was destroyed.
+  </p>
+
+  <h2>What we count</h2>
+
+  <p>
+    We do record that a broadcast had an audience: for each viewing session, which stream it was,
+    when it began, and when it ended. That is how a broadcaster sees a viewer count, and how we
+    know what our own bandwidth is being used for.
+  </p>
+  <p>
+    A session is <strong>a browser tab, not a person</strong>. Nothing attached to it identifies
+    anyone — no IP address, no IP hash, no cookie, no fingerprint, no location. The practical
+    consequence is the part worth checking: because there is no identifier, two sessions can never
+    be shown to be the same human, whether on one stream or across different ones. One viewer who
+    reloads the page is counted twice, and we cannot tell that they were the same person. We accept
+    that inaccuracy deliberately — the only way to fix it is to keep something that identifies a
+    viewer, and that is precisely what must not exist here.
+  </p>
+  <p>
+    An operator can read and export these counts per stream. What they get is how many sessions
+    watched and for how long. What they cannot get, because it was never recorded, is who.
+  </p>
+
+  <h2>Controlling who watches</h2>
+
+  <h3>The link is the key</h3>
+  <p>
+    Anyone holding your complete share link can watch. Anyone without it cannot — not even
+    someone who knows your stream's name, and not us. Treat the link the way you'd treat a door
+    key, and send it through a channel you trust.
+  </p>
+
+  <h3>The passcode is the second lock, and it is always on</h3>
+  <p>
+    Every broadcast has a passcode from the moment you open the page. There is nothing to switch
+    on, and no way to turn it off, so the link alone is never enough to watch. It is deliberately
+    not part of the link — send it separately, by a different app or out loud. Intercepting one
+    channel gets an eavesdropper nothing.
+  </p>
+  <p>
+    It used to be optional and off by default, which failed twice over: a protection nobody
+    enables protects nobody, and switching it on <em>after</em> sharing left the links already
+    sent without the marker that tells a viewer to ask for it — so those people were never
+    prompted and simply saw a black player. Making it mandatory removes both failures, because
+    there is no longer an "after".
+  </p>
+  <p>
+    Re-keying it mid-broadcast takes effect within a second or two: anyone watching with the old
+    passcode stops being able to decrypt, and your link doesn't change. (The change lands on the
+    next keyframe, so the picture they already have finishes first.)
+  </p>
+
+  <h3>Or start a new link</h3>
+  <p>
+    If the link itself has gone somewhere you didn't intend, <strong>New link</strong> is the
+    blunt fix. It ends the current broadcast and starts another one with a new address and a new
+    key, so nothing that was shared before still works. Your camera and microphone stay exactly
+    as you had them — only the address changes — but everyone watching drops, so you'll need to
+    send the new link to the people you still want there.
+  </p>
+
+  <h3>Chat is protected the same way</h3>
+  <p>
+    Messages and display names are encrypted in your browser under a key derived from the same
+    link. Our chat server relays text it cannot read. That also means we cannot moderate chat —
+    there is nothing there for us to read.
+  </p>
+
+  <h2>Moderation, and what it costs</h2>
+
+  <p>
+    Because we can't see what anyone broadcasts, we can't police content. What we can do is
+    <strong>stop</strong> a stream: viewers can report one, and an operator can terminate it.
+    Terminating takes effect for people already watching — it doesn't merely stop new ones — and
+    it works whether or not the software they're using cooperates.
+  </p>
+  <p>
+    We still cannot say what a terminated stream contained, produce a recording of it, or tell a
+    complainant what they were shown. Stopping is the whole of what we can do.
+  </p>
+
+  <h2>The limits</h2>
+
+  <p>These are real. A page that only listed strengths wouldn't be worth reading.</p>
+
+  <div class="limit">
+    <p>
+      <strong>A link can't be recalled.</strong> Once you've sent it, anyone who receives it —
+      or is forwarded it — can watch. We can't revoke it for one person, because we can't decrypt
+      it either. What you can do is cut off <em>everyone</em>: <strong>New link</strong> starts a
+      fresh broadcast under a new address and a new key, so every copy of the old link stops
+      working — including ours, if we had kept one. A passcode is the finer instrument: it cuts
+      people off without changing your link or interrupting the broadcast.
+    </p>
+  </div>
+
+  <div class="limit">
+    <p>
+      <strong>Anyone watching can record.</strong> A viewer's own device necessarily decodes your
+      video to display it, so it can also save it. No system that shows people video can prevent
+      this, and we don't claim to.
+    </p>
+  </div>
+
+  <div class="limit">
+    <p>
+      <strong>Your IP address is visible to the network.</strong> The CDN that carries your
+      stream sees the address you connect from, and so does Cloudflare, which serves this site.
+      We don't store it — but we can't hide it from them. <strong>If being located matters to
+      you, use a VPN or Tor.</strong> That's the one protection we can't provide for you.
+    </p>
+  </div>
+
+  <div class="limit">
+    <p>
+      <strong>We can see that you broadcast, even if not what.</strong> Times, durations and how
+      much data moved are visible to us and to the CDN. Encryption hides content, not the fact
+      that something happened.
+    </p>
+  </div>
+
+  <h2>How to know this is true</h2>
+
+  <p>
+    None of the above is taken on trust internally either. Each claim is checked against the
+    running service by automated tests, and the ones that matter most are the negative ones —
+    tests that try to break a promise and must fail:
+  </p>
+  <ul>
+    <li>Open a live stream without the <code>#</code> part of the link — the position we're in — and nothing decodes.</li>
+    <li>Watch what the chat server actually receives, and confirm the text isn't in it.</li>
+    <li>Terminate a stream while a deliberately uncooperative viewer is watching, and confirm it stops anyway.</li>
+    <li>Read the database directly after a report is filed, and confirm no key is in it.</li>
+  </ul>
+  <p>
+    A fuller written assessment, including every known weakness and its severity, is kept as a
+    dated security posture document. Ask and we'll send you the current one.
+  </p>
+
+  <p class="foot">
+    Last reviewed 15 August 2026. This describes Vivoh.Earth as it runs today; it will be
+    rewritten when that changes rather than quietly left standing.
+  </p>
+
+</main>
+</body>
+</html>

@@ -2,11 +2,25 @@
 // renders messages, and lets the user pick an ephemeral display name. Used by both the
 // broadcaster and viewers. Returns a teardown function.
 //
-// Security: all server-provided strings are rendered with textContent (never innerHTML),
-// so message text and names can never inject markup.
+// Security: all strings are rendered with textContent (never innerHTML), so message text
+// and names can never inject markup.
+//
+// END-TO-END ENCRYPTED. Name and text are sealed together before they leave the page, under
+// a key derived from the share link's #k= fragment through a different HKDF context than
+// the video. The Durable Object relays a blob it cannot read, so chat is exactly as private
+// as the stream it accompanies.
 
 import type { User } from "../auth";
+import { openText, sealText } from "../crypto/media-crypto";
 
+/** What travels: an opaque envelope. */
+interface WireMsg {
+  id: string;
+  ct: string;
+  ts: number;
+}
+
+/** What we render, after opening the envelope. */
 interface ChatMsg {
   id: string;
   name: string;
@@ -14,7 +28,7 @@ interface ChatMsg {
   ts: number;
 }
 
-const NAME_KEY = "vivoh-earth-chat-name";
+const NAME_KEY = "earthseed-chat-name";
 
 function loadName(user: User | null): string {
   const saved = localStorage.getItem(NAME_KEY);
@@ -27,7 +41,18 @@ export interface ChatHandle {
   destroy: () => void;
 }
 
-export function initChat(opts: { streamId: string; container: HTMLElement; user: User | null }): ChatHandle {
+export function initChat(opts: {
+  streamId: string;
+  container: HTMLElement;
+  user: User | null;
+  /**
+   * Chat key, derived from the same link secret as the media key. A GETTER, not a value:
+   * the broadcaster only learns the stream salt at go-live (which may be after this panel
+   * opens), and regenerating a passcode re-keys mid-session. Deriving per use means chat
+   * always follows the same inputs as the video instead of pinning stale ones.
+   */
+  chatKey: () => Promise<CryptoKey>;
+}): ChatHandle {
   const { streamId, container, user } = opts;
   let displayName = loadName(user);
 
@@ -119,13 +144,28 @@ export function initChat(opts: { streamId: string; container: HTMLElement; user:
       setStatus(true);
     });
     ws.addEventListener("message", (ev) => {
-      let data: { type?: string; messages?: ChatMsg[] } & Partial<ChatMsg>;
+      let data: { type?: string; messages?: WireMsg[] } & Partial<WireMsg>;
       try { data = JSON.parse(ev.data as string); } catch { return; }
+
+      // Messages sealed under a different key — history from before a salt rotation or a
+      // passcode change — simply do not open. Skipping them silently is right: they are not
+      // errors, they are messages this viewer was never meant to read.
+      const show = async (m: WireMsg) => {
+        const plain = await openText(await opts.chatKey(), m.ct);
+        if (!plain) return;
+        try {
+          const { name, text } = JSON.parse(plain) as { name: string; text: string };
+          if (text) appendMessage({ id: m.id, name: name || "Guest", text, ts: m.ts });
+        } catch { /* not a message we understand */ }
+      };
+
       if (data.type === "history" && Array.isArray(data.messages)) {
         msgsEl.replaceChildren();
-        for (const m of data.messages) appendMessage(m);
-      } else if (data.type === "msg" && data.id) {
-        appendMessage(data as ChatMsg);
+        const list = data.messages;
+        // Sequential so history keeps its order despite each open being async.
+        void (async () => { for (const m of list) await show(m); })();
+      } else if (data.type === "msg" && data.id && data.ct) {
+        void show(data as WireMsg);
       }
     });
     ws.addEventListener("close", () => {
@@ -143,8 +183,15 @@ export function initChat(opts: { streamId: string; container: HTMLElement; user:
     e.preventDefault();
     const text = input.value.trim();
     if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: "msg", name: displayName, text }));
-    input.value = "";
+    input.value = ""; // clear immediately; sealing is async and the user has moved on
+    // Name and text are sealed TOGETHER, so the display name is no more visible to the
+    // server than the message is.
+    void opts
+      .chatKey()
+      .then((k) => sealText(k, JSON.stringify({ name: displayName, text })))
+      .then((ct) => {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "msg", ct }));
+      });
   });
 
   return {

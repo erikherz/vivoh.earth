@@ -1,0 +1,344 @@
+<!doctype html>
+<!--
+  Operator console: abuse reports and the kill switch.
+
+  Standalone by design. The app document holds a content key derived from a share link; the
+  admin password has no business in that document, and nothing here should ever be imported
+  into the bundle.
+
+  Two things this page must keep saying out loud, because both are easy to forget while
+  clicking buttons:
+
+    1. Nothing here is verified. We cannot decrypt a stream. Every row is an assertion by an
+       anonymous person who held a share link, and unless they chose to send their own link
+       there is no way to check it.
+    2. Nothing acts automatically. Reports do not accumulate into a kill. A person decides,
+       every time, because "enough reports" would be a weapon aimed at exactly the
+       broadcasters this app exists to protect.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Reports · Vivoh.Earth</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 80px; background: #0a0a0a; color: #e5e5e5;
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 54em; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; font-weight: 600; }
+  h2 { font-size: 0.95rem; margin: 2.4em 0 0.8em; font-weight: 600; color: #d4d4d4;
+       border-bottom: 1px solid #222; padding-bottom: 6px; }
+  p { margin: 0 0 1em; color: #a3a3a3; }
+  a { color: #33ddc0; }
+  .muted { color: #737373; font-size: 0.85rem; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button {
+    padding: 7px 14px; border: 1px solid #3a3a3a; border-radius: 4px; background: #1c1c1c;
+    color: #e5e5e5; font: inherit; font-size: 0.85rem; cursor: pointer;
+  }
+  button:hover { border-color: #555; }
+  button.primary { background: #33ddc0; color: #0a0a0a; border-color: #33ddc0; font-weight: 600; }
+  button.danger { background: #3a1a1a; border-color: #6a2a2a; color: #e09090; }
+  button.danger:hover { background: #4a2020; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  input[type=password], input[type=text] {
+    padding: 9px 11px; border-radius: 4px; border: 1px solid #3a3a3a;
+    background: #1a1a1a; color: #e5e5e5; font: inherit;
+  }
+  .card { background: #131313; border: 1px solid #262626; border-radius: 8px;
+          padding: 16px 18px; margin: 0 0 12px; }
+  .card.open { border-left: 2px solid #d4a04a; }
+  .card.killed { border-left: 2px solid #b04a4a; }
+  .row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .sid { font-family: ui-monospace, monospace; font-size: 1.05rem; color: #e5e5e5; }
+  .tag { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+         padding: 2px 7px; border-radius: 3px; background: #262626; color: #a3a3a3; }
+  .tag.sev { background: #4a1f1f; color: #e09090; }
+  .tag.dead { background: #3a1a1a; color: #e09090; }
+  .items { margin: 12px 0 0; padding: 0; list-style: none; }
+  .items li { padding: 8px 0; border-top: 1px solid #1f1f1f; font-size: 0.9rem; }
+  .note { color: #d4d4d4; white-space: pre-wrap; word-break: break-word; }
+  .actions { display: flex; gap: 8px; margin: 14px 0 0; flex-wrap: wrap; }
+  .banner { background: #131313; border: 1px solid #262626; border-left: 2px solid #33ddc0;
+            border-radius: 6px; padding: 12px 16px; margin: 0 0 22px; font-size: 0.875rem;
+            color: #a3a3a3; }
+  #gate { max-width: 24em; margin: 12vh auto 0; text-align: center; }
+  #app { display: none; }
+  .empty { color: #737373; padding: 26px 0; text-align: center; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+         margin: 0 0 22px; flex-wrap: wrap; }
+  .err { color: #e07070; }
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <h1 style="margin-bottom:14px;">Reports</h1>
+  <p class="muted" style="margin-bottom:16px;">Operator console.</p>
+  <div style="display:flex;gap:8px;justify-content:center;">
+    <input type="password" id="pw" placeholder="admin password" autocomplete="current-password" style="width:14em;">
+    <button class="primary" id="signin">Enter</button>
+  </div>
+  <p id="gate-err" class="err muted" style="margin-top:12px;display:none;"></p>
+</div>
+
+<main id="app">
+  <div class="bar">
+    <div>
+      <h1>Reports</h1>
+      <p class="muted" id="summary" style="margin:0;"></p>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button id="refresh">Refresh</button>
+      <button id="signout">Sign out</button>
+    </div>
+  </div>
+
+  <div class="banner">
+    <strong style="color:#d4d4d4;">Nothing here has been verified, and nothing acts on its own.</strong>
+    We cannot decrypt a stream, so every report is an anonymous claim by someone who held a
+    share link. A count is not evidence — a single person with a grudge and an invitation can
+    file repeatedly. Kill because you judged it right, not because the number grew.
+  </div>
+
+  <h2>Open <span id="open-count" class="muted"></span></h2>
+  <div id="open-list"></div>
+
+  <h2>Terminated streams</h2>
+  <div id="killed-list"></div>
+
+  <h2>Recently handled</h2>
+  <div id="done-list"></div>
+</main>
+
+<script>
+(function () {
+  var KEY = "vivoh.adminpw";
+  // sessionStorage, not localStorage: an operator credential should not outlive the tab. The
+  // publish key is remembered per device on purpose; this deliberately is not.
+  var pw = sessionStorage.getItem(KEY) || "";
+
+  var SEVERE = "sexual-content-involving-minors";
+  var LABELS = {
+    "sexual-content-involving-minors": "Sexual content involving a minor",
+    "violence-or-threats": "Violence or threats",
+    "non-consensual-content": "Filmed without consent",
+    "harassment": "Harassment",
+    "other": "Something else"
+  };
+
+  var el = function (id) { return document.getElementById(id); };
+  var esc = function (s) {
+    // Reports contain viewer-supplied free text. It is rendered into the operator's document,
+    // so it is escaped rather than trusted — the one page holding the admin password is not
+    // the place to find out that someone typed markup into a note field.
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  };
+  var when = function (ts) {
+    if (!ts) return "";
+    var d = new Date(ts.replace(" ", "T") + "Z"); // D1 stores naive UTC
+    return isNaN(d) ? ts : d.toLocaleString();
+  };
+
+  function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({ Authorization: "Bearer " + pw }, opts.headers || {});
+    if (opts.body) opts.headers["Content-Type"] = "application/json";
+    return fetch(path, opts).then(function (r) {
+      if (r.status === 401) { signOut("Session rejected — sign in again."); throw new Error("401"); }
+      return r.json();
+    });
+  }
+
+  function signOut(msg) {
+    sessionStorage.removeItem(KEY);
+    pw = "";
+    el("app").style.display = "none";
+    el("gate").style.display = "block";
+    if (msg) { el("gate-err").textContent = msg; el("gate-err").style.display = "block"; }
+  }
+
+  // ── Rendering ──────────────────────────────────────────────────────────────────────────
+  // Grouped by stream, because a stream is the unit you act on. Ten reports about one
+  // broadcast is one decision, not ten.
+  function group(reports) {
+    var by = {};
+    reports.forEach(function (r) {
+      (by[r.stream_id] = by[r.stream_id] || []).push(r);
+    });
+    return Object.keys(by).map(function (sid) {
+      var items = by[sid].sort(function (a, b) { return b.id - a.id; });
+      return {
+        stream_id: sid,
+        items: items,
+        latest: items[0].created_at,
+        severe: items.some(function (r) { return r.category === SEVERE; })
+      };
+    }).sort(function (a, b) { return a.latest < b.latest ? 1 : -1; });
+  }
+
+  function card(g, killedSet, done) {
+    var isKilled = killedSet[g.stream_id];
+    var d = document.createElement("div");
+    d.className = "card " + (done ? "" : isKilled ? "killed" : "open");
+    d.innerHTML =
+      '<div class="row">' +
+        '<span class="sid">' + esc(g.stream_id) + "</span>" +
+        (g.severe ? '<span class="tag sev">severe</span>' : "") +
+        (isKilled ? '<span class="tag dead">terminated</span>' : "") +
+        '<span class="tag">' + g.items.length + (g.items.length === 1 ? " report" : " reports") + "</span>" +
+        '<span class="muted" style="margin-left:auto;">' + esc(when(g.latest)) + "</span>" +
+      "</div>" +
+      '<ul class="items">' +
+        g.items.map(function (r) {
+          return "<li>" +
+            '<span class="muted">' + esc(when(r.created_at)) + "</span> · " +
+            esc(LABELS[r.category] || r.category) +
+            (r.note ? '<div class="note">' + esc(r.note) + "</div>" : '<div class="muted">no description given</div>') +
+            "</li>";
+        }).join("") +
+      "</ul>";
+
+    if (!done) {
+      var actions = document.createElement("div");
+      actions.className = "actions";
+
+      if (!isKilled) {
+        var kill = document.createElement("button");
+        kill.className = "danger";
+        kill.textContent = "Terminate stream";
+        kill.onclick = function () {
+          var note = prompt(
+            "Terminating " + g.stream_id + ".\n\n" +
+            "This stops new connections and re-keys the stream. Anyone already watching stays " +
+            "connected until their relay token expires — we cannot reach into a QUIC session " +
+            "we are not part of.\n\n" +
+            "Why? (recorded for you, never shown to anyone else)"
+          );
+          if (note === null) return;
+          kill.disabled = true;
+          api("/api/admin/kill", { method: "POST", body: JSON.stringify({ stream_id: g.stream_id, note: note }) })
+            .then(load).catch(function () { kill.disabled = false; });
+        };
+        actions.appendChild(kill);
+      } else {
+        var unkill = document.createElement("button");
+        unkill.textContent = "Allow the name again";
+        unkill.title = "The rotated salt is not undone — links from before the kill still decrypt nothing.";
+        unkill.onclick = function () {
+          unkill.disabled = true;
+          api("/api/admin/unkill", { method: "POST", body: JSON.stringify({ stream_id: g.stream_id }) })
+            .then(load).catch(function () { unkill.disabled = false; });
+        };
+        actions.appendChild(unkill);
+      }
+
+      var ack = document.createElement("button");
+      ack.textContent = "Mark handled";
+      ack.onclick = function () {
+        ack.disabled = true;
+        api("/api/admin/reports/ack", { method: "POST", body: JSON.stringify({ stream_id: g.stream_id }) })
+          .then(load).catch(function () { ack.disabled = false; });
+      };
+      actions.appendChild(ack);
+
+      d.appendChild(actions);
+    }
+    return d;
+  }
+
+  function load() {
+    return Promise.all([api("/api/admin/reports"), api("/api/admin/killed")]).then(function (res) {
+      var reports = res[0].reports || [];
+      var killed = res[1].killed || [];
+      var killedSet = {};
+      killed.forEach(function (k) { killedSet[k.stream_id] = k; });
+
+      var open = reports.filter(function (r) { return !r.handled_at; });
+      var handled = reports.filter(function (r) { return r.handled_at; });
+
+      el("summary").textContent =
+        open.length + " open · " + killed.length + " terminated · " + reports.length + " total in view";
+      el("open-count").textContent = open.length ? "(" + open.length + ")" : "";
+
+      var openList = el("open-list");
+      openList.innerHTML = "";
+      if (!open.length) {
+        openList.innerHTML = '<div class="empty">Nothing open. That is the expected state.</div>';
+      } else {
+        group(open).forEach(function (g) { openList.appendChild(card(g, killedSet, false)); });
+      }
+
+      var kl = el("killed-list");
+      kl.innerHTML = "";
+      if (!killed.length) {
+        kl.innerHTML = '<div class="empty">No stream has been terminated.</div>';
+      } else {
+        killed.forEach(function (k) {
+          var d = document.createElement("div");
+          d.className = "card killed";
+          d.innerHTML =
+            '<div class="row">' +
+              '<span class="sid">' + esc(k.stream_id) + "</span>" +
+              '<span class="tag dead">terminated</span>' +
+              '<span class="muted" style="margin-left:auto;">' + esc(when(k.killed_at)) + "</span>" +
+            "</div>" +
+            (k.note ? '<div class="note" style="margin-top:8px;">' + esc(k.note) + "</div>"
+                    : '<div class="muted" style="margin-top:8px;">no reason recorded</div>');
+          kl.appendChild(d);
+        });
+      }
+
+      var dl = el("done-list");
+      dl.innerHTML = "";
+      if (!handled.length) {
+        dl.innerHTML = '<div class="empty">Nothing handled yet.</div>';
+      } else {
+        group(handled).slice(0, 20).forEach(function (g) { dl.appendChild(card(g, killedSet, true)); });
+      }
+    });
+  }
+
+  // ── Gate ───────────────────────────────────────────────────────────────────────────────
+  function enter(candidate) {
+    return fetch("/api/admin/verify", { headers: { Authorization: "Bearer " + candidate } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.valid) throw new Error("bad password");
+        pw = candidate;
+        sessionStorage.setItem(KEY, pw);
+        el("gate").style.display = "none";
+        el("app").style.display = "block";
+        return load();
+      });
+  }
+
+  el("signin").onclick = function () {
+    var v = el("pw").value.trim();
+    if (!v) return;
+    el("gate-err").style.display = "none";
+    enter(v).catch(function () {
+      el("gate-err").textContent = "That password was not accepted.";
+      el("gate-err").style.display = "block";
+    });
+  };
+  el("pw").addEventListener("keypress", function (e) { if (e.key === "Enter") el("signin").click(); });
+  el("refresh").onclick = function () { load(); };
+  el("signout").onclick = function () { signOut(); };
+
+  // A stream you can still stop is a live one, so the list going stale has a real cost.
+  setInterval(function () { if (pw) load().catch(function () {}); }, 30000);
+
+  if (pw) enter(pw).catch(function () { signOut(); });
+})();
+</script>
+</body>
+</html>

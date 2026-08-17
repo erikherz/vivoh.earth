@@ -1,4 +1,9 @@
--- Users table for OAuth authentication
+-- Users table for OAuth authentication.
+--
+-- One row per PERSON, not per provider: email is the unique key and each provider gets its
+-- own id column, so signing in with Microsoft after Google links onto the existing row
+-- (see upsertUser). That matters because broadcaster_access is granted by email — a
+-- duplicate account would be an account that silently is not allowed to broadcast.
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   google_id TEXT UNIQUE,
@@ -17,48 +22,63 @@ CREATE INDEX IF NOT EXISTS idx_users_microsoft_id ON users(microsoft_id);
 CREATE INDEX IF NOT EXISTS idx_users_discord_id ON users(discord_id);
 
 -- Broadcast events - logged when a user starts broadcasting
+--
+-- Deliberately holds nothing that could decrypt a stream or locate a person. Content keys
+-- are derived in the browser from the share link's #k= fragment and never reach this
+-- database; geolocation is never collected. Both were removed in migration 0010.
 CREATE TABLE IF NOT EXISTS broadcast_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
   stream_id TEXT NOT NULL,
   started_at TEXT DEFAULT (datetime('now')),
   ended_at TEXT,
-  -- Geolocation data from Cloudflare
-  geo_country TEXT,
-  geo_city TEXT,
-  geo_region TEXT,
-  geo_latitude TEXT,
-  geo_longitude TEXT,
-  geo_timezone TEXT,
-  -- Assigned tinymoq relay (broadcast→relay routing directory)
+  -- Assigned relay (broadcast→relay routing directory)
   relay_host TEXT,
   relay_port INTEGER,
-  -- Per-broadcast content encryption key (base64url, 256-bit) for relay-blind
-  -- E2E media encryption. NULL when the stream is not encrypted. Never sent to
-  -- the relay; handed to the publisher at go-live and to authorized viewers.
-  content_key TEXT,
+  -- Ed25519 public key (base64url) that claimed this stream id, minted per broadcast in the
+  -- broadcaster's browser. Binds the name to its owner while the broadcast is live so nobody
+  -- else can publish over it. Public, fresh each time, and identifies no one.
+  publisher_pubkey TEXT,
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+-- Fast lookup of the live row for a name (the ownership check on every go-live).
+CREATE INDEX IF NOT EXISTS idx_broadcast_events_live_stream
+  ON broadcast_events(stream_id, ended_at);
 
 CREATE INDEX IF NOT EXISTS idx_broadcast_events_user_id ON broadcast_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_broadcast_events_stream_id ON broadcast_events(stream_id);
 CREATE INDEX IF NOT EXISTS idx_broadcast_events_started_at ON broadcast_events(started_at);
 
--- Watch events - logged when someone watches a stream
+-- Watch events - one row per viewing SESSION, never per person.
+--
+-- A viewer's location is never resolved or stored; only that someone watched, and for how
+-- long. Geolocation columns were removed in migration 0010.
+--
+-- Nothing in this table is stable across sessions — no IP, no IP hash, no cookie, no
+-- fingerprint. Two rows cannot be shown to be the same human, on one stream or across
+-- streams. Audience SIZE and DURATION are answerable here; audience IDENTITY is not, and
+-- adding any column that would make it answerable is the one change this table must never
+-- take. See migration 0014.
 CREATE TABLE IF NOT EXISTS watch_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER,
   stream_id TEXT NOT NULL,
   started_at TEXT DEFAULT (datetime('now')),
   ended_at TEXT,
-  -- Geolocation data from Cloudflare
-  geo_country TEXT,
-  geo_city TEXT,
-  geo_region TEXT,
-  geo_latitude TEXT,
-  geo_longitude TEXT,
-  geo_timezone TEXT
+  -- Heartbeat watermark; the reaper closes silent sessions AT this value, not at reap time.
+  last_seen_at TEXT,
+  -- SHA-256 of the opaque per-session token. Stored hashed, held in page memory only, never
+  -- reused across streams — it authorises heartbeat/end, it does not identify.
+  session_hash TEXT,
+  -- 'client' | 'reaped'
+  end_reason TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_watch_events_open
+  ON watch_events(ended_at, last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_watch_events_stream_ended
+  ON watch_events(stream_id, ended_at);
 
 CREATE INDEX IF NOT EXISTS idx_watch_events_user_id ON watch_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_watch_events_stream_id ON watch_events(stream_id);
@@ -70,6 +90,8 @@ CREATE TABLE IF NOT EXISTS streams (
   stream_id TEXT UNIQUE NOT NULL,
   user_id INTEGER NOT NULL,
   require_auth INTEGER DEFAULT 0,
+  -- Broadcaster-supplied HTML overlay rendered over the player.
+  overlay_html TEXT DEFAULT '',
   -- Relay-blind E2E media encryption. MANDATORY for every stream (AES-GCM payload):
   -- the go-live path always mints a content key regardless of this column, which is
   -- retained for history but no longer authoritative. Defaults to 1 for honesty.
@@ -93,3 +115,12 @@ CREATE TABLE IF NOT EXISTS broadcaster_access (
   note TEXT,
   updated_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Seed the site owner so default-deny never locks them out.
+INSERT OR IGNORE INTO broadcaster_access (email, status) VALUES ('erik@vivoh.com', 'allowed');
+
+-- Deliberately NO seeded anonymous user. Wallflower seeds one (id=1) because its OAuth is
+-- switched off and every broadcast row still needs a user_id to hang off. Here a request
+-- without a session gets no user and no publish token, so seeding a fallback identity would
+-- reopen exactly the door this deployment exists to close. Do not add one back to make a
+-- foreign key happy — find out why something is writing a row with no signed-in user.

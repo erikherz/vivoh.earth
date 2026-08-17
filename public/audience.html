@@ -1,0 +1,300 @@
+<!doctype html>
+<!--
+  Operator console: audience measurement.
+
+  Standalone by design, like reports.html. The app document holds a content key derived from
+  a share link; the admin password has no business in that document, and nothing here should
+  ever be imported into the bundle.
+
+  What this page can and cannot show, because the distinction is the whole design:
+
+    A row is a SESSION — one browser tab that watched, and for how long. It is NOT a person.
+    Nothing stored anywhere in Vivoh.Earth is stable across sessions: no IP, no IP hash, no
+    cookie, no fingerprint. So "how many watched and for how long" is answerable here, and
+    "which of these rows is the same human", or "did this person also watch that stream", is
+    not — not by this page, not by a query, not by whoever ends up holding the database.
+
+    That is a deliberate ceiling, not a missing feature. One reload looks like two viewers,
+    and that inaccuracy is the price of the property. Anything that fixed it would be a
+    cross-session identifier, which for a journalist's audience is the difference between
+    being counted and being catalogued.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Audience · Vivoh.Earth</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 80px; background: #0a0a0a; color: #e5e5e5;
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 64em; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; font-weight: 600; }
+  p { margin: 0 0 1em; color: #a3a3a3; }
+  a { color: #33ddc0; }
+  .muted { color: #737373; font-size: 0.85rem; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .note {
+    border: 1px solid #1f2937; border-left: 3px solid #33ddc0; background: #0d1117;
+    padding: 12px 14px; border-radius: 6px; margin: 0 0 22px; font-size: 0.9rem; color: #9ca3af;
+  }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 18px; }
+  input, button {
+    font: inherit; background: #111; color: #e5e5e5; border: 1px solid #262626;
+    border-radius: 6px; padding: 7px 11px;
+  }
+  input:focus, button:focus { outline: 2px solid #33ddc0; outline-offset: 1px; }
+  button { cursor: pointer; }
+  button:hover { border-color: #404040; }
+  button.primary { background: #134e4a; border-color: #115e59; color: #ccfbf1; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #1a1a1a; font-size: 0.9rem; }
+  th { color: #737373; font-weight: 500; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.stream { cursor: pointer; }
+  tr.stream:hover td { background: #101010; }
+  .pill {
+    display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 0.72rem;
+    border: 1px solid #262626; color: #a3a3a3;
+  }
+  .pill.live { border-color: #14532d; background: #052e16; color: #86efac; }
+  .detail { background: #0c0c0c; }
+  .detail td { padding: 0 10px 14px; }
+  .detail table { margin: 6px 0 0; }
+  .empty { color: #525252; font-style: italic; }
+  .err { color: #f87171; }
+  .hidden { display: none; }
+  footer { margin-top: 40px; color: #525252; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Audience</h1>
+  <p class="muted">Viewing sessions per stream. <a href="/reports">Reports &amp; kill switch &rarr;</a></p>
+
+  <div class="note">
+    Each row is a <strong>viewing session</strong> &mdash; one browser tab, and how long it watched.
+    It is not a person. Nothing here is stable across sessions, so two rows can never be shown to be
+    the same human, on one stream or across streams. One viewer who reloads counts twice; that is the
+    cost of not keeping an identifier that could be demanded from us later.
+  </div>
+
+  <div class="note">
+    <strong>Unmeasured sessions.</strong> Sessions recorded before heartbeats existed have no
+    length &mdash; we know they happened and nothing more. They are shown separately and left out of
+    every average, because counting them as zero-second views would drag each stream's average
+    toward nothing on the strength of rows that were never measured. No new session can be
+    unmeasured; the count only ever falls.
+  </div>
+
+  <div class="bar">
+    <input id="pw" type="password" placeholder="Admin password" autocomplete="current-password" size="26">
+    <button id="load" class="primary">Load</button>
+    <input id="since" type="date" title="Only sessions started on or after this date">
+    <input id="until" type="date" title="Only sessions started on or before this date">
+    <button id="csv">Export CSV</button>
+    <span id="status" class="muted"></span>
+  </div>
+
+  <table id="streams" class="hidden">
+    <thead>
+      <tr>
+        <th>Stream</th>
+        <th class="num">Watching now</th>
+        <th class="num">Measured</th>
+        <th class="num" title="Sessions from before heartbeats existed — real, but of unknown length. Excluded from the averages.">Unmeasured</th>
+        <th class="num">Avg view time</th>
+        <th class="num">Total view time</th>
+        <th>Last activity</th>
+      </tr>
+    </thead>
+    <tbody id="streams-body"></tbody>
+  </table>
+
+  <footer id="foot"></footer>
+</main>
+
+<script>
+// The password lives in this variable and nowhere else — not localStorage, not the URL. A
+// console that remembers its own admin credential is a console that leaks it to the next
+// person at the keyboard.
+let pw = "";
+let streams = [];
+const open = new Set();
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Durations are reported in seconds by the API and rendered here, so the page never has to
+// guess at a timezone. Blank rather than "0s" when there is nothing measured yet.
+function dur(seconds) {
+  if (seconds === null || seconds === undefined) return "—";
+  const s = Math.max(0, Math.round(Number(seconds)));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m " + (s % 60) + "s";
+  const h = Math.floor(m / 60);
+  return h + "h " + (m % 60) + "m";
+}
+
+// SQLite hands back "YYYY-MM-DD HH:MM:SS" in UTC with no zone marker. Stamping the Z is what
+// stops every timestamp on this page being read as local and drifting by the offset.
+function when(ts) {
+  if (!ts) return "—";
+  const d = new Date(String(ts).replace(" ", "T") + "Z");
+  return isNaN(d) ? String(ts) : d.toLocaleString();
+}
+
+async function api(path) {
+  const res = await fetch(path, { headers: { Authorization: "Bearer " + pw } });
+  if (res.status === 401) throw new Error("Wrong password.");
+  if (res.status === 503) throw new Error("Admin is disabled — ADMIN_PASSWORD is not set.");
+  if (!res.ok) throw new Error("Request failed (" + res.status + ").");
+  return res.json();
+}
+
+function rangeQuery() {
+  const p = new URLSearchParams();
+  if ($("since").value) p.set("since", $("since").value);
+  // Inclusive of the whole end day: the API compares against started_at, which carries a time.
+  if ($("until").value) p.set("until", $("until").value + " 23:59:59");
+  const q = p.toString();
+  return q ? "?" + q : "";
+}
+
+async function load() {
+  pw = $("pw").value;
+  $("status").textContent = "Loading…";
+  $("status").className = "muted";
+  try {
+    const data = await api("/api/admin/stats/streams");
+    streams = data.streams || [];
+    render();
+    const bits = [streams.length + " stream" + (streams.length === 1 ? "" : "s")];
+    if (data.retention_days) bits.push("sessions kept " + data.retention_days + " days");
+    else bits.push("sessions kept indefinitely");
+    $("status").textContent = "";
+    $("foot").textContent = bits.join(" · ");
+    $("streams").classList.remove("hidden");
+  } catch (e) {
+    $("status").textContent = e.message;
+    $("status").className = "err";
+  }
+}
+
+function render() {
+  const body = $("streams-body");
+  if (!streams.length) {
+    body.innerHTML = '<tr><td colspan="6" class="empty">No streams recorded.</td></tr>';
+    return;
+  }
+  body.innerHTML = streams.map((s) => {
+    const live = Number(s.live_count) > 0;
+    const pill = s.broadcasting ? '<span class="pill live">broadcasting</span>' : "";
+    return (
+      '<tr class="stream" data-id="' + esc(s.stream_id) + '">' +
+        '<td><span class="mono">' + esc(s.stream_id) + "</span> " + pill + "</td>" +
+        '<td class="num">' + (live ? "<strong>" + s.live_count + "</strong>" : "0") + "</td>" +
+        '<td class="num">' + (s.completed_sessions ?? 0) + "</td>" +
+        '<td class="num muted">' + (s.unmeasured_sessions ? s.unmeasured_sessions : "—") + "</td>" +
+        '<td class="num">' + dur(s.avg_seconds) + "</td>" +
+        '<td class="num">' + dur(s.total_seconds) + "</td>" +
+        "<td>" + when(s.last_activity) + "</td>" +
+      "</tr>" +
+      '<tr class="detail hidden" data-detail="' + esc(s.stream_id) + '">' +
+        '<td colspan="7"><span class="muted">Loading sessions…</span></td>' +
+      "</tr>"
+    );
+  }).join("");
+}
+
+async function toggle(streamId) {
+  const row = document.querySelector('tr[data-detail="' + CSS.escape(streamId) + '"]');
+  if (!row) return;
+  if (open.has(streamId)) {
+    open.delete(streamId);
+    row.classList.add("hidden");
+    return;
+  }
+  open.add(streamId);
+  row.classList.remove("hidden");
+  try {
+    const data = await api("/api/admin/stats/stream/" + encodeURIComponent(streamId) + rangeQuery());
+    const rows = data.sessions || [];
+    if (!rows.length) {
+      row.firstElementChild.innerHTML = '<span class="empty">No sessions in this range.</span>';
+      return;
+    }
+    // "Session" plus the row id, never "Viewer 1" — the label should not imply that the same
+    // number means the same person on another line, because it does not.
+    row.firstElementChild.innerHTML =
+      "<table><thead><tr><th>Session</th><th>Started</th><th>Ended</th>" +
+      '<th class="num">Duration</th><th>Closed by</th></tr></thead><tbody>' +
+      rows.map((r) => {
+        // An unmeasured row must not render a duration at all. Showing "0s" would state that
+        // someone watched for no time, when the truth is that nobody recorded how long.
+        const un = r.end_reason === "unmeasured";
+        return "<tr" + (un ? ' class="muted"' : "") + "><td class='mono'>#" + esc(r.id) + "</td>" +
+          "<td>" + when(r.started_at) + "</td>" +
+          "<td>" + (Number(r.live) ? '<span class="pill live">watching</span>' : when(r.ended_at)) + "</td>" +
+          '<td class="num">' + (un ? "not measured" : dur(r.seconds)) + "</td>" +
+          "<td>" + (r.end_reason ? esc(r.end_reason) : "—") + "</td></tr>";
+      }).join("") +
+      "</tbody></table>" +
+      (data.truncated ? '<p class="muted">Truncated — narrow the date range to see the rest.</p>' : "");
+  } catch (e) {
+    row.firstElementChild.innerHTML = '<span class="err">' + esc(e.message) + "</span>";
+  }
+}
+
+// CSV over every stream currently listed, honouring the date range. Sequential rather than
+// parallel: this is an operator pulling a report, not a hot path, and a burst of requests
+// against D1 for a hundred streams is a worse trade than waiting a moment.
+async function exportCsv() {
+  if (!streams.length) return;
+  $("status").textContent = "Exporting…";
+  $("status").className = "muted";
+  const lines = ["stream_id,session_id,started_at,ended_at,seconds,end_reason"];
+  try {
+    for (const s of streams) {
+      const data = await api("/api/admin/stats/stream/" + encodeURIComponent(s.stream_id) + rangeQuery());
+      for (const r of data.sessions || []) {
+        // Blank, not 0, for unmeasured rows: a spreadsheet's AVERAGE() skips empty cells and
+        // counts zeros, so writing 0 here would reintroduce the exact distortion downstream
+        // that the API now avoids.
+        const secs = r.end_reason === "unmeasured" ? "" : Math.round(Number(r.seconds ?? 0));
+        lines.push([
+          s.stream_id, r.id, r.started_at ?? "", r.ended_at ?? "", secs, r.end_reason ?? "",
+        ].join(","));
+      }
+    }
+  } catch (e) {
+    $("status").textContent = e.message;
+    $("status").className = "err";
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "vivoh-audience.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+  $("status").textContent = lines.length - 1 + " sessions exported.";
+}
+
+$("load").addEventListener("click", load);
+$("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+$("csv").addEventListener("click", exportCsv);
+$("streams-body").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr.stream");
+  if (tr) toggle(tr.dataset.id);
+});
+</script>
+</body>
+</html>

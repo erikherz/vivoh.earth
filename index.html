@@ -3,10 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vivoh Earth | MoQ Live</title>
+    <title>Vivoh.Earth</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script type="module" src="/src/main.ts"></script>
     <style>
         /* Theme CSS Variables */
@@ -85,19 +83,19 @@
         .logo-icon {
             width: 42px;
             height: 42px;
-            filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.5));
+            filter: drop-shadow(0 0 8px rgba(245, 200, 66, 0.5));
         }
         h1 {
             font-size: 1.75rem;
             font-weight: 600;
-            background: linear-gradient(135deg, #60a5fa 0%, #34d399 50%, #a78bfa 100%);
+            background: linear-gradient(135deg, #f5c842 0%, #00d4aa 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
             letter-spacing: -0.02em;
         }
         h1 .dot {
-            background: linear-gradient(135deg, #f97316 0%, #ef4444 100%);
+            background: linear-gradient(135deg, #00d4aa 0%, #00ffcc 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -107,7 +105,7 @@
             font-size: 0.9rem;
             text-decoration: none;
             margin-left: 0.5rem;
-            background: linear-gradient(135deg, #60a5fa 0%, #34d399 50%, #a78bfa 100%);
+            background: linear-gradient(135deg, #f5c842 0%, #00d4aa 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -117,6 +115,22 @@
         .tagline:hover {
             opacity: 1;
         }
+        /* The wordmark/tagline gradients use bright gold+teal that pop on the dark
+           theme but wash out on white. Deepen them in light mode so they stay legible.
+           (Re-declare background-clip: the `background` shorthand resets it.) */
+        :root.light h1,
+        :root.light .tagline {
+            background: linear-gradient(135deg, #b8860b 0%, #00997e 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        :root.light h1 .dot {
+            background: linear-gradient(135deg, #00997e 0%, #00b894 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
         .view-toggle {
             display: inline-flex;
             align-items: center;
@@ -125,7 +139,7 @@
             transition: color 0.2s ease;
         }
         .view-toggle:hover {
-            color: #3b82f6;
+            color: #00d4aa;
         }
         h2 { font-size: 1rem; font-weight: 400; color: var(--text-secondary); margin-bottom: 1rem; }
         .grid {
@@ -174,6 +188,12 @@
             display: flex;
             align-items: center;
             gap: 0.5rem;
+            /* The encrypted shield is prepended and the audience pill appended here at
+               runtime — so this row must be able to wrap and to shrink below its content
+               width (min-width defaults to auto on a flex item, which is what pushed the
+               row past the container edge). */
+            flex-wrap: wrap;
+            min-width: 0;
         }
         .stream-label {
             color: var(--text-secondary);
@@ -186,6 +206,10 @@
             background: var(--stream-id-bg);
             padding: 0.25rem 0.5rem;
             border-radius: 4px;
+            /* Let the id break mid-string rather than overflow. min-width:0 is
+               required for a flex item to wrap at all. */
+            min-width: 0;
+            overflow-wrap: anywhere;
         }
         .copy-icon-btn {
             background: none;
@@ -196,6 +220,49 @@
             display: flex;
             align-items: center;
             border-radius: 4px;
+            flex-shrink: 0;
+        }
+        /* Live viewer-count badge + expandable panel on the broadcast page. */
+        .viewer-stats-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            cursor: pointer;
+            padding: 0.25rem 0.4rem;
+            border-radius: 4px;
+            flex-shrink: 0;
+        }
+        .viewer-stats-badge:hover {
+            color: var(--text-primary);
+            background: var(--bg-tertiary);
+        }
+        .viewer-stats-badge #viewer-count {
+            color: var(--stream-id-color);
+            font-weight: 600;
+        }
+        .viewer-stats-badge .vs-caret {
+            font-size: 0.7rem;
+            transition: transform 0.15s ease;
+        }
+        .viewer-stats-badge[aria-expanded="true"] .vs-caret {
+            transform: rotate(180deg);
+        }
+        .viewer-stats-panel {
+            width: 100%;
+            margin-top: 0.25rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 0.25rem 0.5rem;
+            max-height: 260px;
+            overflow-y: auto;
+        }
+        .viewer-stats-panel .stats-table {
+            margin: 0;
         }
         .copy-icon-btn:hover {
             color: var(--text-primary);
@@ -208,6 +275,31 @@
         .copy-icon-btn.copied {
             color: #22c55e;
         }
+        .copy-icon-btn.copy-failed {
+            color: #e0a3a3;
+        }
+        /* Shown only when the clipboard refuses the write, so the broadcaster can still get
+           the link out by hand. Wide enough to select comfortably, and it carries the whole
+           link including the #k= fragment — a partial link would be a trap. */
+        .share-fallback {
+            flex: 1 1 260px;
+            min-width: 0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.78rem;
+            padding: 3px 6px;
+            border: 1px solid #e0a3a3;
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-primary);
+        }
+        /* Inline variant for controls that sit beside text rather than beside the stream id. */
+        .copy-icon-btn.icon-sm { padding: 0.15rem; }
+        .copy-icon-btn.icon-sm svg { width: 14px; height: 14px; }
+        /* The rotate icon spins once on use, so a control whose whole job is "replace this"
+           confirms it did something even when the value it replaced looks similar. */
+        .copy-icon-btn.spun svg { animation: iconspin 0.45s ease; }
+        @keyframes iconspin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @media (prefers-reduced-motion: reduce) { .copy-icon-btn.spun svg { animation: none; } }
 
         /* Broadcast view styling */
         #broadcast-view section,
@@ -302,7 +394,7 @@
             line-height: 1.35;
         }
         .chat-msg { overflow-wrap: anywhere; }
-        .chat-msg-name { font-weight: 600; color: #60a5fa; margin-right: 0.4rem; }
+        .chat-msg-name { font-weight: 600; color: #33ddc0; margin-right: 0.4rem; }
         .chat-msg-text { color: var(--text-primary, #e5e5e5); }
         .chat-form {
             display: flex;
@@ -322,7 +414,7 @@
         }
         .chat-send {
             flex: 0 0 auto;
-            background: #3b82f6;
+            background: #00d4aa;
             color: #fff;
             border: none;
             border-radius: 6px;
@@ -330,7 +422,7 @@
             cursor: pointer;
             font-size: 1rem;
         }
-        .chat-send:hover { background: #2563eb; }
+        .chat-send:hover { background: #00b89a; }
 
         @media (max-width: 768px) {
             .video-chat-layout { flex-direction: column; max-width: 100%; }
@@ -340,7 +432,7 @@
                 position: fixed;
                 left: 0; right: 0; bottom: 0;
                 width: 100%;
-                height: 42vh;
+                height: auto;
                 flex: none;
                 max-height: none;
                 z-index: 60;
@@ -351,8 +443,10 @@
                 padding-bottom: env(safe-area-inset-bottom, 0);
             }
             .chat-panel:not(.hidden) .chat-head { border-bottom: none; }
-            /* Fade older messages toward the top of the overlay */
+            /* Show only ~2 lines (older messages scroll off the top) and fade the top edge */
             .chat-panel:not(.hidden) .chat-msgs {
+                flex: 0 1 auto;
+                max-height: 5.55rem; /* ~3 message lines (1.5x the prior 2-line height) */
                 -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22%);
                 mask-image: linear-gradient(to bottom, transparent 0, #000 22%);
             }
@@ -361,20 +455,9 @@
                 text-shadow: 0 1px 2px rgba(0,0,0,0.8);
             }
         }
-        .require-auth-toggle {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            cursor: pointer;
-            font-size: 0.875rem;
-            color: var(--text-secondary);
-        }
-        .require-auth-toggle:hover {
-            color: var(--text-primary);
-        }
         .viewers-link {
             font-weight: 600;
-            background: linear-gradient(135deg, #60a5fa 0%, #34d399 100%);
+            background: linear-gradient(135deg, #33ddc0 0%, #34d399 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -382,32 +465,59 @@
         }
         .viewers-link:hover {
             text-decoration: underline;
-            text-decoration-color: #60a5fa;
+            text-decoration-color: #33ddc0;
         }
-        .require-auth-toggle input[type="checkbox"] {
-            appearance: none;
-            -webkit-appearance: none;
-            width: 16px;
-            height: 16px;
-            border-radius: 3px;
-            background: #a3a3a3;
-            cursor: pointer;
-            position: relative;
-            flex-shrink: 0;
+
+        /* Passcode — the optional second secret, deliberately kept out of the share link. */
+        /* The passcode sits on the SAME line as its checkbox rather than in a panel below.
+           The toggle and the thing it controls read as one control that way, and the row
+           collapses to nothing when the toggle is off. */
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
         }
-        .require-auth-toggle input[type="checkbox"]:checked {
-            background: #60a5fa;
+        /* Matches the toggle labels beside it, minus the checkbox affordance — this one
+           states a fact rather than offering a choice. */
+        .passcode-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
         }
-        .require-auth-toggle input[type="checkbox"]:checked::after {
-            content: '';
-            position: absolute;
-            left: 5px;
-            top: 2px;
-            width: 4px;
-            height: 8px;
-            border: solid white;
-            border-width: 0 2px 2px 0;
-            transform: rotate(45deg);
+        .passcode-box {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .passcode-box code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.95rem;
+            letter-spacing: 0.12em;
+            color: #33ddc0;
+            user-select: all;
+            padding: 1px 6px;
+            border-radius: 4px;
+            background: rgba(51, 221, 192, 0.08);
+        }
+        /* Collapsed behind the ⓘ button: the guidance and the security disclosure are worth
+           reading once, not on every glance at a control bar. */
+        .passcode-hint {
+            margin: 8px 0 0;
+            padding: 10px 12px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.03);
+            color: #d1d5db;
+            font-size: 0.75rem;
+            line-height: 1.5;
+            max-width: 620px;
+        }
+        .passcode-hint .passcode-hint-lead {
+            margin: 0 0 8px;
+            color: #9a9a9a;
+        }
+        .passcode-hint code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         }
 
         /* Stats view */
@@ -420,7 +530,7 @@
             color: var(--text-primary);
         }
         .stats-view h2 .stream-link {
-            background: linear-gradient(135deg, #60a5fa 0%, #34d399 100%);
+            background: linear-gradient(135deg, #33ddc0 0%, #34d399 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -429,7 +539,7 @@
         }
         .stats-view h2 .stream-link:hover {
             text-decoration: underline;
-            text-decoration-color: #60a5fa;
+            text-decoration-color: #33ddc0;
         }
         .stats-grid {
             display: grid;
@@ -470,7 +580,7 @@
             font-size: 0.875rem;
         }
         .stats-table td a {
-            color: #3b82f6;
+            color: #00d4aa;
             text-decoration: none;
             font-family: monospace;
         }
@@ -564,13 +674,13 @@
             gap: 0;
         }
         .btn-primary {
-            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-            border-color: #3b82f6;
+            background: linear-gradient(135deg, #00d4aa 0%, #009e85 100%);
+            border-color: #00d4aa;
             box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
         }
         .btn-primary:hover {
-            background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%);
-            border-color: #60a5fa;
+            background: linear-gradient(135deg, #33ddc0 0%, #00b89a 100%);
+            border-color: #33ddc0;
             box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
         }
         .btn-success {
@@ -661,7 +771,7 @@
             padding-top: 0.5rem;
             border-top: 1px solid var(--tooltip-border);
             font-size: 0.75rem;
-            color: #3b82f6;
+            color: #00d4aa;
             text-align: center;
         }
         #auth-container {
@@ -687,40 +797,12 @@
             width: 18px;
             height: 18px;
         }
-        .btn-microsoft {
-            background: #2f2f2f;
-            border-color: #2f2f2f;
-            color: #fff;
-            padding: 0.5rem 1rem;
-        }
-        .btn-microsoft:hover {
-            background: #3f3f3f;
-            border-color: #3f3f3f;
-        }
-        .btn-microsoft svg {
-            width: 18px;
-            height: 18px;
-        }
-        .btn-discord {
-            background: #5865f2;
-            border-color: #5865f2;
-            color: #fff;
-            padding: 0.5rem 1rem;
-        }
-        .btn-discord:hover {
-            background: #4752c4;
-            border-color: #4752c4;
-        }
-        .btn-discord svg {
-            width: 18px;
-            height: 18px;
-        }
         /* Avatar placeholder for users without avatar */
         .avatar-placeholder {
             display: flex;
             align-items: center;
             justify-content: center;
-            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            background: linear-gradient(135deg, #00d4aa, #f5c842);
             color: #fff;
             font-weight: 600;
             font-size: 0.875rem;
@@ -797,7 +879,7 @@
             font-style: italic;
         }
         .support-note a {
-            color: #60a5fa;
+            color: #33ddc0;
             text-decoration: underline;
         }
         .server-panel .details-btn {
@@ -922,7 +1004,7 @@
         }
         .watch-stream-input-row input:focus {
             outline: none;
-            border-color: #3b82f6;
+            border-color: #00d4aa;
             box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
         }
         .watch-stream-input-row input::placeholder {
@@ -934,16 +1016,16 @@
             align-items: center;
             justify-content: center;
             padding: 0.5rem;
-            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-            border: 1px solid #3b82f6;
+            background: linear-gradient(135deg, #00d4aa 0%, #009e85 100%);
+            border: 1px solid #00d4aa;
             border-radius: 6px;
             color: #fff;
             cursor: pointer;
             transition: all 0.15s ease;
         }
         .watch-stream-input-row button:hover {
-            background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%);
-            border-color: #60a5fa;
+            background: linear-gradient(135deg, #33ddc0 0%, #00b89a 100%);
+            border-color: #33ddc0;
             transform: translateY(-1px);
         }
         .login-divider {
@@ -1037,10 +1119,84 @@
         .publish-btn.toggle-btn:hover { filter: none; }
         .publish-btn.toggle-btn.toggle-on {
             filter: none;
-            background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-            border-color: #3b82f6;
+            background: linear-gradient(135deg, #00d4aa 0%, #009e85 100%);
+            border-color: #00d4aa;
             color: #fff;
             box-shadow: 0 2px 8px rgba(59, 130, 246, 0.35);
+        }
+        /* A glyph standing in for an icon ("@", "</>"): matched to the 18px SVGs either side
+           so it reads as one of them rather than as a label. In CSS, not inline on the
+           element, so the narrow-screen rules below can actually reach it. */
+        .publish-btn.glyph-btn {
+            font: 600 18px system-ui, -apple-system, sans-serif;
+        }
+        .publish-btn .btn-glyph {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Naming the controls.
+
+           Hidden by default and revealed only where there is room, which makes this the one
+           rule here that is a genuine trade rather than a refinement: a phone gets icons
+           alone. The alternative considered was an overflow menu hiding the less-common
+           controls, and it was rejected because it answers "too many unknowns" with "fewer,
+           plus a mystery box" — a label makes a feature more discoverable, a menu makes it
+           less. On a phone the grouping below carries that load on its own. */
+        .btn-label {
+            display: none;
+            font-size: 0.62rem;
+            font-weight: 600;
+            line-height: 1;
+            letter-spacing: 0.01em;
+        }
+        @media (min-width: 601px) {
+            .btn-label { display: block; }
+            .publish-btn {
+                flex-direction: column;
+                gap: 3px;
+                min-height: 52px;
+                padding: 0.45rem 0.6rem;
+            }
+        }
+        /* Three clusters, not six decisions: sources | what's drawn on the picture | the room.
+           A gap is the whole mechanism — no headings, no boxes, nothing to read. */
+        .publish-btn.group-start { margin-left: 0.6rem; }
+        /* Screen capture (getDisplayMedia) is unavailable on mobile browsers — hide the
+           screen toggle on touch devices (iOS / Android). */
+        @media (hover: none) and (pointer: coarse) {
+            .publish-btn.cap-screen { display: none; }
+        }
+        /* Narrow portrait phones: the bar is nowrap by design (a control that reflows to a
+           second row while you are live is worse than a tighter one), so it has to fit.
+
+           Only the GAP tightens. The buttons stay 44px — the smallest comfortable thumb
+           target — because that is affordable again now that the row is six buttons and not
+           seven: removing the redundant Stop took the widest layout from 9px of slack on a
+           390px iPhone to 51px. Spend that on the targets rather than on air between them.
+           If a seventh button is ever added here, this is the rule that has to give first,
+           and scripts/e2e/control-bar-fits.mjs will say so before a phone does. */
+        @media (max-width: 430px) {
+            /* Tight WITHIN a group, air BETWEEN groups — 2.4px against 8px, which is a clear
+               enough ratio to read as three clusters. Spending the row's remaining slack on
+               the separation rather than on uniform spacing is what lets the grouping survive
+               on a phone, where the labels cannot. */
+            .publish-controls { gap: 0.15rem; }
+            .publish-btn.group-start { margin-left: 0.35rem; }
+            .publish-status { font-size: 1rem; }
+        }
+        /* iPhone SE and friends. 44px fits here to the pixel, with nothing spare — one wider
+           glyph or a different system font and the row is off the screen again. 40px buys
+           back ~36px of margin and is still a comfortable target. */
+        @media (max-width: 375px) {
+            .publish-controls { gap: 0.2rem; }
+            /* The padding is what sets the width here, not min-width: an 18px icon inside
+               0.75rem of horizontal padding plus the border already measures 44px, so
+               lowering min-width alone changes nothing. Trim the padding and let min-width
+               catch the box at 40. */
+            .publish-btn { min-width: 40px; min-height: 40px; padding: 0.4rem; }
+            .publish-btn.group-start { margin-left: 0.25rem; }
         }
         /* PiP composite preview (screen + draggable camera inset) */
         .pip-canvas {
@@ -1087,10 +1243,15 @@
 
         /* HTML overlay button and input */
         .html-overlay-btn {
+            cursor: pointer;
+        }
+        /* Monospace belongs to the "</>" glyph, not to the button — before this was scoped,
+           the word "Extras" underneath rendered in bold monospace while every other label
+           was system-ui, which read as a different kind of control rather than the same one. */
+        .html-overlay-btn .btn-glyph {
             font-family: monospace;
             font-weight: bold;
-            font-size: 0.9rem !important;
-            cursor: pointer;
+            font-size: 0.9rem;
         }
         .html-overlay-btn.active {
             box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
@@ -1122,11 +1283,14 @@
             transition: border-color 0.2s ease, box-shadow 0.2s ease;
         }
         .html-overlay-input:focus {
-            border-color: #3b82f6;
+            border-color: #00d4aa;
             box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
         }
         .html-overlay-input:empty::before {
-            content: "Enter HTML content to display below video for viewers...";
+            /* Names two concrete things rather than the mechanism. Someone who does not write
+               HTML reads "Enter HTML content" as not-for-them; a promo and a poll are what
+               they might actually want. */
+            content: "A promo, a poll, links — HTML shown below the video for viewers…";
             color: var(--text-muted);
             pointer-events: none;
         }
@@ -1135,6 +1299,47 @@
             font-size: 0.75rem;
             color: var(--text-muted);
             text-align: left;
+        }
+        /* Said only when something was actually dropped, so it never becomes background noise
+           the author learns to scroll past. */
+        .html-overlay-warning {
+            margin-top: 0.5rem;
+            padding: 0.5rem 0.65rem;
+            border-radius: 6px;
+            border: 1px solid rgba(245, 158, 11, 0.45);
+            background: rgba(245, 158, 11, 0.08);
+            color: #fbbf24;
+            font-size: 0.75rem;
+            line-height: 1.45;
+            text-align: left;
+        }
+        .html-overlay-preview-label {
+            margin-top: 0.75rem;
+            font-size: 0.7rem;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            text-align: left;
+        }
+        /* Styled like the viewer's own overlay block, because that is what it is standing in
+           for — a preview that looks like the editor teaches the wrong thing. */
+        .html-overlay-preview {
+            margin-top: 0.35rem;
+            padding: 1rem;
+            background: var(--bg-secondary);
+            border: 1px dashed var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            text-align: center;
+            overflow-x: auto;
+        }
+        .html-overlay-preview img,
+        .html-overlay-preview video,
+        .html-overlay-preview iframe,
+        .viewer-html-overlay img,
+        .viewer-html-overlay video,
+        .viewer-html-overlay iframe {
+            max-width: 100%;
         }
 
         /* Viewer HTML overlay display */
@@ -1154,16 +1359,93 @@
             display: none;
         }
         .viewer-html-overlay a {
-            color: #3b82f6;
+            color: #00d4aa;
             text-decoration: underline;
         }
         .viewer-html-overlay a:hover {
-            color: #60a5fa;
+            color: #33ddc0;
         }
         .viewer-html-overlay img {
             max-width: 100%;
             height: auto;
             border-radius: 4px;
+        }
+
+        /* Typography for broadcaster-authored markup, in the viewer's block and in the
+           editor's preview of it.
+
+           This page opens with `* { margin: 0; padding: 0 }`, which is right for an app built
+           out of known components and wrong for a region holding someone else's HTML: a <ul>
+           inherits no indent and loses its markers off the edge, an <h2> renders at heading
+           size with no space around it. Allowing the tag is only half of rendering it, so the
+           defaults are restored here and nowhere else. */
+        .viewer-html-overlay :is(h1, h2, h3, h4, h5, h6),
+        .html-overlay-preview :is(h1, h2, h3, h4, h5, h6) {
+            margin: 0.6em 0 0.35em;
+            line-height: 1.25;
+            font-weight: 700;
+        }
+        .viewer-html-overlay :is(p, ul, ol, dl, pre, blockquote, table, figure),
+        .html-overlay-preview :is(p, ul, ol, dl, pre, blockquote, table, figure) {
+            margin: 0.6em 0;
+        }
+        .viewer-html-overlay :is(ul, ol),
+        .html-overlay-preview :is(ul, ol) {
+            padding-left: 1.5em;
+        }
+        .viewer-html-overlay li,
+        .html-overlay-preview li { margin: 0.2em 0; }
+        /* Structured blocks read left-aligned even inside a centred overlay; a centred table
+           or bullet list is unreadable. */
+        .viewer-html-overlay :is(ul, ol, dl, table, pre, blockquote),
+        .html-overlay-preview :is(ul, ol, dl, table, pre, blockquote) {
+            text-align: left;
+        }
+        .viewer-html-overlay :is(ul, ol, dl),
+        .html-overlay-preview :is(ul, ol, dl) {
+            display: inline-block;
+        }
+        .viewer-html-overlay blockquote,
+        .html-overlay-preview blockquote {
+            padding-left: 0.9em;
+            border-left: 3px solid var(--border-color);
+            color: var(--text-secondary);
+        }
+        .viewer-html-overlay hr,
+        .html-overlay-preview hr {
+            margin: 0.9em 0;
+            border: 0;
+            border-top: 1px solid var(--border-color);
+        }
+        .viewer-html-overlay table,
+        .html-overlay-preview table {
+            border-collapse: collapse;
+            margin-inline: auto;
+        }
+        .viewer-html-overlay :is(th, td),
+        .html-overlay-preview :is(th, td) {
+            padding: 0.35em 0.6em;
+            border: 1px solid var(--border-color);
+        }
+        .viewer-html-overlay :is(pre, code),
+        .html-overlay-preview :is(pre, code) {
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9em;
+        }
+        .viewer-html-overlay pre,
+        .html-overlay-preview pre {
+            padding: 0.6em 0.8em;
+            border-radius: 6px;
+            background: var(--bg-tertiary);
+            overflow-x: auto;
+        }
+        /* An embed with no width of its own would collapse to a sliver. */
+        .viewer-html-overlay iframe,
+        .html-overlay-preview iframe {
+            width: 100%;
+            min-height: 320px;
+            border: 0;
+            border-radius: 6px;
         }
 
         /* Theme toggle button */
@@ -1187,48 +1469,264 @@
             width: 18px;
             height: 18px;
         }
-        .theme-toggle .sun-icon { display: none; }
-        .theme-toggle .moon-icon { display: block; }
-        :root.light .theme-toggle .sun-icon { display: block; }
-        :root.light .theme-toggle .moon-icon { display: none; }
+        /* The icon shows the ACTION (the mode you'll switch TO), not the current mode:
+           dark mode shows a sun (click to go light); light mode shows a moon. */
+        .theme-toggle .sun-icon { display: block; }
+        .theme-toggle .moon-icon { display: none; }
+        :root.light .theme-toggle .sun-icon { display: none; }
+        :root.light .theme-toggle .moon-icon { display: block; }
+
+        /* ===== Header nav buttons (Broadcast / Watch, upper right) ===== */
+        .nav-btn {
+            padding: 0.6rem 1.2rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            text-decoration: none;
+        }
+        .nav-btn svg { width: 18px; height: 18px; }
+        #nav-broadcast { color: #06231d; }
+
+        /* ===== Landing / promo page ===== */
+        .hero {
+            text-align: center;
+            padding: 3.5rem 1.5rem 3rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            margin-bottom: 2.5rem;
+            transition: background-color 0.3s ease, border-color 0.3s ease;
+        }
+        .hero-title {
+            font-size: 2.4rem;
+            font-weight: 700;
+            line-height: 1.15;
+            letter-spacing: -0.02em;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, #f5c842 0%, #00d4aa 100%);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        }
+        :root.light .hero-title {
+            background: linear-gradient(135deg, #b8860b 0%, #00997e 100%);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        }
+        .hero-features {
+            list-style: none;
+            width: fit-content;
+            max-width: 90%;
+            margin: 0.5rem auto 0;
+            padding: 1rem 1.75rem;
+            background: var(--bg-tertiary, #262626);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            text-align: left;
+            color: var(--text-primary);
+            font-size: 1.1rem;
+            display: grid;
+            gap: 0.55rem;
+        }
+        .hero-features li {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+        .hero-features li::before {
+            content: "\2713"; /* checkmark */
+            color: #00d4aa;
+            font-weight: 700;
+            flex: 0 0 auto;
+        }
+        :root.light .hero-features li::before { color: #00997e; }
+        .cta {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.85rem 2rem;
+            border-radius: 10px;
+            font-size: 1.05rem;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+        }
+        .cta-primary {
+            background: linear-gradient(135deg, #00d4aa 0%, #009e85 100%);
+            color: #06231d;
+            box-shadow: 0 4px 14px rgba(0, 212, 170, 0.3);
+        }
+        .cta-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 212, 170, 0.4); }
+
+        .promo-section { margin-bottom: 2.75rem; }
+        .promo-heading {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 1.25rem;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+        .promo-heading::before {
+            content: "";
+            width: 4px;
+            height: 1.1em;
+            border-radius: 2px;
+            background: linear-gradient(180deg, #f5c842, #00d4aa);
+        }
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+            gap: 1.25rem;
+        }
+        .info-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.4rem;
+            transition: transform 0.2s ease, border-color 0.2s ease, background-color 0.3s ease;
+        }
+        .info-card:hover { transform: translateY(-3px); border-color: var(--border-active); }
+        .info-card .card-icon { font-size: 1.7rem; margin-bottom: 0.6rem; display: block; }
+        .info-card h4 { font-size: 1.05rem; font-weight: 600; margin-bottom: 0.45rem; color: #00d4aa; }
+        :root.light .info-card h4 { color: #00997e; }
+        .info-card h4 .card-link { color: inherit; text-decoration: none; }
+        .info-card h4 .card-link:hover { text-decoration: underline; }
+        .info-card p { font-size: 0.9rem; line-height: 1.55; color: var(--text-secondary); margin: 0; }
+        /* Links in card BODY text had no rule and fell through to the global link colour,
+           which sits too close to the body text to read. Match the card heading in both
+           themes — the light-theme value matters as much, since that is where a
+           near-invisible link is most likely to go unnoticed by whoever is editing. */
+        .info-card p a { color: #00d4aa; text-decoration: none; font-weight: 500; }
+        .info-card p a:hover { text-decoration: underline; }
+        :root.light .info-card p a { color: #00997e; }
+        .info-card code { font-family: monospace; font-size: 0.82em; background: var(--bg-tertiary); padding: 1px 5px; border-radius: 4px; }
+        .card-badge {
+            display: inline-block;
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #f5c842;
+            margin-bottom: 0.5rem;
+        }
+        :root.light .card-badge { color: #b8860b; }
+
+        .security-panel {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-left: 3px solid #00d4aa;
+            border-radius: 12px;
+            padding: 1.5rem;
+        }
+        .security-panel p { color: var(--text-secondary); line-height: 1.6; margin: 0 0 0.85rem; }
+        .security-panel .pdf-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            color: #00d4aa;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+        :root.light .security-panel .pdf-link { color: #00997e; }
+        .security-panel .pdf-link:hover { text-decoration: underline; }
+        /* ===== Watch-entry page (/watch) ===== */
+        .watch-entry {
+            max-width: 560px;
+            margin: 3rem auto;
+            text-align: center;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 2.5rem 2rem;
+        }
+        .watch-entry h2 { font-size: 1.6rem; color: var(--text-primary); margin-bottom: 0.5rem; }
+        .watch-entry p { color: var(--text-secondary); margin-bottom: 1.5rem; }
+        .watch-entry-form { display: flex; gap: 0.6rem; flex-wrap: wrap; justify-content: center; }
+        .watch-entry-input {
+            flex: 1;
+            min-width: 240px;
+            padding: 0.75rem 1rem;
+            border-radius: 10px;
+            border: 1px solid var(--input-border);
+            background: var(--input-bg);
+            color: var(--text-primary);
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+        .watch-entry-err { color: #ef4444; font-size: 0.85rem; margin-top: 0.85rem; min-height: 1em; }
+
+        @media (max-width: 600px) {
+            .hero-title { font-size: 1.9rem; }
+            .nav-btn { padding: 0.5rem 0.9rem; font-size: 0.9rem; }
+            /* Tighten the feature box so "Sub-second video and chat" fits one line */
+            .hero-features { padding: 0.85rem 1.1rem; font-size: 1rem; gap: 0.45rem; }
+            .hero-features li { gap: 0.5rem; }
+        }
+
+        /* Landscape phones (short viewport, wider than the 600px breakpoint): tighten the
+           hero so the headline fits one line and the box doesn't eat the limited height. */
+        @media (orientation: landscape) and (max-height: 500px) {
+            .hero { padding: 1.5rem 1.25rem 1.25rem; }
+            .hero-title { font-size: 1.8rem; margin-bottom: 0.75rem; }
+        }
+
     </style>
 </head>
 <body>
     <div class="container">
         <header>
             <a href="/" class="logo">
-                <svg class="logo-icon" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <!-- Ocean base -->
-                    <circle cx="50" cy="50" r="48" fill="url(#oceanGradient)"/>
-                    <!-- Continents -->
-                    <path d="M30 25c5-3 15-5 20 0s10 10 5 18c-3 5-10 8-15 5s-12-8-15-13c-2-4 0-8 5-10z" fill="url(#landGradient)" opacity="0.9"/>
-                    <path d="M55 30c8-2 18 2 22 10s2 20-8 25c-8 4-15 0-18-8s-4-15 0-20c2-4 6-6 4-7z" fill="url(#landGradient)" opacity="0.9"/>
-                    <path d="M25 50c3-2 10-1 15 3s8 12 5 18c-2 5-8 8-14 6s-10-8-10-15c0-5 2-10 4-12z" fill="url(#landGradient)" opacity="0.9"/>
-                    <path d="M60 60c5-1 12 2 15 8s2 14-5 18c-5 3-12 1-15-5s-3-12 0-16c2-3 3-4 5-5z" fill="url(#landGradient)" opacity="0.9"/>
-                    <!-- Atmosphere glow -->
-                    <circle cx="50" cy="50" r="48" fill="none" stroke="url(#atmosphereGradient)" stroke-width="3" opacity="0.6"/>
-                    <!-- Shine -->
-                    <ellipse cx="35" cy="30" rx="12" ry="8" fill="white" opacity="0.15" transform="rotate(-30 35 30)"/>
-                    <defs>
-                        <linearGradient id="oceanGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" stop-color="#1e40af"/>
-                            <stop offset="50%" stop-color="#3b82f6"/>
-                            <stop offset="100%" stop-color="#0ea5e9"/>
-                        </linearGradient>
-                        <linearGradient id="landGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" stop-color="#22c55e"/>
-                            <stop offset="100%" stop-color="#16a34a"/>
-                        </linearGradient>
-                        <linearGradient id="atmosphereGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" stop-color="#60a5fa"/>
-                            <stop offset="100%" stop-color="#a78bfa"/>
-                        </linearGradient>
-                    </defs>
+                <svg class="logo-icon" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+                    <!-- Petals -->
+                    <g fill="#f5c842">
+                        <ellipse cx="32" cy="12" rx="6" ry="12" transform="rotate(0 32 32)"/>
+                        <ellipse cx="32" cy="12" rx="6" ry="12" transform="rotate(45 32 32)"/>
+                        <ellipse cx="32" cy="12" rx="6" ry="12" transform="rotate(90 32 32)"/>
+                        <ellipse cx="32" cy="12" rx="6" ry="12" transform="rotate(135 32 32)"/>
+                        <ellipse cx="32" cy="12" rx="6" ry="12" transform="rotate(180 32 32)"/>
+                        <ellipse cx="32" cy="12" rx="6" ry="12" transform="rotate(225 32 32)"/>
+                        <ellipse cx="32" cy="12" rx="6" ry="12" transform="rotate(270 32 32)"/>
+                        <ellipse cx="32" cy="12" rx="6" ry="12" transform="rotate(315 32 32)"/>
+                    </g>
+                    <!-- Inner petals -->
+                    <g fill="#e5b832">
+                        <ellipse cx="32" cy="16" rx="4" ry="8" transform="rotate(22.5 32 32)"/>
+                        <ellipse cx="32" cy="16" rx="4" ry="8" transform="rotate(67.5 32 32)"/>
+                        <ellipse cx="32" cy="16" rx="4" ry="8" transform="rotate(112.5 32 32)"/>
+                        <ellipse cx="32" cy="16" rx="4" ry="8" transform="rotate(157.5 32 32)"/>
+                        <ellipse cx="32" cy="16" rx="4" ry="8" transform="rotate(202.5 32 32)"/>
+                        <ellipse cx="32" cy="16" rx="4" ry="8" transform="rotate(247.5 32 32)"/>
+                        <ellipse cx="32" cy="16" rx="4" ry="8" transform="rotate(292.5 32 32)"/>
+                        <ellipse cx="32" cy="16" rx="4" ry="8" transform="rotate(337.5 32 32)"/>
+                    </g>
+                    <!-- Center -->
+                    <circle cx="32" cy="32" r="12" fill="#8B4513"/>
+                    <circle cx="32" cy="32" r="10" fill="#654321"/>
+                    <!-- Seeds pattern -->
+                    <g fill="#3d2817">
+                        <circle cx="32" cy="28" r="1.5"/>
+                        <circle cx="28" cy="32" r="1.5"/>
+                        <circle cx="36" cy="32" r="1.5"/>
+                        <circle cx="32" cy="36" r="1.5"/>
+                        <circle cx="29" cy="29" r="1.2"/>
+                        <circle cx="35" cy="29" r="1.2"/>
+                        <circle cx="29" cy="35" r="1.2"/>
+                        <circle cx="35" cy="35" r="1.2"/>
+                    </g>
                 </svg>
-                <h1>vivoh<span class="dot">.</span>earth</h1>
+                <h1>Vivoh<span class="dot">.</span>Earth</h1>
             </a>
-            <a href="/greet" class="tagline" target="_blank">small is beautiful</a>
+            <span class="tagline" id="site-tagline">Secure contribution plus scalable distribution</span>
             <div class="header-right">
+                <a href="/broadcast" class="btn btn-primary nav-btn" id="nav-broadcast">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
+                    Broadcast
+                </a>
+<!-- The "Watch" nav entry and its /watch dialler page were removed. There is nothing a
+                 viewer can usefully type: a bare stream id carries no key and now cannot even
+                 obtain a token, and the form rejected a pasted share link outright. Watching
+                 starts by opening the link you were given. -->
                 <button id="theme-toggle" class="theme-toggle" title="Toggle theme">
                     <svg class="moon-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
@@ -1246,15 +1744,51 @@
                     </svg>
                 </button>
                 <div id="auth-container"></div>
-                <button id="new-stream-btn" class="btn btn-icon btn-primary hidden" title="New Stream">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M12 5v14M5 12h14"/>
-                    </svg>
-                </button>
             </div>
         </header>
 
-        <!-- Broadcast View (Home) -->
+        <!-- Landing / promo view (bare "/") -->
+        <div id="landing-view" class="hidden">
+            <section class="hero">
+                <h2 class="hero-title">Secure contribution plus scalable distribution</h2>
+                <ul class="hero-features">
+                    <li>Sub-second video and chat</li>
+                    <li>No app to install. Mobile and desktop browsers</li>
+                    <li>No identity tracking, accounts, or DRM</li>
+                </ul>
+            </section>
+
+            <div class="promo-section">
+                <h3 class="promo-heading">Built on open standards</h3>
+                <div class="card-grid">
+                    <div class="info-card">
+                        <span class="card-icon">📡</span>
+                        <h4><a href="https://moq.dev/" target="_blank" rel="noopener" class="card-link">Media over QUIC</a></h4>
+                        <p>An IETF transport for live media built on QUIC's multiplexed, loss-tolerant streams and built-in TLS&nbsp;1.3. Publish/subscribe tracks and relay fan-out deliver sub-second, glass-to-glass latency on the open internet.</p>
+                    </div>
+                    <div class="info-card">
+                        <span class="card-icon">🌐</span>
+                        <h4>moq.pro CDN</h4>
+                        <p>Vivoh.Earth streams ride <strong>moq.pro</strong>, Luke Curley's hosted Media-over-QUIC network. Global relays with WebTransport and automatic WebSocket fallback, plus built-in reconnect &mdash; so a broadcast plays in every modern browser, including iPhone, and rides out flaky networks.</p>
+                    </div>
+                    <!-- Replaced the MoQplay card, which pointed at this codebase's ancestor
+                         rather than anything a visitor could use. What a broadcaster wants to
+                         know here is what protects them. -->
+                    <div class="info-card">
+                        <span class="card-icon">🔒</span>
+                        <h4><a href="/trust" class="card-link">How you're protected</a></h4>
+                        <p>Your browser encrypts every frame before it leaves. The key is derived from two secrets we never receive &mdash; the one in your share link, and a passcode you send by another route &mdash; so we cannot watch your broadcast, and could not hand it over if we were asked. No account, no email, no location data. <a href="/trust">What we can and cannot see &rarr;</a></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- "How it works" moved to a footer panel (#howitworks-panel) so it is reachable
+                 from every view rather than only the landing page. -->
+
+        </div>
+
+
+        <!-- Broadcast View -->
         <div id="broadcast-view" class="hidden">
             <div class="stream-info">
                 <div class="stream-header">
@@ -1266,15 +1800,56 @@
                             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
                         </svg>
                     </button>
+                    <button id="newid-btn" class="copy-icon-btn" title="New link — starts a fresh stream id and cuts off everyone holding the old link">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                            <polyline points="21 3 21 9 15 9"/>
+                        </svg>
+                    </button>
+                    <button id="viewer-stats-toggle" class="viewer-stats-badge" type="button" aria-expanded="false" aria-controls="viewer-stats-panel" title="Active viewers — click for details">
+                        <span id="viewer-count">0</span>
+                        <span class="vs-label">watching</span>
+                        <span class="vs-caret" aria-hidden="true">▾</span>
+                    </button>
                 </div>
-                <label class="require-auth-toggle">
-                    <input type="checkbox" id="require-auth-checkbox">
-                    <span><a href="#" id="viewers-link" class="viewers-link">Viewers</a> must sign in</span>
-                </label>
-                <label class="require-auth-toggle">
-                    <input type="checkbox" id="chat-checkbox">
-                    <span>Enable live chat</span>
-                </label>
+                <div id="viewer-stats-panel" class="viewer-stats-panel hidden" role="region" aria-label="Active viewers"></div>
+                <!-- Chat is not a property of the link, so it does not belong in this header
+                     next to the stream id and the passcode. It is something the broadcaster
+                     switches on for the room, alongside the camera and the overlay editor, so
+                     its button lives in the capture control bar under the video. -->
+                <div class="toggle-row">
+                    <!-- Not a toggle. Every broadcast carries a passcode, so the link alone is
+                         never sufficient to watch. -->
+                    <span class="passcode-label">Passcode</span>
+                    <div id="passcode-box" class="passcode-box">
+                        <code id="passcode-value"></code>
+                        <button type="button" id="passcode-copy" class="copy-icon-btn icon-sm" title="Copy passcode">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                            </svg>
+                        </button>
+                        <button type="button" id="passcode-new" class="copy-icon-btn icon-sm" title="New passcode — re-keys the stream and cuts off viewers using the old one">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                                <polyline points="21 3 21 9 15 9"/>
+                            </svg>
+                        </button>
+                        <button type="button" id="passcode-info" class="copy-icon-btn icon-sm" aria-expanded="false" aria-controls="passcode-hint" title="How this protects you">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="10"/>
+                                <line x1="12" y1="16" x2="12" y2="12"/>
+                                <line x1="12" y1="8" x2="12.01" y2="8"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div id="passcode-hint" class="passcode-hint hidden" role="region" aria-label="How this protects you">
+                    <p class="passcode-hint-lead">
+                        Send this separately from the link. The refresh icon re-keys the stream
+                        and cuts off viewers using the old passcode.
+                    </p>
+                </div>
             </div>
 
             <div class="video-chat-layout">
@@ -1299,8 +1874,28 @@
             </div>
         </div>
 
+        <!-- TinyMoQ is gone from here deliberately: streams ride moq.pro, and the fleet path
+             is dormant config. Naming it in the footer of every page claimed a dependency
+             that is not in the media path. -->
         <footer>
-            <p><a href="https://moq.dev/" target="_blank" rel="noopener">MoQ</a> | <a href="#" id="support-link">Browser Support</a> | <a href="#" id="server-link">Server Status</a><span id="ttff-display"></span></p>
+            <!-- Server Status is wrapped with its separator so it can be hidden as a unit on
+                 the landing page, where there is no connection and anything it reported would
+                 be invented. Browser Support stays: it is useful BEFORE you stream. -->
+            <p><a href="#" id="howitworks-link">How it works</a><span id="server-status-item"> | <a href="#" id="server-link">Server Status</a></span></p>
+            <div id="howitworks-panel" class="server-panel hidden">
+                <div class="security-panel">
+                    <p>When you go live, your browser captures and encodes the media with native <strong>WebCodecs</strong>, <strong>encrypts every frame</strong>, and publishes it to the <strong>moq.pro</strong> CDN over <strong>QUIC</strong>. Viewers subscribe from the nearest relay and decrypt in the page. The CDN carries only ciphertext it cannot read.</p>
+                    <p>The key never reaches us. It is derived in your browser from two secrets, and we receive neither: one lives in the part of the share link after the <code>#</code>, which browsers never send to a server, and the other is the <strong>passcode</strong> &mdash; every broadcast has one, and it is deliberately not in the link. So a link tunes a viewer in but will not decrypt on its own; send the two by different routes and intercepting either alone is worthless. <strong>We could not watch your broadcast if we were asked to.</strong></p>
+                    <p>Each broadcast is reached through a short-lived <strong>moq.pro</strong> access token minted by Vivoh.Earth's own Cloudflare Worker. It is signed with a key whose public half alone was given to moq.pro, so the CDN can check our tokens and cannot forge one. Live chat is encrypted the same way: messages and display names are sealed in your browser under a key derived from the same link, so the chat server relays text it cannot read. That also means there is no moderation of chat &mdash; there is nothing for us to moderate.</p>
+                    <!-- Both further-reading links sit at the foot of this panel rather than in
+                         the footer row. Someone who has just read what the transport is and what
+                         protects them is the person who might want either; a visitor scanning the
+                         footer is not. -->
+                    <p><a href="https://moq.dev/" target="_blank" rel="noopener">More about Media over QUIC &rarr;</a>
+                       &nbsp;&middot;&nbsp;
+                       <a href="#" id="support-link">Browser Support</a></p>
+                </div>
+            </div>
             <div id="support-panel" class="server-panel hidden"></div>
             <div id="server-panel" class="server-panel hidden"></div>
         </footer>

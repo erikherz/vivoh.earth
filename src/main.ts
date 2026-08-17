@@ -38,9 +38,10 @@ if (isSafari) {
 // Theme initialization - must run early to prevent flash
 function initTheme() {
   const savedTheme = localStorage.getItem("theme");
-  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
 
-  if (savedTheme === "light" || (!savedTheme && !prefersDark)) {
+  // Dark is the default look (OS preference is ignored on first visit). Only an explicit
+  // saved choice of "light" opts in; anything else — including no saved preference — is dark.
+  if (savedTheme === "light") {
     document.documentElement.classList.add("light");
   }
 
@@ -81,10 +82,9 @@ interface MoqWatchElement extends HTMLElement {
 }
 
 // Safari fallback relay servers (WebSocket-enabled)
+// Pinned to the single test box for the full end-to-end test (no prod traffic).
 const FALLBACK_RELAYS = [
-  "us-central.vivoh.earth",
-  "eu-central.vivoh.earth",
-  "ap-south.vivoh.earth",
+  "cdn.gpcmoq.com",
 ];
 
 // Server status tracking
@@ -99,13 +99,21 @@ interface ServerStatus {
   selectedServer: string;
   connected: boolean;
   raceResults: RelayResult[];
+  // Display-only: the confirmed origin<->edge transport for a cross-cluster (viewer-cdn=)
+  // stream, probed from the edge's /edge_xport. A ready-to-render string, or null = hide.
+  originLink: string | null;
 }
 
 const serverStatus: ServerStatus = {
   mode: needsPolyfill ? "websocket" : "webtransport",
-  selectedServer: "gpc-01.tinymoq.com",
+  // Not a hostname. This is the value shown before any connection exists, and it used to name
+  // a self-hosted fleet box that is not in the media path at all — so the panel confidently
+  // reported a server this client had never contacted and would never use. Anything real is
+  // written by setActiveRelay() once a relay is actually assigned.
+  selectedServer: "(not connected)",
   connected: false,
   raceResults: [],
+  originLink: null,
 };
 
 // Browser support tracking
@@ -530,6 +538,7 @@ function updateServerStatusPanel() {
       <span>${statusText}: ${serverStatus.selectedServer}</span>
       <button class="details-btn" id="server-details-btn">Details</button>
     </div>
+    ${serverStatus.originLink ? `<div class="origin-link-line" style="font-size:0.8rem;color:var(--text-muted,#737373);margin-top:2px;">${serverStatus.originLink}</div>` : ""}
     <div class="server-details hidden" id="server-details-content">
       ${detailsContent}
     </div>
@@ -552,18 +561,87 @@ function updateServerStatusPanel() {
 function setActiveRelay(relay: string | null) {
   serverStatus.selectedServer = relay ?? "(no relay assigned)";
   serverStatus.connected = !!relay;
+  serverStatus.originLink = null; // stale on any relay change; the edge_xport probe refills it
   updateServerStatusPanel();
 }
 
-// Status pills shown in the publisher header and on the player. The audience pill carries
-// the ACCESS claim (Public vs Invite-only); "Security details" hangs the honest caveats
-// (static key, metadata, not-DRM) off the access affordance. (The "Relay-blind"/encrypted
-// pill was removed — on the moq.pro CDN media is transport-encrypted, not relay-blind E2E.)
+// Display-only origin<->edge transport probe for cross-cluster (viewer-cdn=) streams. The
+// edge autoscaler exposes GET https://<edge-host>/edge_xport?broadcast=<rawId> ->
+// {xport:"iroh"|"quic"|"unknown", origin:"host:port"} (public, no auth, :443). We fetch it
+// ~1.5s after connect and re-poll a few times, rendering a stats line next to "Connected".
+// unknown / any error => hide the line (never surface a scary state).
+function startOriginLinkProbe(edgeRelay: string, rawBroadcastId: string): void {
+  const host = edgeRelay.split(":")[0];
+  if (!host) return;
+  let stopped = false;
+  window.addEventListener("beforeunload", () => { stopped = true; });
+  const probe = async (): Promise<void> => {
+    if (stopped) return;
+    try {
+      const res = await fetch(
+        `https://${host}/edge_xport?broadcast=${encodeURIComponent(rawBroadcastId)}`,
+        { signal: AbortSignal.timeout(3000) }
+      );
+      if (!res.ok) { serverStatus.originLink = null; updateServerStatusPanel(); return; }
+      const data = (await res.json()) as { xport?: string; origin?: string };
+      if (data.xport === "iroh") {
+        serverStatus.originLink = "Origin link: iroh / DHT";
+      } else if (data.xport === "quic") {
+        serverStatus.originLink = `Origin link: ${data.origin ?? "host:port"} (QUIC)`;
+      } else {
+        serverStatus.originLink = null; // "unknown" => hide
+      }
+      updateServerStatusPanel();
+    } catch {
+      serverStatus.originLink = null; // fetch error => hide
+      updateServerStatusPanel();
+    }
+  };
+  window.setTimeout(() => {
+    void probe();
+    const id = window.setInterval(() => {
+      if (stopped) { window.clearInterval(id); return; }
+      void probe();
+    }, 5000);
+  }, 1500);
+}
+
+// Status pills shown in the publisher header and on the player. We make a claim at each
+// layer and nothing more: "Relay-blind" is an INFRASTRUCTURE property (encryption is
+// mandatory, so it shows on every stream and says nothing about who may watch); the
+// audience pill carries the ACCESS claim (Public vs Invite-only); and "Security details"
+// hangs the honest caveats (static key, metadata, not-DRM) off the access affordance.
+// 15px rather than the pills' 13px: this one carries no label beside it, so it has to hold
+// the line on its own next to a 1rem monospace stream id.
+const SHIELD_SVG = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>`;
 const GLOBE_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`;
 const LOCK_SVG = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
 const PILL_CSS =
   "display:inline-flex;align-items:center;gap:4px;font-size:0.72rem;font-weight:600;" +
   "border:1px solid;border-radius:999px;padding:2px 8px;line-height:1;white-space:nowrap;";
+
+// "Relay-blind" — shown on EVERY stream (encryption is mandatory). States that the relay
+// and server only ever move ciphertext they can't read. Deliberately NOT a privacy claim
+// about who may watch — that is the audience pill's job.
+//
+// A bare shield rather than a bordered "Encrypted" pill. The claim is true of every stream
+// and can never be switched off, so a badge announcing it on every screen is a permanent
+// banner for a constant — it reads as something to be reckoned with rather than something
+// already handled. The icon marks the state; the hover carries the sentence for anyone who
+// wants it. The audience pill keeps its label because that one VARIES, and a varying claim
+// has to be readable at a glance rather than hovered.
+function createRelayBlindBadge(): HTMLSpanElement {
+  const badge = document.createElement("span");
+  badge.className = "relay-blind-badge";
+  badge.title = "Encrypted — your browser encrypts every frame and viewers' browsers decrypt it. The relay and server only move ciphertext they can't read.";
+  badge.innerHTML = SHIELD_SVG;
+  // No border, no padding, no text. Icon-only, so it needs a name of its own: a title
+  // attribute is a mouse affordance and says nothing to a screen reader or a touch device.
+  badge.setAttribute("role", "img");
+  badge.setAttribute("aria-label", "Encrypted");
+  badge.style.cssText = "display:inline-flex;align-items:center;color:#22c55e;flex-shrink:0;";
+  return badge;
+}
 
 // Audience pill — carries the ACCESS claim, driven by require_auth. Public = anyone with
 // the link; Invite-only = viewers must sign in to receive the key. Mutated in place so a
@@ -589,6 +667,23 @@ function createAudienceBadge(inviteOnly: boolean): HTMLSpanElement {
 // "Security details" disclosure — the honest caveats that attach to the access claim,
 // surfaced at the moment a user reasons about privacy. Click toggles a small popover;
 // an outside click closes it.
+// The disclosure itself, without any affordance for revealing it. Split out so it can be
+// dropped into the passcode info panel (where it now lives) as well as behind the legacy
+// "Security details" link below.
+function createSecurityBody(): HTMLDivElement {
+  const body = document.createElement("div");
+  body.className = "security-body";
+  body.innerHTML =
+    `<strong style="color:#f3f4f6;display:block;margin-bottom:6px;">What encryption does and doesn't cover</strong>` +
+    `<ul style="margin:0;padding-left:16px;display:flex;flex-direction:column;gap:6px;">` +
+    `<li><strong>It takes both halves.</strong> The link carries a secret after the <code>#</code>, and the passcode is the other half — every broadcast has one, so a link on its own will not play. Send them by different routes; whoever ends up holding both can watch, and neither can be recalled. We cannot decrypt your stream, and equally cannot lock anyone out of it for you.</li>` +
+    `<li><strong>Revoking mid-stream.</strong> A passcode re-keys within a second or two and viewers holding the old one stop decrypting, without your link changing. (The change lands on the next keyframe, so the picture they already have finishes first.) <strong>New link</strong> is the blunter option: it starts a fresh broadcast, so every copy of the old link dies and everyone watching drops.</li>` +
+    `<li><strong>Metadata in the clear.</strong> Codec, resolution, frame timing and sizes, and track names are visible to the relay.</li>` +
+    `<li><strong>Not DRM.</strong> Anyone allowed to watch can screen-capture the decoded video.</li>` +
+    `</ul>`;
+  return body;
+}
+
 function createSecurityDetails(): HTMLSpanElement {
   const wrap = document.createElement("span");
   wrap.className = "security-details";
@@ -602,13 +697,7 @@ function createSecurityDetails(): HTMLSpanElement {
     "display:none;position:absolute;z-index:60;top:calc(100% + 6px);left:0;width:290px;" +
     "background:#1a1a1a;border:1px solid rgba(255,255,255,0.15);border-radius:8px;padding:10px 12px;" +
     "font-size:0.72rem;line-height:1.45;color:#d1d5db;box-shadow:0 8px 28px rgba(0,0,0,0.55);text-align:left;";
-  pop.innerHTML =
-    `<strong style="color:#f3f4f6;display:block;margin-bottom:6px;">What encryption does and doesn't cover</strong>` +
-    `<ul style="margin:0;padding-left:16px;display:flex;flex-direction:column;gap:6px;">` +
-    `<li><strong>No live revocation.</strong> The per-session key is static — a viewer removed mid-stream who kept the key can keep decrypting until this broadcast ends (the next session uses a fresh key).</li>` +
-    `<li><strong>Metadata in the clear.</strong> Codec, resolution, frame timing and sizes, and track names are visible to the relay.</li>` +
-    `<li><strong>Not DRM.</strong> Anyone allowed to watch can screen-capture the decoded video.</li>` +
-    `</ul>`;
+  pop.appendChild(createSecurityBody());
   link.addEventListener("click", (e) => {
     e.preventDefault();
     pop.style.display = pop.style.display === "none" ? "block" : "none";
@@ -620,11 +709,16 @@ function createSecurityDetails(): HTMLSpanElement {
   return wrap;
 }
 
-// Relay auth tokens are now per-broadcast and server-minted: the publisher gets its
-// token from the go-live (POST /api/stats/broadcast) response, the viewer from the
-// /route response. Both are short-lived and scoped to one broadcast (viewer = put:[],
-// subscribe-only). No static client token exists anymore. See PER-BROADCAST-TOKENS.md.
-const NAMESPACE_PREFIX = "vivoh.earth";
+// Per-broadcast relay tokens are minted server-side (BYOK) and returned by the Worker:
+// publishers get one from POST /api/stats/broadcast, viewers from GET /route. There is no
+// static client token — the browser never holds a long-lived, all-paths credential.
+const NAMESPACE_PREFIX = "moqplay.com";
+
+// Build the cdn.moq.pro connect URL from the Worker's {relay, path, jwt} (moq.pro Mode A).
+// The element points at the FULL url and uses an empty name (the broadcast path lives in the
+// url). When the Worker returns no `path`, the caller falls back to the fleet host:port form.
+const moqUrl = (relay: string, path: string, jwt: string) =>
+  `https://${relay}/${path.replace(/^\/+/, "")}?jwt=${jwt}`;
 
 // Dynamic imports for the MoQ web components - MUST happen after polyfills are installed.
 // These register the headless light-DOM core elements <moq-publish> and <moq-watch>
@@ -649,7 +743,9 @@ import {
   logBroadcastStart,
   logBroadcastEnd,
   logWatchStart,
+  logWatchHeartbeat,
   logWatchEnd,
+  type WatchSession,
   getStreamRoute,
   checkStreamExists,
   getStreamSettings,
@@ -660,17 +756,32 @@ import {
   type Geo,
   type StreamSettings,
   type LiveBroadcast,
-  type LiveViewer
+  type LiveViewer,
+  type StreamRoute
 } from "./auth";
-import { createCompositor, type Compositor } from "./media/pip-compositor";
-// Build the cdn.moq.pro connect URL from the Worker's {relay, path, jwt}. The full
-// broadcast path lives in the URL (matching moq.pro's addressing); the hang elements
-// publish/subscribe the empty broadcast name under it.
-const moqUrl = (relay: string, path: string, jwt: string) =>
-  `https://${relay}/${path.replace(/^\/+/, "")}?jwt=${jwt}`;
+import { renderOverlay } from "./overlay-sanitize";
+import { buildPublisherClaim } from "./publisher-claim";
+import {
+  armPublisher,
+  armViewer,
+  deriveChatKey,
+  deriveMediaKey,
+  deriveRouteTag,
+  generateLinkSecret,
+  generatePasscode,
+  decryptStats,
+  resetMediaKey,
+} from "./crypto/media-crypto";
 import { initChat, type ChatHandle } from "./chat/chat-client";
+import { describeLocation } from "./geo/nearest-city";
+import { createCompositor, type Compositor } from "./media/pip-compositor";
+import { createGeoStamp, type GeoStamp } from "./media/geo-stamp";
 
-type View = "broadcast" | "watch" | "stats" | "stats-map" | "greet" | "stream-stats" | "stream-stats-map" | "admin";
+// /stats, /<id>/stats and /cleardata were removed: they existed to show who was broadcasting
+// and watching, which is exactly the identity this app no longer holds. Rather than keep pages
+// that could only render blanks, the surface is gone. The kill switch was never part of them
+// and survives at /api/admin/kill and friends.
+type View = "landing" | "broadcast" | "watch";
 
 // Generate a random stream ID (5 lowercase alphanumeric characters)
 function generateRandomId(): string {
@@ -702,98 +813,112 @@ function isValidStreamId(str: string): boolean {
   return /^[a-z0-9]{5}$/.test(str);
 }
 
-// Repair a malformed query string so URLSearchParams parses it correctly: a stray
-// "?" after the first (e.g. /?stream=ig6eb?publisher-cdn=…) and "&&" are treated as
-// separators, empty segments dropped. Safe here because our param values (stream id,
-// CDN hostnames, host:port origin) never contain "?" or "&".
-function repairSearch(search: string): string {
-  return search
-    .replace(/^\?/, "")
-    .split(/[?&]/)
-    .filter(Boolean)
-    .join("&");
-}
+/**
+ * The broadcaster's own address bar, which is NOT a share link and must not read like one.
+ *
+ * `/?stream=<id>` exists so a refresh resumes the same broadcast. The trap is that it looks
+ * exactly like something you would send someone: it names the stream, it is in the address
+ * bar the moment you go live, and it carries neither the `#k=` secret nor the passcode — so
+ * a recipient cannot decrypt anything. Worse than a black player, `?stream=` routes to the
+ * BROADCAST view, so whoever opens it lands on a publishing page for a stream they do not
+ * own rather than on anything that explains itself.
+ *
+ * The marker rides in the fragment for two reasons: the server never sees it, and it survives
+ * copy/paste — so if a broadcaster does send this URL, the warning travels with it and shows
+ * up in the recipient's address bar too. The share link comes from the copy button, and only
+ * from there.
+ */
+const DONT_SHARE_MARKER = "NOT-THE-SHARE-LINK--USE-THE-COPY-BUTTON";
 
-// Test/override params that should survive stream (re)generation and ride along on
-// share links so a CDN test keeps its context. Always rebuilt with URLSearchParams
-// so the result is a single "?" + "&"-separated query — never "?...?" or "&&".
-const OVERRIDE_PARAMS = ["publisher-cdn", "viewer-cdn", "origin"] as const;
-
-function carryOverrideParams(search: string): URLSearchParams {
-  const src = new URLSearchParams(repairSearch(search));
-  const out = new URLSearchParams();
-  for (const k of OVERRIDE_PARAMS) {
-    const v = src.get(k)?.trim();
-    if (v) out.set(k, v);
-  }
-  return out;
-}
-
-// Append a (well-formed) query string to a base URL/path, joining with a single "?".
-function withQuery(base: string, params: URLSearchParams): string {
-  const qs = params.toString();
-  return qs ? `${base}?${qs}` : base;
-}
+const broadcastUrl = (streamId: string, suffix = ""): string =>
+  `/?stream=${streamId}${suffix}#${DONT_SHARE_MARKER}`;
 
 // Determine current view and stream ID from URL
 async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
   const path = window.location.pathname;
 
-  // Stats map view: /stats/map
-  if (path === "/stats/map") {
-    return { view: "stats-map", streamId: "" };
+  // Watch page: /watch accepts an id directly and jumps straight to the stream —
+  // /watch/<id>, /watch?stream=<id>, or /watch?id=<id>. Served by the fleet watch, same as
+  // the bare /<id> path.
+  if (path === "/watch" || path.startsWith("/watch/")) {
+    const params = new URLSearchParams(window.location.search);
+    const fromPath = path.startsWith("/watch/") ? decodeURIComponent(path.slice("/watch/".length)) : "";
+    const id = (fromPath || params.get("stream") || params.get("id") || "").trim().toLowerCase();
+    if (isValidStreamId(id)) {
+      return { view: "watch", streamId: id };
+    }
+    // No id: there is nothing to dial. The old entry form is gone — a bare stream id has no
+    // key and no longer even yields a token, and the form rejected a pasted share link. Land
+    // on the landing page rather than on a form that cannot succeed.
+    return { view: "landing", streamId: "" };
   }
 
-  // Greet view: /greet (broadcasters map)
-  if (path === "/greet") {
-    return { view: "greet", streamId: "" };
+  // Broadcast page: /broadcast — mint a fresh stream id and go live via the fleet. Rewrites
+  // the URL to /?stream=<id> so a refresh keeps the same broadcast identity.
+  if (path === "/broadcast") {
+    // A 5-char stream id (collision-checked). It is only a NAME: it carries no authority and
+    // is not the secret. Watching needs the key in the share link's #k= fragment, and
+    // publishing under it needs the signed claim in publisher-claim.ts.
+    const streamId = await generateStreamId();
+    // Preserve a ?geo= test override through the URL rewrite (it drives origin placement
+    // on the broadcaster's broker assign).
+    const geo = new URLSearchParams(location.search).get("geo");
+    const suffix = geo ? `&geo=${encodeURIComponent(geo)}` : "";
+    window.history.replaceState({}, "", broadcastUrl(streamId, suffix));
+    return { view: "broadcast", streamId };
   }
 
-  // Admin view: /cleardata
-  if (path === "/cleardata") {
-    return { view: "admin", streamId: "" };
-  }
-
-  // Stats view: /stats
-  if (path === "/stats") {
-    return { view: "stats", streamId: "" };
-  }
-
-  // Stream-specific stats map view: /{streamId}/stats/map
-  const streamStatsMapMatch = path.match(/^\/([a-z0-9]{5})\/stats\/map$/);
-  if (streamStatsMapMatch) {
-    return { view: "stream-stats-map", streamId: streamStatsMapMatch[1] };
-  }
-
-  // Stream-specific stats view: /{streamId}/stats
-  const streamStatsMatch = path.match(/^\/([a-z0-9]{5})\/stats$/);
-  if (streamStatsMatch) {
-    return { view: "stream-stats", streamId: streamStatsMatch[1] };
-  }
-
-  // Watch view: /{streamId} (5 char alphanumeric)
+  // Watch view: /{streamId} — served by the fleet watch path (initWatchView pulls the relay
+  // and token from the Worker; the content key comes from the link fragment).
   const potentialStreamId = path.slice(1); // Remove leading /
   if (isValidStreamId(potentialStreamId)) {
     return { view: "watch", streamId: potentialStreamId };
   }
 
-  // Broadcast view: / or /?stream=xxx. repairSearch() handles a malformed URL like
-  // /?stream=ig6eb?publisher-cdn=… where `stream` would otherwise absorb the rest.
-  const params = new URLSearchParams(repairSearch(window.location.search));
-  let streamId = params.get("stream");
-  if (streamId) streamId = streamId.trim();
-  if (!streamId || !isValidStreamId(streamId)) {
-    streamId = await generateStreamId();
+  // Resume an in-progress broadcast: /?stream=<id> (set by /broadcast; survives refresh).
+  // The id is a short 5-char stream id served through the fleet (broker-assigned).
+  const params = new URLSearchParams(window.location.search);
+  const streamId = params.get("stream");
+  if (streamId) {
+    // Re-apply the warning marker for anyone who arrived here without it — a hand-typed or
+    // trimmed URL should still say what it is.
+    if (!location.hash.includes(DONT_SHARE_MARKER)) {
+      const geo = params.get("geo");
+      window.history.replaceState({}, "", broadcastUrl(streamId, geo ? `&geo=${encodeURIComponent(geo)}` : ""));
+    }
+    return { view: "broadcast", streamId };
   }
 
-  // Always normalize the URL to a single, well-formed query string: stream + any
-  // override params (publisher-cdn / viewer-cdn / origin), joined with URLSearchParams.
-  // This also repairs an already-corrupted "?...?" / "&&" URL in place.
-  const normalized = carryOverrideParams(window.location.search);
-  normalized.set("stream", streamId);
-  window.history.replaceState({}, "", withQuery(window.location.pathname, normalized));
+  // Bare "/" — the promotional landing page (Broadcast / Watch entry points + info).
+  return { view: "landing", streamId: "" };
+}
 
-  return { view: "broadcast", streamId };
+/**
+ * Escape text for interpolation into innerHTML.
+ *
+ * Load-bearing, not decorative. `user.name` and `user.avatar_url` arrive from an OAuth
+ * provider and are chosen by the account holder — Discord's `global_name` is free text —
+ * so they are attacker-controlled strings rendered into the page that holds the content
+ * key. Wallflower carries the same header markup and is not exposed by it only because its
+ * OAuth is switched off; turning sign-in on here is what makes this reachable.
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/** An avatar URL we are willing to put in a src. Anything else renders as initials. */
+function safeAvatarUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    return u.protocol === "https:" ? u.href : null;
+  } catch {
+    return null;
+  }
 }
 
 // Update the auth UI based on login state
@@ -813,10 +938,13 @@ function updateAuthUI(user: User | null, geo: Geo | null) {
 
   if (!authContainer) return;
 
-  // Show logged-in user info
-  const avatarHtml = user.avatar_url
-    ? `<img src="${user.avatar_url}" alt="${user.name}" class="avatar">`
-    : `<div class="avatar avatar-placeholder">${user.name.charAt(0).toUpperCase()}</div>`;
+  // Show logged-in user info. Every provider-supplied string below is escaped — see
+  // escapeHtml() above for why that matters here specifically.
+  const safeName = escapeHtml(user.name);
+  const avatarSrc = user.avatar_url ? safeAvatarUrl(user.avatar_url) : null;
+  const avatarHtml = avatarSrc
+    ? `<img src="${escapeHtml(avatarSrc)}" alt="${safeName}" class="avatar">`
+    : `<div class="avatar avatar-placeholder">${escapeHtml(user.name.charAt(0).toUpperCase())}</div>`;
 
   const flag = countryToFlag(geo?.country ?? null);
   const hasCoords = geo?.latitude && geo?.longitude;
@@ -837,7 +965,7 @@ function updateAuthUI(user: User | null, geo: Geo | null) {
   authContainer.innerHTML = `
     <div class="user-info">
       ${avatarHtml}
-      <span class="user-name">${user.name}</span>${flagHtml}
+      <span class="user-name">${safeName}</span>${flagHtml}
       <button id="logout-btn" class="btn btn-icon" title="Sign Out">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -919,17 +1047,17 @@ function showLoginRequired() {
           Google
         </button>
         <button id="overlay-login-microsoft" class="btn btn-microsoft">
-          <svg viewBox="0 0 21 21" width="18" height="18">
-            <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
-            <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
-            <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
-            <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <path fill="#F25022" d="M2 2h9.5v9.5H2z"/>
+            <path fill="#7FBA00" d="M12.5 2H22v9.5h-9.5z"/>
+            <path fill="#00A4EF" d="M2 12.5h9.5V22H2z"/>
+            <path fill="#FFB900" d="M12.5 12.5H22V22h-9.5z"/>
           </svg>
           Microsoft
         </button>
         <button id="overlay-login-discord" class="btn btn-discord">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-            <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <path fill="#5865F2" d="M20.3 4.4A19.8 19.8 0 0 0 15.4 3l-.3.5c1.6.4 2.9 1 4.1 1.8a13.9 13.9 0 0 0-11-1.2c-.4.1-.9.3-1.3.4.4-.2.9-.4 1.4-.6l-.2-.4a19.8 19.8 0 0 0-4.9 1.4C1 9 .4 13.4.7 17.8a19.9 19.9 0 0 0 6 3l1.2-1.9c-.7-.2-1.3-.5-1.9-.9l.5-.3a14.2 14.2 0 0 0 12 0l.5.3c-.6.4-1.2.7-1.9.9l1.2 1.9a19.9 19.9 0 0 0 6-3c.4-5.1-.6-9.5-4-13.4zM8.4 15.3c-1.2 0-2.1-1.1-2.1-2.4 0-1.3.9-2.4 2.1-2.4 1.2 0 2.2 1.1 2.1 2.4 0 1.3-.9 2.4-2.1 2.4zm7.2 0c-1.2 0-2.1-1.1-2.1-2.4 0-1.3.9-2.4 2.1-2.4 1.2 0 2.2 1.1 2.1 2.4 0 1.3-.9 2.4-2.1 2.4z"/>
           </svg>
           Discord
         </button>
@@ -968,62 +1096,77 @@ function showLoginRequired() {
   });
 }
 
-// Shown when a signed-in user tries to broadcast but is not on the allow list (403).
-function showBroadcastNotAllowed(message?: string) {
-  const broadcastView = document.getElementById("broadcast-view");
-  if (!broadcastView) return;
-
-  // Replace any prior banner so repeated attempts don't stack.
-  document.getElementById("broadcast-blocked")?.remove();
-
-  const banner = document.createElement("div");
-  banner.id = "broadcast-blocked";
-  banner.style.cssText =
-    "max-width: 560px; margin: 1.5rem auto; padding: 1rem 1.25rem; border-radius: 8px;" +
-    "background: #7f1d1d; border: 1px solid #991b1b; color: #fee2e2; text-align: center;";
-  banner.innerHTML = `
-    <strong style="display:block; margin-bottom:0.35rem;">Broadcasting not enabled for this account</strong>
-    <span style="color:#fecaca; font-size:0.9rem;">${
-      message || "Your account is not approved to broadcast."
-    }</span>
-    <div style="color:#fecaca; font-size:0.9rem; margin-top:0.5rem;">
-      For access, contact Erik Herz at
-      <a href="mailto:erik@vivoh.com" style="color:#fff; text-decoration:underline;">erik@vivoh.com</a>
-      or
-      <a href="https://linkedin.com/in/erikherz" target="_blank" rel="noopener" style="color:#fff; text-decoration:underline;">linkedin.com/in/erikherz</a>.
-    </div>
-  `;
-
-  const section = document.querySelector("#broadcast-view section") || broadcastView;
-  section.prepend(banner);
-}
-
 // Initialize broadcast view
 // Optional per-request CDN override for testing individual tinymoq destinations
 // (e.g. ?publisher-cdn=cdn-01.tinymoq.com, &viewer-cdn=cdn-02.tinymoq.com).
 function getCdnOverride(param: "publisher-cdn" | "viewer-cdn"): string | undefined {
-  const v = new URLSearchParams(repairSearch(window.location.search)).get(param)?.trim();
+  const v = new URLSearchParams(window.location.search).get(param)?.trim();
   return v || undefined;
 }
 
-function initBroadcastView(streamId: string, user: User | null, openAccess = false) {
+// One turn of a rotate icon, so a control that replaces a value confirms it acted even when
+// the replacement looks much like what it replaced. Re-triggerable: the class has to come off
+// and go back on, and reading offsetWidth forces the reflow that makes the restart stick.
+function spin(btn: Element): void {
+  btn.classList.remove("spun");
+  void (btn as HTMLElement).offsetWidth;
+  btn.classList.add("spun");
+  window.setTimeout(() => btn.classList.remove("spun"), 500);
+}
+
+function initBroadcastView(initialStreamId: string, user: User | null) {
+  // The broadcast's identity is MUTABLE: the "new link" control (rotateIdentity, below)
+  // replaces the id and the link secret together without a page reload. Everything derived
+  // from them is therefore read at use rather than captured once — that is why these are
+  // `let` and why streamName is recomputed rather than being a const.
+  let streamId = initialStreamId;
+
   // The ".hang" suffix makes the catalog format explicit so the watcher can parse
   // the catalog and subscribe to video/audio tracks (otherwise detectFormat() is
   // undefined and the viewer only fetches catalog.json, never video/hd).
-  const streamName = `${NAMESPACE_PREFIX}/${streamId}.hang`;
-  // Watch URL (path form /{id}); carry forward any override params for test continuity,
-  // joined with URLSearchParams so it's a single "?" + "&"-separated query.
-  const shareUrl = withQuery(`${window.location.origin}/${streamId}`, carryOverrideParams(window.location.search));
+  let streamName = `${NAMESPACE_PREFIX}/${streamId}.hang`;
 
-  console.log(`Vivoh.Earth Broadcast - Stream: ${streamId}`);
+  // The content key's secret is minted HERE, in the browser, and travels only in the share
+  // link's `#…` fragment. Browsers never send a fragment to a server, so this value cannot
+  // reach our Worker, our database, our logs, or the CDN. That is what makes the guarantee
+  // structural rather than a promise: there is no code path by which we could decrypt a
+  // broadcast, because we never receive what would be required to.
+  //
+  // The corollary is that the link IS the access control. Anyone holding it can watch, and
+  // we cannot revoke that or recover it if the broadcaster loses it.
+  let linkSecret = generateLinkSecret();
+
+  // The second secret, and MANDATORY — every broadcast has one from the moment this page
+  // loads. It is deliberately NOT in the link: the link travels by one channel and this by
+  // another, so intercepting either alone is insufficient. It is never sent to or checked by
+  // any server — it is mixed into the key derivation, so a wrong passcode simply produces a
+  // wrong key and the video fails to decrypt. Nothing anywhere can confirm a guess.
+  //
+  // It used to be a checkbox, off by default. Two things were wrong with that. A protection
+  // nobody switches on protects nobody, and worse, turning it on AFTER sharing left every
+  // already-distributed link without `&p=1` — so those viewers were never asked, derived the
+  // wrong key, and saw a black player with no explanation. Minting it up front means the flag
+  // is in the link from the first copy, and there is no "after" for it to be missed in.
+  let passcode: string = generatePasscode();
+
+  // Public HKDF salt, handed to us at go-live and to viewers by /route. Held here so a
+  // passcode change re-derives with the SAME salt — deriving with a different one would
+  // silently break the stream for everyone.
+  let activeSalt: string | undefined;
+
+  // `&p=1` tells a viewer to ask for the passcode. Not a secret, and carrying it in the
+  // fragment keeps the server entirely uninvolved in the question. Unconditional now.
+  const shareUrl = () =>
+    `${window.location.origin}/${streamId}#k=${linkSecret}&p=1`;
+
+  console.log(`MoQplay Broadcast - Stream: ${streamId}`);
 
   // Show broadcast view, hide watch view
   document.getElementById("broadcast-view")?.classList.remove("hidden");
   document.getElementById("watch-view")?.classList.add("hidden");
 
-  // If not logged in, show login required overlay — UNLESS the deployment is in
-  // TEMPORARY open-access mode (env.OPEN_ACCESS), which lets anyone broadcast.
-  if (!user && !openAccess) {
+  // If not logged in, show login required overlay
+  if (!user) {
     showLoginRequired();
     return;
   }
@@ -1036,33 +1179,162 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
 
   // Copy button functionality
   if (copyBtn) {
+    // Mirror the link onto the element that owns it. The clipboard is the user-facing path,
+    // but it is unreadable to anything that is not a focused browser window, so the share
+    // link would otherwise be unavailable to tests and to the broadcaster's own devtools.
+    copyBtn.setAttribute("data-share-url", shareUrl());
     const copyIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
     const checkIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
-    copyBtn.addEventListener("click", () => {
-      navigator.clipboard.writeText(shareUrl);
-      copyBtn.innerHTML = checkIcon;
-      copyBtn.classList.add("copied");
-      setTimeout(() => {
+    // The checkmark must mean "it is on your clipboard", not "you clicked me". This used to
+    // fire and forget the write and show the tick unconditionally, so a refused clipboard —
+    // an unfocused window, a denied permission, an insecure context — looked identical to
+    // success. The broadcaster would then paste whatever was previously on their clipboard
+    // into the channel they meant to send the link through, and only find out when nobody
+    // could watch.
+    //
+    // The fallback deliberately reveals the WHOLE link. Selecting the visible stream id
+    // instead would be worse than nothing: it omits the `#k=` fragment, so it looks like a
+    // share link, copies cleanly, and produces a stream the recipient can never decrypt.
+    const shareFallback = document.createElement("input");
+    shareFallback.readOnly = true;
+    shareFallback.className = "share-fallback hidden";
+    shareFallback.setAttribute("aria-label", "Share link — copy this");
+    // Appended to the header, NOT inserted after the button: Copy and New-link have to stay
+    // adjacent, and slipping an element between them would separate a deliberate pair.
+    (copyBtn.closest(".stream-header") ?? copyBtn.parentElement)?.appendChild(shareFallback);
+
+    let copyReset: number | undefined;
+    copyBtn.addEventListener("click", async () => {
+      window.clearTimeout(copyReset);
+      const url = shareUrl();
+      let ok = false;
+      try {
+        await navigator.clipboard.writeText(url);
+        ok = true;
+      } catch {
+        ok = false;
+      }
+
+      if (ok) {
+        shareFallback.classList.add("hidden");
+        copyBtn.innerHTML = checkIcon;
+        copyBtn.classList.add("copied");
+        copyBtn.setAttribute("title", "Copied");
+      } else {
+        // Hand them the link in something they can copy by hand, and say so.
+        shareFallback.value = url;
+        shareFallback.classList.remove("hidden");
+        shareFallback.focus();
+        shareFallback.select();
+        copyBtn.classList.add("copy-failed");
+        copyBtn.setAttribute("title", "Couldn't reach the clipboard — the link is selected, copy it manually");
+      }
+
+      copyReset = window.setTimeout(() => {
         copyBtn.innerHTML = copyIcon;
-        copyBtn.classList.remove("copied");
-      }, 2000);
+        copyBtn.classList.remove("copied", "copy-failed");
+        copyBtn.setAttribute("title", "Copy share link");
+      }, ok ? 2000 : 6000);
     });
   }
 
-  // Media flows through moq.pro's hang <moq-publish> element (WebTransport with a
-  // WebSocket fallback, cross-browser incl. iOS). No client-side E2E — the CDN moves
-  // the media in the clear.
+  // Relay-blind E2E media encryption is MANDATORY for every stream — there is no opt-out.
+  // Arm the publisher at page load, BEFORE any frame is encoded, so nothing is ever
+  // published in the clear; the content key arrives at go-live and releases the queued
+  // frames. `streamEncrypted` is always true so goLive requires + installs the key.
+  const streamEncrypted = true;
+  armPublisher();
 
-  // Stream-header indicator: the audience pill ("Public" / "Invite-only") carries the
-  // access claim and tracks the live require-auth state below.
-  let audienceBadge: HTMLSpanElement | null = null;
-  const streamHeaderEl = document.querySelector(".stream-header");
-  if (streamHeaderEl) {
-    audienceBadge = createAudienceBadge(false);
-    audienceBadge.style.marginLeft = "6px";
-    streamHeaderEl.appendChild(audienceBadge);
+  // Passcode control. Re-deriving on every change is intentional and needs no knowledge of
+  // whether we are live yet: before go-live it is redundant (go-live derives again with the
+  // same inputs), and after go-live it re-keys the stream in place — which IS the revocation
+  // mechanism. Viewers holding the old passcode keep their connection and stop being able to
+  // decrypt, without the link changing.
+  {
+    const value = document.getElementById("passcode-value");
+    const regen = document.getElementById("passcode-new");
+
+    // The honest caveats belong beside the access affordance. They used to hang off the
+    // require-auth toggle, which no longer exists in the markup — so this disclosure has been
+    // silently absent. The passcode control is now the thing a broadcaster reasons about
+    // privacy with, so it goes here.
+    // Both the guidance and the security disclosure live inside ONE panel behind the ⓘ
+    // button. They were a permanently visible sentence and a separate "Security details"
+    // link; together they made a control bar look like a document, and the disclosure is
+    // read-once material rather than something to keep on screen while broadcasting.
+    const info = document.getElementById("passcode-info");
+    const panel = document.getElementById("passcode-hint");
+    panel?.appendChild(createSecurityBody());
+    const setPanel = (open: boolean) => {
+      panel?.classList.toggle("hidden", !open);
+      info?.setAttribute("aria-expanded", String(open));
+    };
+    info?.addEventListener("click", (e) => {
+      e.preventDefault();
+      setPanel(panel?.classList.contains("hidden") ?? false);
+    });
+
+    const apply = async () => {
+      if (value) value.textContent = passcode;
+      copyBtn?.setAttribute("data-share-url", shareUrl());
+      await deriveMediaKey(linkSecret, { streamId, salt: activeSalt, passcode });
+    };
+
+    // Paint the passcode minted above, so the row is populated before anything is shared.
+    void apply();
+
+    regen?.addEventListener("click", () => {
+      passcode = generatePasscode();
+      spin(regen);
+      void apply();
+    });
+
+    // Copy. The passcode is deliberately sent through a different channel than the link, and
+    // retyping eight characters into that other channel is where a broadcaster gets it wrong.
+    const copyPass = document.getElementById("passcode-copy");
+    copyPass?.addEventListener("click", () => {
+      // Report through `title` and a class, NOT textContent: this button's content is an
+      // <svg>, and writing text into it would delete the icon permanently.
+      const original = copyPass.getAttribute("title") ?? "Copy passcode";
+      const done = (label: string) => {
+        copyPass.setAttribute("title", label);
+        copyPass.classList.add("copied");
+        window.setTimeout(() => {
+          copyPass.setAttribute("title", original);
+          copyPass.classList.remove("copied");
+        }, 1500);
+      };
+      // The clipboard API rejects when the document is not focused or permission is refused.
+      // Failing silently would leave the button looking broken, so fall back to selecting the
+      // passcode — the user can then copy it themselves, which is the thing they wanted.
+      navigator.clipboard?.writeText(passcode).then(
+        () => done("Copied"),
+        () => {
+          const range = document.createRange();
+          if (value) {
+            range.selectNodeContents(value);
+            const sel = window.getSelection();
+            sel?.removeAllRanges();
+            sel?.addRange(range);
+          }
+          done("Select & copy");
+        }
+      );
+    });
   }
+
+  // "Encrypted" is shown unconditionally again: media is encrypted in this browser and
+  // cdn.moq.pro carries ciphertext it cannot read. It states an INFRASTRUCTURE property, not
+  // who may watch — that distinction is why it is safe to show on every stream.
+  //
+  // It was removed when the moq.pro migration dropped end-to-end encryption. That is no
+  // longer true, so the claim is accurate again.
+  const audienceBadge: HTMLSpanElement | null = null;
+  // Prepended, not appended: at the head of the row it reads as a property of the stream on
+  // the line, which is what it is. Appended it sat past the buttons, where it looked like one
+  // more control.
+  document.querySelector(".stream-header")?.prepend(createRelayBlindBadge());
 
   // Require auth toggle (Public vs Invite-only). Toggling re-keys the audience pill and
   // the viewer-facing access policy; the security-details disclosure (key/metadata
@@ -1082,7 +1354,7 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
     requireAuthCheckbox.addEventListener("change", async () => {
       if (requireAuthCheckbox.checked) {
         // Check for anonymous viewers before enabling auth requirement
-        const data = await getStreamViewers(streamId);
+        const data = await getStreamViewers(streamId, await deriveRouteTag(linkSecret, streamId));
         const anonymousCount = data?.viewers.filter(v => !v.user_id).length ?? 0;
 
         if (anonymousCount > 0) {
@@ -1107,49 +1379,120 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
   // Live chat toggle. When on, reveal the chat panel (right column on desktop, bottom
   // overlay on mobile) and connect the broadcaster to the per-stream ChatRoom; persist
   // the setting so viewers' getStreamSettings() reflects it.
-  const chatCheckbox = document.getElementById("chat-checkbox") as HTMLInputElement;
+  //
+  // The control that drives this is a button in the capture bar under the video, built much
+  // further down with the rest of that bar. So the state lives here, in a plain boolean, and
+  // the button
+  // registers itself when it exists — that way the settings load, the id-rotation path and
+  // the button are all driving one source of truth rather than reading each other's DOM.
   const broadcastChatPanel = document.getElementById("broadcast-chat") as HTMLElement | null;
   let chatHandle: ChatHandle | null = null;
+  let chatEnabled = false;
+  let chatBtn: HTMLButtonElement | null = null;
   const openChat = () => {
     if (!broadcastChatPanel || chatHandle) return;
     broadcastChatPanel.classList.remove("hidden");
-    chatHandle = initChat({ streamId, container: broadcastChatPanel, user });
+    chatHandle = initChat({
+      streamId,
+      container: broadcastChatPanel,
+      user,
+      // Same secret and salt as the video, different HKDF context. Derived per use so a
+      // passcode change or a go-live salt arriving late is picked up automatically.
+      chatKey: () => deriveChatKey(linkSecret, { streamId, salt: activeSalt, passcode }),
+    });
   };
   const closeChat = () => {
     chatHandle?.destroy();
     chatHandle = null;
     broadcastChatPanel?.classList.add("hidden");
   };
-  if (chatCheckbox) {
-    getStreamSettings(streamId).then(settings => {
-      chatCheckbox.checked = settings.chat_enabled;
-      if (settings.chat_enabled) openChat();
-    });
-    chatCheckbox.addEventListener("change", () => {
-      if (chatCheckbox.checked) openChat();
-      else closeChat();
-      updateStreamSettings(streamId, { chat_enabled: chatCheckbox.checked });
-    });
-  }
+  // `persist` is false when we are only catching up with what the server already says, so
+  // reloading a broadcast doesn't write the setting back unchanged.
+  const setChatEnabled = (on: boolean, persist = true) => {
+    chatEnabled = on;
+    if (on) openChat();
+    else closeChat();
+    chatBtn?.classList.toggle("toggle-on", on);
+    if (persist) updateStreamSettings(streamId, { chat_enabled: on });
+  };
+  getStreamSettings(streamId).then((settings) => {
+    if (settings.chat_enabled) setChatEnabled(true, false);
+  });
 
-  // Set viewers link to stream stats page
-  const viewersLink = document.getElementById("viewers-link") as HTMLAnchorElement;
-  if (viewersLink) {
-    viewersLink.href = `/${streamId}/stats`;
-    viewersLink.target = "_blank";
-    // Prevent link click from toggling the checkbox
-    viewersLink.addEventListener("click", (e) => {
-      e.stopPropagation();
+  // Stop publishing if this broadcast is terminated.
+  //
+  // Its own poll, deliberately not folded into the viewer-stats refresh below: that one is
+  // inside `if (vsToggle && vsCount && vsPanel)`, so hanging this off it would mean a missing
+  // stats badge silently disables the broadcaster's half of the kill switch. A safety
+  // mechanism should not depend on a UI element being present.
+  //
+  // This side matters more than the viewer side. A terminated stream whose publisher keeps
+  // sending is still reaching everyone already connected; stopping the source is what ends
+  // the broadcast for people we cannot otherwise reach.
+  const killWatch = window.setInterval(async () => {
+    const settings = await getStreamSettings(streamId);
+    if (!settings.killed) return;
+    window.clearInterval(killWatch);
+    stopForKill("broadcaster");
+  }, 5000);
+  window.addEventListener("beforeunload", () => window.clearInterval(killWatch));
+
+  // Live viewer stats: a "👁 N watching" badge in the header that expands to a
+  // per-viewer list (location flag + watch duration). Polls the public viewers
+  // endpoint every 5s; mirrors the /{stream}/stats renderer, inline for the broadcaster.
+  const vsToggle = document.getElementById("viewer-stats-toggle");
+  const vsCount = document.getElementById("viewer-count");
+  const vsPanel = document.getElementById("viewer-stats-panel");
+  if (vsToggle && vsCount && vsPanel) {
+    let vsViewers: LiveViewer[] = [];
+
+    const fmtDuration = (dateStr: string) => {
+      const secs = Math.max(0, Math.floor((Date.now() - new Date(dateStr + "Z").getTime()) / 1000));
+      if (secs < 60) return `${secs}s`;
+      const mins = Math.floor(secs / 60);
+      if (mins < 60) return `${mins}m ${secs % 60}s`;
+      return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+    };
+
+    const renderPanel = () => {
+      if (vsPanel.classList.contains("hidden")) return; // only build DOM when open
+      const rows = vsViewers.length === 0
+        ? `<tr><td colspan="2" class="empty">No active viewers</td></tr>`
+        : vsViewers.map((v) => {
+            // Viewer locations are no longer collected, so there is nothing to place here
+            // beyond the fact that someone is watching. See renderGeoFlag below.
+            return `<tr><td>Viewer</td><td>${fmtDuration(v.started_at)}</td></tr>`;
+          }).join("");
+      vsPanel.innerHTML = `<table class="stats-table"><tbody>${rows}</tbody></table>`;
+    };
+
+    const refreshViewers = async () => {
+      // Derived per call rather than cached: New link rotates linkSecret mid-broadcast, and a
+      // stale tag would silently 404 the badge into "no viewers" for the rest of the stream.
+      const data = await getStreamViewers(streamId, await deriveRouteTag(linkSecret, streamId));
+      if (!data) return; // transient failure — keep the last known count
+      vsViewers = data.viewers;
+      vsCount.textContent = String(vsViewers.length);
+      renderPanel();
+    };
+
+    vsToggle.addEventListener("click", () => {
+      const open = !vsPanel.classList.toggle("hidden");
+      vsToggle.setAttribute("aria-expanded", String(open));
+      if (open) renderPanel();
     });
+
+    refreshViewers();
+    const vsInterval = window.setInterval(refreshViewers, 5000);
+    window.addEventListener("beforeunload", () => window.clearInterval(vsInterval));
   }
 
   // Drive the headless <moq-publish> core element with our own control bar.
   const publisher = document.querySelector("moq-publish") as MoqPublishElement | null;
   if (publisher) {
-    // The relay URL is NOT static: on go-live the Worker mints a per-broadcast moq.pro
-    // token and we point the <moq-publish> element at cdn.moq.pro then. The full broadcast
-    // path lives in the connect URL, so the broadcast name is empty.
-    publisher.setAttribute("name", "");
+    // The relay URL is NOT static: on go-live the Worker calls tinymoq /assign and
+    // returns the relay hosting this broadcast; we point the publisher at it then.
+    publisher.setAttribute("name", streamName);
 
     let broadcastEventId: number | null = null;
     let goLivePromise: Promise<void> | null = null;
@@ -1159,42 +1502,59 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
     // the relay on the broadcast row (so viewers can co-locate). Idempotent/sticky.
     const goLive = (): Promise<void> => {
       if (goLivePromise) return goLivePromise;
-      goLivePromise = logBroadcastStart(streamId, getCdnOverride("publisher-cdn")).then(async (res) => {
-        if (res?.forbidden) {
-          // Signed in, but not on the broadcaster allow list. Stop capture and
-          // explain; don't retry (a later device action would just 403 again).
-          console.warn("[access] broadcasting not permitted for this account");
-          publisher.source = null;
-          setActiveRelay(null);
-          showBroadcastNotAllowed(res.error);
-          goLivePromise = null;
-          return;
-        }
+      // Prove name ownership before asking for a publish token. buildPublisherClaim mints a
+      // fresh Ed25519 keypair for THIS broadcast (non-extractable, never leaves the page) and
+      // signs a Worker-issued challenge with it.
+      //
+      // Admission is NOT proved here — it rides on the session cookie, and the Worker checks
+      // it against the broadcaster allow list. So a refusal below is either "not signed in"
+      // or "not approved to broadcast", and both surface from the same place: the go-live
+      // response. Wallflower prompts for a publish key at this point; there is nothing to
+      // prompt for here, because there is nothing a broadcaster can type to admit themselves.
+      goLivePromise = buildPublisherClaim(streamId).then(async (claim) => {
+        if (!claim) return null;
+        // Register the proof-of-link tag for this broadcast, so the Worker can require viewers
+        // to demonstrate they hold the share link before it mints them a token. Derived here
+        // because `linkSecret` never leaves this page in any other form.
+        const routeTag = await deriveRouteTag(linkSecret, streamId);
+        return logBroadcastStart(streamId, getCdnOverride("publisher-cdn"), claim, routeTag);
+      }).then(async (res) => {
         broadcastEventId = res?.eventId ?? null;
         const relay = res?.relay;
         const jwt = res?.jwt;
         if (!relay || !jwt) {
           // /assign failed or no token was minted — there is no static relay/token to
           // fall back to. Allow a retry on the next device action rather than
-          // connecting to a dead endpoint or with an empty token.
-          console.error("[routing] go-live missing relay or token (relay:", relay, "token:", !!jwt, "); pick a device again to retry");
+          // connecting to a dead endpoint.
+          console.error("[routing] go-live got no relay/token (assign unavailable); pick a device again to retry");
           setActiveRelay(null);
           goLivePromise = null;
           return;
         }
-        if (!res?.path) {
-          console.error("[moqpro] go-live missing path; not going live");
-          setActiveRelay(null);
-          goLivePromise = null;
-          return;
+        // Relay-blind E2E: install the per-broadcast content key BEFORE connecting,
+        // so the frames the armed publisher has been queuing get encrypted. The
+        // server is authoritative on whether the stream is encrypted.
+        // Relay-blind E2E applies to BOTH transports, so the key is installed here rather
+        // than inside either branch. This is load-bearing: armPublisher() has already run,
+        // so every encoded frame is queued awaiting this key. If it is never installed the
+        // queue never drains, NOTHING is published, and a viewer subscribes successfully to
+        // a track that stays silent forever -- a failure with no error on either side.
+        if (res?.encrypted || streamEncrypted) {
+          activeSalt = res?.salt ?? undefined;
+          armPublisher(); // idempotent; covers the case where settings load lost the race
+          await deriveMediaKey(linkSecret, { streamId, salt: activeSalt, passcode });
         }
-        // Point the hang <moq-publish> element at cdn.moq.pro. Its Connection.Reload does
-        // WebTransport + WebSocket fallback + reconnect, and it encodes cross-platform
-        // (H.264/Opus) so iOS can play it. The composited video/audio tracks are already
-        // bound to publisher.broadcast.*.source by applyState().
-        publisher.setAttribute("url", moqUrl(relay, res.path, jwt));
+        if (res?.path) {
+          // moq.pro (Mode A): the broadcast path travels in the connect URL, so `name`
+          // stays empty. Encryption is identical to the fleet path below.
+          publisher.setAttribute("name", "");
+          publisher.setAttribute("url", moqUrl(relay, res.path, jwt));
+        } else {
+          publisher.setAttribute("name", streamName);
+          publisher.setAttribute("url", `https://${relay}/?jwt=${jwt}`);
+        }
         setActiveRelay(relay);
-        console.log("[routing] broadcaster on cdn.moq.pro:", res.path, "eventId:", broadcastEventId);
+        console.log("[routing] broadcaster relay:", relay, "eventId:", broadcastEventId);
       });
       return goLivePromise;
     };
@@ -1207,9 +1567,10 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
         broadcastEventId = null;
       }
       goLivePromise = null; // a later device selection re-assigns
-      // Disconnect the <moq-publish> element; a restarted broadcast re-points it at a
-      // fresh relay/token URL.
-      publisher.removeAttribute("url");
+      // Drop the content key (keep the publisher armed): a restarted broadcast
+      // gets a fresh key, and frames queue until it arrives — never encrypted
+      // with the previous session's key.
+      resetMediaKey();
     };
 
     // --- Combinable capture toggles: 📹 Camera (video) + 🎤 Audio + 🖥️ Screen ---
@@ -1221,6 +1582,60 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
     type Toggle = "camera" | "audio" | "screen";
     const capture: Record<Toggle, boolean> = { camera: false, audio: false, screen: false };
     let anyActive = false;
+
+    // "New link" — replace the broadcast's whole identity in place.
+    //
+    // This is a clean break, not a re-key: a fresh stream id AND a fresh link secret, which
+    // means a fresh claim keypair, a fresh relay assignment and a fresh salt too. The old
+    // share link is dead in both halves — its id no longer names a live broadcast, and its
+    // secret no longer derives the right key — so it cannot be resurrected by anyone who
+    // kept it, including us.
+    //
+    // Capture is deliberately NOT touched. Ending and restarting the broadcast while leaving
+    // the compositor alone is the whole point: the broadcaster keeps their camera, mic and
+    // screen exactly as they had them and only the address changes.
+    const newIdBtn = document.getElementById("newid-btn");
+    let rotating = false;
+    const rotateIdentity = async () => {
+      if (rotating) return;
+      // Only guard once there is an audience to lose. Before go-live nobody holds the link,
+      // so a confirmation would be noise on the one click that costs nothing.
+      if (anyActive && !window.confirm(
+        "Start a new link?\n\nThis ends the current broadcast and starts a fresh one. " +
+        "Everyone watching now — and anyone holding the old link — will be cut off until " +
+        "you send them the new one."
+      )) return;
+
+      rotating = true;
+      if (newIdBtn) spin(newIdBtn);
+      try {
+        const wasLive = anyActive;
+        closeChat();       // the room is keyed to the old stream id
+        endBroadcast();    // marks the old row ended, frees the relay, drops the media key
+
+        streamId = await generateStreamId();
+        streamName = `${NAMESPACE_PREFIX}/${streamId}.hang`;
+        linkSecret = generateLinkSecret();
+        activeSalt = undefined;   // the new go-live issues its own; deriving with a stale one
+                                  // would silently produce a key no viewer can reproduce
+        publisher.setAttribute("name", streamName);
+
+        if (streamDisplay) streamDisplay.textContent = streamId;
+        copyBtn?.setAttribute("data-share-url", shareUrl());
+        // Keep the address bar honest, so a refresh resumes the NEW broadcast, not the dead one.
+        window.history.replaceState({}, "", broadcastUrl(streamId));
+
+        // The passcode survives on purpose. It travels by a different channel and rotating the
+        // link already cuts everyone off; forcing the broadcaster to re-send both would make
+        // this control more expensive than it needs to be.
+        if (wasLive) await goLive();
+        if (chatEnabled) openChat();   // re-joins, now keyed to the new stream id
+        console.log("[rotate] new identity:", streamId);
+      } finally {
+        rotating = false;
+      }
+    };
+    newIdBtn?.addEventListener("click", () => void rotateIdentity());
 
     // Low-level seam: a video/audio Source is just a MediaStreamTrack signal.
     const bcast = publisher.broadcast as unknown as {
@@ -1236,6 +1651,10 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
     // the publish path never switches the element's source mode mid-broadcast — that switch
     // silently dropped audio when the sequence was audio-first-then-video.
     let comp: Compositor | null = null;
+    // Location + time burn-in, armed independently of capture (see the stamp button below).
+    let geoStamp: GeoStamp | null = null;
+    // The handle watermark, likewise armed independently (see the @ button below).
+    let watermark: string | null = null;
     // Video and audio sources are wired in independently and each exactly once, so a track
     // that appears later (camera added after audio-only, or vice versa) binds without
     // re-setting the other (re-setting a live track triggers RESET_STREAM → frozen viewers).
@@ -1274,6 +1693,11 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
               if (v) v.style.display = "none";
               comp.canvas.className = "pip-canvas";
               publisher.insertAdjacentElement("afterbegin", comp.canvas);
+              // The compositor is created and destroyed as capture comes and goes, but the
+              // overlays outlive it (either can be armed before any camera is on, and both
+              // must survive a stop/start). Re-attach them to each new compositor.
+              if (geoStamp) comp.setStampProvider(geoStamp.line);
+              if (watermark) comp.setWatermark(watermark);
             }
             // Reconcile video sources without re-prompting the ones already captured.
             if (screen && !comp.hasScreen()) {
@@ -1347,22 +1771,33 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
         toggleButtons[k]?.classList.toggle("toggle-on", capture[k]);
       });
     };
-    // Clean filled glyphs (inherit the button's currentColor: dim gray when off, white on blue when on).
-    const ICON_CAMERA =
-      '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="2" y="6.5" width="14" height="11" rx="2.5"/><path d="M22.3 8.2 17.5 11v2l4.8 2.8A1 1 0 0 0 23.8 15V9.07a1 1 0 0 0-1.5-.87z"/></svg>';
-    const ICON_MIC =
-      '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 14a3.5 3.5 0 0 0 3.5-3.5v-5a3.5 3.5 0 0 0-7 0v5A3.5 3.5 0 0 0 12 14z"/><path d="M17.5 10.5a1 1 0 0 0-2 0 3.5 3.5 0 0 1-7 0 1 1 0 0 0-2 0 5.5 5.5 0 0 0 4.5 5.41V19H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-3.09a5.5 5.5 0 0 0 4.5-5.41z"/></svg>';
-    const ICON_SCREEN =
-      '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2"/><rect x="8.5" y="19" width="7" height="1.8" rx=".9"/><rect x="11" y="16.5" width="2" height="2.5"/></svg>';
-    const ICON_STOP =
-      '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>';
+    // Generic filled media-input icons (currentColor so they follow the button's on/off color).
+    const ICONS = {
+      camera:
+        '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="M17 10.2l4-2.6A1 1 0 0 1 22.5 8.4v7.2a1 1 0 0 1-1.5.8L17 13.8z"/></svg>',
+      audio:
+        '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M6 11a1 1 0 1 1 2 0 4 4 0 0 0 8 0 1 1 0 1 1 2 0 6 6 0 0 1-5 5.92V20h2a1 1 0 1 1 0 2H9a1 1 0 1 1 0-2h2v-3.08A6 6 0 0 1 6 11z"/></svg>',
+      screen:
+        '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"><path d="M3 4h18a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-7v2h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/></svg>',
+    } as const;
+    // Icon plus a short name, the name shown only where there is room for it (see .btn-label).
+    //
+    // The row was six icons a first-time broadcaster could not identify — a pin with an "i" in
+    // it, a bare "@", and "</>" — so it read as six unknowns rather than six features. The fix
+    // is naming them, not hiding them: a label makes a feature more visible, an overflow menu
+    // makes it less. On a phone there is no room, so the icons stand alone there and the
+    // grouping below does the work instead.
+    const faced = (glyph: string, label: string) =>
+      `<span class="btn-glyph">${glyph}</span><span class="btn-label">${label}</span>`;
 
-    const makeToggle = (key: Toggle, icon: string, label: string) => {
+    const makeToggle = (key: Toggle, icon: string, label: string, name: string) => {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = "publish-btn toggle-btn";
+      // Screen capture (getDisplayMedia) isn't available on mobile browsers — tag the
+      // screen toggle so CSS can hide it on touch devices (iOS/Android).
+      b.className = "publish-btn toggle-btn" + (key === "screen" ? " cap-screen" : "");
       b.title = label;
-      b.innerHTML = icon;
+      b.innerHTML = faced(icon, name);
       b.addEventListener("click", () => {
         capture[key] = !capture[key];
         syncButtons();
@@ -1371,21 +1806,173 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
       toggleButtons[key] = b;
       bar.appendChild(b);
     };
-    makeToggle("camera", ICON_CAMERA, "Camera");
-    makeToggle("audio", ICON_MIC, "Audio (microphone; also mixes in tab/system audio when screen sharing)");
-    makeToggle("screen", ICON_SCREEN, "Screen");
+    // Group one: where the picture and sound come from.
+    makeToggle("camera", ICONS.camera, "Camera", "Camera");
+    makeToggle("audio", ICONS.audio, "Audio (microphone; also mixes in tab/system audio when screen sharing)", "Audio");
+    makeToggle("screen", ICONS.screen, "Screen", "Screen");
 
-    const stopBtn = document.createElement("button");
-    stopBtn.type = "button";
-    stopBtn.className = "publish-btn";
-    stopBtn.title = "Stop";
-    stopBtn.textContent = "⏹️";
-    stopBtn.addEventListener("click", () => {
-      capture.camera = capture.audio = capture.screen = false;
-      syncButtons();
-      void applyState();
+    // --- Location + time burn-in ---
+    //
+    // Deliberately at odds with everything else here, and opt-in for exactly that reason.
+    // Two jobs: make a frame harder to pass off as somewhere or somewhen else, and make
+    // glass-to-glass latency readable by anyone who can see a clock.
+    //
+    // Not a capture toggle: it draws over the video, it isn't a source of one. Turning it on
+    // alone won't start a broadcast or publish a black frame — it arms, and it appears the
+    // moment there's a picture to sit on.
+    //
+    // The coordinates never leave the broadcaster's browser except as pixels: fetched from
+    // our own edge, rendered to canvas, encrypted with the rest of the frame. We don't store
+    // them, and the only people who see them are the ones already holding the link and the
+    // passcode. See src/media/geo-stamp.ts for why the clock is the server's, not the laptop's.
+    // Group two starts here: things drawn on top of, or below, the picture. group-start puts a
+    // little air in front of it, so the row reads as three small clusters instead of six
+    // separate decisions.
+    const stampBtn = document.createElement("button");
+    stampBtn.type = "button";
+    stampBtn.className = "publish-btn toggle-btn group-start";
+    stampBtn.id = "stamp-btn";
+    stampBtn.title = "Burn in location and time — asks your browser for your location, then draws it and a UTC clock into the picture for everyone watching";
+    // A map pin with an info "i" knocked out of it (evenodd), so one glyph says both
+    // "where" and "this is information about the shot".
+    stampBtn.innerHTML = faced(
+      '<svg viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd" width="18" height="18" aria-hidden="true">' +
+      '<path d="M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7z' +
+      'M10.9 6.2a1.1 1.1 0 1 0 2.2 0 1.1 1.1 0 1 0-2.2 0z' +
+      'M11.05 8.6h1.9v4.9h-1.9z"/></svg>',
+      "Location"
+    );
+
+    let stampBusy = false;
+    let stampWarned = false;
+    const toggleStamp = async () => {
+      if (stampBusy) return;
+      stampBusy = true;
+      try {
+        if (geoStamp) {
+          geoStamp.stop();
+          geoStamp = null;
+          comp?.setStampProvider(null);
+        } else {
+          // Ask once per session. This is the one control here that deliberately publishes
+          // something about the broadcaster, it cannot be taken back out of a recording
+          // someone already made, and it is one click away from the camera button.
+          if (!stampWarned && !window.confirm(
+            "Show your location in the video?\n\n" +
+            "Your browser will ask permission for your location. If you allow it, viewers see " +
+            "where you are to within a few metres. If you don't, they see an approximate " +
+            "city-level location from your network address instead — the line says which.\n\n" +
+            "Either way it is drawn into the picture itself, along with a UTC clock. Anyone " +
+            "watching sees them, and they stay in any recording that is made.\n\n" +
+            "They stay inside the encryption: only people holding your link and passcode can " +
+            "see them. We never store them."
+          )) return;
+          stampWarned = true;
+          geoStamp = await createGeoStamp();
+          comp?.setStampProvider(geoStamp.line);
+          // Surface how good the clock is, since the latency reading is only worth this much.
+          console.log(`[stamp] on; burned-in clock good to ±${geoStamp.clockUncertaintyMs().toFixed(1)}ms`);
+        }
+        stampBtn.classList.toggle("toggle-on", !!geoStamp);
+      } catch (e) {
+        console.error("[stamp] could not start the burn-in:", e);
+        geoStamp = null;
+        stampBtn.classList.remove("toggle-on");
+      } finally {
+        stampBusy = false;
+      }
+    };
+    stampBtn.addEventListener("click", () => void toggleStamp());
+    bar.appendChild(stampBtn);
+
+    // --- Handle watermark ---
+    //
+    // The broadcaster's own name on their own picture, drawn subtly in the upper left. Unlike
+    // the location burn-in this reveals nothing they did not choose to type, so there is no
+    // confirmation step — but it lands in the picture just as permanently, and inside the same
+    // encryption, so only link+passcode holders see it.
+    const HANDLE_KEY = "vivoh.handle";
+    const HANDLE_MAX = 32;
+    // Canvas text, not HTML, so there is no markup to escape. Strip control characters anyway:
+    // a newline or a bidi override in a handle turns a watermark into a layout weapon.
+    const cleanHandle = (raw: string): string =>
+      raw.replace(/[\u0000-\u001F\u007F\u200B-\u200F\u2028-\u202E]/g, "")
+        .replace(/^@+/, "")
+        .trim()
+        .slice(0, HANDLE_MAX);
+
+    const handleBtn = document.createElement("button");
+    handleBtn.type = "button";
+    // glyph-btn matches the weight of the 18px icons either side, so "@" reads as one of
+    // them rather than as a label. It is a class rather than an inline style so the
+    // narrow-phone rules can shrink it with everything else.
+    handleBtn.className = "publish-btn toggle-btn glyph-btn";
+    handleBtn.id = "handle-btn";
+    handleBtn.title = "Watermark — show your handle in the corner of the video";
+    handleBtn.innerHTML = faced("@", "Handle");
+
+    handleBtn.addEventListener("click", () => {
+      if (watermark) {
+        watermark = null;
+        comp?.setWatermark(null);
+        handleBtn.classList.remove("toggle-on");
+        return;
+      }
+      // Always ask, prefilled with whatever was used last. One Enter to accept, and it is the
+      // only discoverable way to change or clear a handle without inventing more UI.
+      let stored = "";
+      try { stored = localStorage.getItem(HANDLE_KEY) || ""; } catch { /* private mode */ }
+      const raw = window.prompt("Your handle — shown in the corner of the video for viewers", stored);
+      if (raw == null) return; // cancelled: stay off, keep what was stored
+      const clean = cleanHandle(raw);
+      if (!clean) {
+        // Emptied deliberately — forget it rather than leaving it on the device.
+        try { localStorage.removeItem(HANDLE_KEY); } catch { /* private mode */ }
+        return;
+      }
+      try { localStorage.setItem(HANDLE_KEY, clean); } catch { /* private mode */ }
+      watermark = `@${clean}`;
+      comp?.setWatermark(watermark);
+      handleBtn.classList.add("toggle-on");
     });
-    bar.appendChild(stopBtn);
+    bar.appendChild(handleBtn);
+
+    // --- Live chat ---
+    //
+    // This was a checkbox up in the stream header, next to the id and the passcode, which put
+    // it among the properties of the LINK — things a viewer has to be handed. Chat is not one
+    // of those: it is a room the broadcaster opens and closes while live, in the same family
+    // as the overlay editor and the capture toggles sitting either side of it here.
+    //
+    // The state and the open/close work live near the top of this function; this button is
+    // only the surface. It registers itself so the settings load can light it up.
+    // Group three, on its own: not a source and not something drawn on the picture, but a room
+    // that opens for everyone watching.
+    const chatBtnEl = document.createElement("button");
+    chatBtnEl.type = "button";
+    chatBtnEl.className = "publish-btn toggle-btn group-start";
+    chatBtnEl.id = "chat-btn";
+    chatBtnEl.title = "Live chat — opens a chat panel for you and everyone watching";
+    chatBtnEl.innerHTML = faced(
+      '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true">' +
+      '<path d="M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/>' +
+      "</svg>",
+      "Chat"
+    );
+    chatBtnEl.addEventListener("click", () => setChatEnabled(!chatEnabled));
+    chatBtn = chatBtnEl;
+    chatBtn.classList.toggle("toggle-on", chatEnabled);   // settings may have landed first
+    bar.appendChild(chatBtnEl);
+
+    // No Stop button. It set all three capture flags false and called applyState(), which is
+    // the same "nothing active" branch that turning off your last input already reaches — so
+    // it was a second way to do what the toggles do, sitting in a row that had grown to eight
+    // controls. Every input here is a toggle; switching one off is how it stops, and the
+    // broadcast ends when the last one does.
+    //
+    // What it cost to remove: one click instead of two or three when several inputs are live.
+    // That is a smaller price than an eighth button whose relationship to the other seven has
+    // to be worked out.
     syncButtons();
 
     // Place the control bar directly after the <moq-publish> element.
@@ -1394,7 +1981,7 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
     // --- Status indicator (display only; go-live logging is handled by goLive) ---
     const refreshStatus = () => {
       const conn = publisher.connection?.status?.peek?.() ?? "disconnected";
-      // anyActive covers the composited path too (where state.source is undefined by design).
+      // anyActive covers PiP too (where state.source is undefined by design).
       const hasSource = anyActive || !!publisher.state?.source?.peek?.();
       let emoji = "⚪";
       let text = "Offline";
@@ -1426,16 +2013,29 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
     // --- HTML overlay editor (broadcaster-authored HTML shown to viewers) ---
     const overlayBtn = document.createElement("button");
     overlayBtn.type = "button";
-    overlayBtn.title = "HTML Overlay";
+    overlayBtn.title = "Extras — a promo, a poll, links or notes shown below the video for viewers";
     overlayBtn.className = "publish-btn html-overlay-btn";
-    overlayBtn.textContent = "</>";
-    bar.appendChild(overlayBtn);
+    overlayBtn.innerHTML = faced("&lt;/&gt;", "Extras");
+    // Built here, but it belongs with the other two overlay controls rather than tacked on
+    // past Chat — so it is inserted into the group instead of appended to the end.
+    //
+    // On the name. Not "Code": this page already has a Passcode, and a second thing called a
+    // code reads as related to it. Not "Overlay" either, which was the first attempt — that is
+    // our word for the mechanism, and it is wrong twice over, because this renders in a block
+    // BELOW the video rather than over anything. What a broadcaster is actually doing is
+    // adding something alongside the stream: a product promo, a poll widget, a couple of
+    // links. "Extras", plural, because the plural reads as a category of optional additions
+    // where the singular reads as an adjective missing its noun.
+    bar.insertBefore(overlayBtn, chatBtnEl);
 
     const overlayContainer = document.createElement("div");
     overlayContainer.className = "html-overlay-container";
     overlayContainer.innerHTML = `
       <div class="html-overlay-input" contenteditable="true"></div>
-      <div class="html-overlay-hint">HTML content will be displayed below the video for all viewers</div>
+      <div class="html-overlay-hint">Shown below the video for everyone watching. Headings, lists, tables, links, images and embeds from other sites all work.</div>
+      <div class="html-overlay-warning hidden"></div>
+      <div class="html-overlay-preview-label hidden">Preview — this is exactly what viewers get</div>
+      <div class="html-overlay-preview hidden"></div>
     `;
     const section = document.querySelector("#broadcast-view section");
     if (section && section.parentNode) {
@@ -1443,13 +2043,42 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
     }
 
     const overlayInput = overlayContainer.querySelector(".html-overlay-input") as HTMLDivElement;
+    const overlayPreview = overlayContainer.querySelector(".html-overlay-preview") as HTMLDivElement;
+    const overlayPreviewLabel = overlayContainer.querySelector(".html-overlay-preview-label") as HTMLDivElement;
+    const overlayWarning = overlayContainer.querySelector(".html-overlay-warning") as HTMLDivElement;
     let saveTimeout: number | null = null;
+
+    // Preview through the same sanitiser the viewer uses, and say plainly when something was
+    // dropped. Silent stripping is what made the old, much tighter allowlist read as a bug:
+    // a heading came out as unstyled text and nothing anywhere said why.
+    const refreshPreview = (raw: string) => {
+      const source = raw.trim();
+      if (!source) {
+        overlayPreview.innerHTML = "";
+        overlayPreview.classList.add("hidden");
+        overlayPreviewLabel.classList.add("hidden");
+        overlayWarning.classList.add("hidden");
+        return;
+      }
+      const { html, removed } = renderOverlay(source);
+      overlayPreview.innerHTML = html;
+      overlayPreview.classList.remove("hidden");
+      overlayPreviewLabel.classList.remove("hidden");
+      if (removed.length) {
+        // textContent, not innerHTML — this string is built from the broadcaster's own markup.
+        overlayWarning.textContent = `Removed, because it could run code in a viewer's browser: ${removed.join(", ")}`;
+        overlayWarning.classList.remove("hidden");
+      } else {
+        overlayWarning.classList.add("hidden");
+      }
+    };
 
     // Load existing overlay content
     getStreamSettings(streamId).then((settings) => {
       if (settings.overlay_html) {
         overlayInput.textContent = settings.overlay_html;
         overlayBtn.classList.add("active");
+        refreshPreview(settings.overlay_html);
       }
     });
 
@@ -1460,6 +2089,7 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
         const content = overlayInput.textContent || "";
         updateStreamSettings(streamId, { overlay_html: content });
         overlayBtn.classList.toggle("active", !!content.trim());
+        refreshPreview(content);
       }, 500);
     });
 
@@ -1471,22 +2101,385 @@ function initBroadcastView(streamId: string, user: User | null, openAccess = fal
       }
     });
   }
-
-  // New stream button
-  const newStreamBtn = document.getElementById("new-stream-btn");
-  if (newStreamBtn) {
-    newStreamBtn.addEventListener("click", async () => {
-      const newStream = await generateStreamId();
-      // Preserve override params (publisher-cdn / viewer-cdn / origin) for the new
-      // stream; URLSearchParams guarantees a single "?" + "&"-separated query.
-      const next = carryOverrideParams(window.location.search);
-      next.set("stream", newStream);
-      window.location.href = withQuery("/", next);
-    });
-  }
 }
 
 // Show login required overlay for watch
+/**
+ * A share link whose `#k=` fragment is missing or was stripped. Common causes: the link was
+ * re-typed, passed through something that drops fragments, or only the stream id was shared.
+ * Nothing here can be fixed by signing in — without the fragment the stream is undecryptable
+ * by anyone, us included, so the only remedy is to obtain the complete link.
+ */
+function showWatchKeyMissing() {
+  const section = document.getElementById("watch-view")?.querySelector("section");
+  if (!section) return;
+  section.innerHTML = `
+    <div class="login-required">
+      <h2>This link is missing its key</h2>
+      <p>
+        Vivoh.Earth streams are encrypted in the broadcaster's browser, and the key to decrypt
+        one travels only in the part of the link after the <code>#</code>. This link does not
+        carry it, so the stream cannot be played.
+      </p>
+      <p>Ask the broadcaster for the complete link — and take care to copy all of it.</p>
+    </div>`;
+}
+
+/**
+ * Ask for the passcode the broadcaster sent by another channel. Resolves with what was
+ * typed; nothing validates it here, because nothing can — the value is mixed into key
+ * derivation and a wrong one just yields a key that does not decrypt. No request is made,
+ * so no server learns that a guess happened, or whether it was right.
+ */
+// Wallflower prompts for a publish key here. Nothing corresponds to it in this deployment:
+// a broadcaster is admitted by being signed in and on the allow list, and neither of those
+// is something they can supply from a dialog. Refusals surface as an error from go-live.
+
+/**
+ * `first`   — we know from the link that a passcode is needed and have not asked yet.
+ * `wrong`   — nothing has ever decrypted, so what they typed is not the passcode.
+ * `rotated` — frames WERE decrypting and then stopped, which only happens when the
+ *             broadcaster cycled the passcode mid-stream. Saying "didn't work" there blames
+ *             the viewer for something that happened at the other end.
+ */
+type PasscodeAsk = "first" | "wrong" | "rotated";
+
+function promptPasscode(ask: PasscodeAsk = "first"): Promise<string | null> {
+  const TITLE: Record<PasscodeAsk, string> = {
+    first: "This stream needs a passcode",
+    wrong: "That passcode didn't work",
+    rotated: "The broadcaster changed the passcode",
+  };
+  const BODY: Record<PasscodeAsk, string> = {
+    first: "The broadcaster set a passcode and sent it to you separately from this link.",
+    wrong: "The stream is playing, but not with that passcode. Check it and try again.",
+    rotated: "This stream re-keyed while you were watching. Enter the new passcode to carry on.",
+  };
+  // Overlay, NOT a replacement for the section's contents. Rewriting the section's innerHTML
+  // destroys the <moq-watch> element the player lives in, so the stream can never render
+  // afterwards however correct the passcode is.
+  const overlay = document.createElement("div");
+  overlay.style.cssText =
+    "position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;" +
+    "background:rgba(0,0,0,0.82);backdrop-filter:blur(2px);padding:20px;";
+  overlay.innerHTML = `
+    <div style="max-width:26em;text-align:center;color:#e5e5e5;">
+      <h2 style="margin:0 0 10px;font-size:1.25rem;">${TITLE[ask]}</h2>
+      <p style="margin:0 0 16px;color:#a3a3a3;line-height:1.5;">${BODY[ask]}</p>
+      <div style="display:flex;gap:8px;justify-content:center;">
+        <input id="passcode-entry" type="text" autocomplete="off" autocapitalize="characters"
+               spellcheck="false" placeholder="passcode"
+               style="padding:9px 12px;font-family:ui-monospace,monospace;font-size:1.05rem;
+                      letter-spacing:0.12em;text-transform:uppercase;width:11em;border-radius:4px;
+                      border:1px solid #4a4a4a;background:#1a1a1a;color:#e5e5e5;">
+        <button id="passcode-go"
+                style="padding:9px 18px;border-radius:4px;border:0;background:#33ddc0;
+                       color:#0a0a0a;font:inherit;font-weight:600;cursor:pointer;">Watch</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  return new Promise((resolve) => {
+    const input = overlay.querySelector("#passcode-entry") as HTMLInputElement | null;
+    const submit = () => {
+      const v = input?.value.trim().toUpperCase();
+      if (!v) return;
+      overlay.remove();
+      resolve(v);
+    };
+    overlay.querySelector("#passcode-go")?.addEventListener("click", submit);
+    input?.addEventListener("keypress", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") submit();
+    });
+    input?.focus();
+  });
+}
+
+// ── Reacting to a kill ────────────────────────────────────────────────────────────────
+// Kill is enforced server-side at /route and at go-live, but both are request-time checks and
+// an established session makes no further requests. Measured, not assumed: after a kill a
+// viewer kept decoding fresh frames for a full minute and the publisher kept sending, and
+// both would have continued until something made them reconnect
+// (scripts/e2e/kill-live-viewer.mjs). Terminating a live broadcast therefore needs the
+// clients to notice, which they do via the `killed` flag on the settings poll they already run.
+//
+// This is cooperative: a modified client can ignore it. That is an acceptable limit, because
+// a modified client can also just record the stream — this closes the gap for the honest
+// clients that every real viewer is actually running, and nothing more is claimed for it.
+
+/**
+ * Stop everything and say why. Replacing the section's contents is correct HERE — unlike the
+ * passcode prompt, which must not — because tearing down <moq-watch> is exactly the goal: it
+ * is what actually ends the media session rather than merely hiding it.
+ */
+function stopForKill(role: "viewer" | "broadcaster"): void {
+  const watcher = document.querySelector("moq-watch");
+  if (watcher) {
+    watcher.removeAttribute("url");
+    watcher.remove();
+  }
+
+  const publisher = document.querySelector("moq-publish") as (MoqPublishElement & { source?: unknown }) | null;
+  if (publisher) {
+    publisher.removeAttribute("url");
+    try {
+      publisher.announce = false;
+      publisher.source = null;
+    } catch {
+      // Older element builds expose these differently; removing the URL above is what stops
+      // the connection, and the rest is best-effort tidying.
+    }
+    publisher.remove();
+  }
+
+  // Release the camera and microphone. Leaving the capture light on after a broadcast has
+  // been terminated would be its own small betrayal.
+  for (const el of document.querySelectorAll("video")) {
+    const stream = (el as HTMLVideoElement).srcObject as MediaStream | null;
+    stream?.getTracks?.().forEach((t) => t.stop());
+    (el as HTMLVideoElement).srcObject = null;
+  }
+
+  const section =
+    document.querySelector("#watch-view section") ??
+    document.querySelector("#broadcast-view section") ??
+    document.body;
+
+  const panel = document.createElement("div");
+  panel.className = "login-required";
+  panel.style.cssText = "text-align:center;padding:2.5rem 1.5rem;max-width:34em;margin:0 auto;";
+  const heading = document.createElement("h2");
+  heading.textContent = "This stream has been terminated";
+  const body = document.createElement("p");
+  body.style.cssText = "color:#a3a3a3;line-height:1.55;";
+  body.textContent =
+    role === "broadcaster"
+      ? "An operator stopped this broadcast. Publishing has ended and your camera and microphone have been released. Nothing that was already sent can be recalled, and nobody here can play it back."
+      : "An operator stopped this broadcast in response to a report. Playback has ended.";
+  panel.append(heading, body);
+  section.replaceChildren(panel);
+}
+
+// ── Reporting a stream ────────────────────────────────────────────────────────────────
+// We cannot see what is being broadcast — that is the point of the encryption — so we have no
+// way to notice a problem ourselves. Every abuse signal has to come from someone holding a
+// key, which means a viewer. This control is the only sensor the kill switch has.
+//
+// What travels: the stream id, a category, and whatever the viewer types. Never the key. The
+// fragment is not read here, and must not be: browsers do not transmit it, and quietly
+// attaching it would hand the server the one thing the whole design keeps out of its reach.
+
+interface ReportConfig {
+  categories: string[];
+  note_max: number;
+  evidence_supported: boolean;
+}
+
+const REPORT_LABELS: Record<string, string> = {
+  "sexual-content-involving-minors": "Sexual content involving a minor",
+  "violence-or-threats": "Violence or threats",
+  "non-consensual-content": "Someone filmed without their consent",
+  harassment: "Harassment",
+  other: "Something else",
+};
+
+/** Small "Report" affordance in the badge pill above the player. */
+function mountReportControl(streamId: string): void {
+  const sec = document.querySelector("#watch-view section") as HTMLElement | null;
+  if (!sec || sec.querySelector(".watch-report-btn")) return;
+  if (!sec.style.position) sec.style.position = "relative";
+
+  let pill = sec.querySelector(".watch-badges") as HTMLElement | null;
+  if (!pill) {
+    pill = document.createElement("div");
+    pill.className = "watch-badges";
+    pill.style.cssText =
+      "position:absolute;top:10px;right:10px;z-index:5;display:flex;align-items:center;" +
+      "gap:8px;background:rgba(0,0,0,0.6);border-radius:999px;padding:4px 10px;";
+    sec.appendChild(pill);
+  }
+
+  const btn = document.createElement("button");
+  btn.className = "watch-report-btn";
+  btn.type = "button";
+  btn.textContent = "Report";
+  btn.title = "Tell the operator something is wrong with this stream";
+  btn.style.cssText =
+    "background:none;border:0;padding:0 0 0 8px;margin:0;color:#a3a3a3;font:inherit;" +
+    "font-size:0.75rem;cursor:pointer;border-left:1px solid #444;line-height:1;";
+  btn.addEventListener("mouseenter", () => { btn.style.color = "#e5e5e5"; });
+  btn.addEventListener("mouseleave", () => { btn.style.color = "#a3a3a3"; });
+  btn.addEventListener("click", () => openReportDialog(streamId));
+  pill.appendChild(btn);
+}
+
+/**
+ * Overlay, NOT a rewrite of the section — replacing the section's contents destroys the
+ * <moq-watch> element and the stream never comes back. (Learned the hard way on the passcode
+ * prompt, which had exactly this bug.)
+ */
+function openReportDialog(streamId: string): void {
+  // Rendered from local defaults FIRST, then reconciled with the server's config when it
+  // arrives. Awaiting the fetch before drawing anything makes the button feel dead on a slow
+  // connection — and someone reaching for a report button is not in a mood to wonder whether
+  // they missed. A report filed against a guessed category list still reaches a person.
+  const cfg: ReportConfig = {
+    categories: Object.keys(REPORT_LABELS),
+    note_max: 500,
+    evidence_supported: false,
+  };
+
+  const overlay = document.createElement("div");
+  overlay.style.cssText =
+    "position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;" +
+    "background:rgba(0,0,0,0.85);backdrop-filter:blur(2px);padding:20px;";
+
+  const card = document.createElement("div");
+  card.style.cssText =
+    "max-width:30em;width:100%;color:#e5e5e5;background:#131313;border:1px solid #2a2a2a;" +
+    "border-radius:8px;padding:22px;text-align:left;";
+  card.innerHTML = `
+    <h2 style="margin:0 0 10px;font-size:1.2rem;">Report this stream</h2>
+    <p style="margin:0 0 16px;color:#a3a3a3;line-height:1.5;font-size:0.9rem;">
+      This goes to the operator, who can stop the broadcast. They cannot see it — nobody can
+      decrypt a Vivoh.Earth stream without <span id="report-what-it-takes">the link you were given</span>.
+    </p>
+    <label style="display:block;margin:0 0 6px;font-size:0.85rem;color:#d4d4d4;">What is wrong?</label>
+    <select id="report-category"
+            style="width:100%;padding:9px 10px;margin:0 0 14px;border-radius:4px;
+                   border:1px solid #3a3a3a;background:#1a1a1a;color:#e5e5e5;font:inherit;"></select>
+    <label style="display:block;margin:0 0 6px;font-size:0.85rem;color:#d4d4d4;">
+      Anything else? <span style="color:#737373;">(optional)</span>
+    </label>
+    <textarea id="report-note" rows="3" maxlength="${cfg.note_max}"
+              placeholder="Please don't include personal details about yourself or anyone else."
+              style="width:100%;padding:9px 10px;border-radius:4px;border:1px solid #3a3a3a;
+                     background:#1a1a1a;color:#e5e5e5;font:inherit;resize:vertical;"></textarea>
+    <div id="report-evidence-row" style="margin:14px 0 0;display:none;">
+      <label style="display:flex;gap:9px;align-items:flex-start;font-size:0.85rem;color:#a3a3a3;
+                    line-height:1.45;cursor:pointer;">
+        <input type="checkbox" id="report-evidence" style="margin-top:3px;flex:none;">
+        <span>
+          <strong style="color:#d4d4d4;font-weight:600;">Send my viewing link so they can check.</strong>
+          <span id="report-evidence-detail"></span>
+        </span>
+      </label>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;margin:20px 0 0;">
+      <button id="report-cancel"
+              style="padding:9px 16px;border-radius:4px;border:1px solid #3a3a3a;background:none;
+                     color:#a3a3a3;font:inherit;cursor:pointer;">Cancel</button>
+      <button id="report-send"
+              style="padding:9px 18px;border-radius:4px;border:0;background:#33ddc0;color:#0a0a0a;
+                     font:inherit;font-weight:600;cursor:pointer;">Send report</button>
+    </div>`;
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+
+  // Options built through the DOM rather than interpolated into innerHTML: the category list
+  // arrives over the network, and this page is holding a content key.
+  const select = card.querySelector("#report-category") as HTMLSelectElement;
+  for (const id of cfg.categories) {
+    const opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = REPORT_LABELS[id] ?? id;
+    select.appendChild(opt);
+  }
+
+  // What the link actually gives away depends on whether this stream has a passcode. The link
+  // carries `#k=` and, when a passcode is set, only the marker `p=1` — never the passcode
+  // itself, which the viewer typed and which is mixed into key derivation separately. So on a
+  // passcode stream the link ALONE decrypts nothing, and describing it as "the key" would be
+  // asking someone to hand something over under a false account of what it unlocks.
+  const passcodeProtected = new URLSearchParams(location.hash.replace(/^#/, "")).get("p") === "1";
+
+  // Name everything decryption actually requires. On a passcode stream the link is only half
+  // of it, and saying "the link" alone understates what protects this broadcaster.
+  const takes = card.querySelector("#report-what-it-takes");
+  if (takes && passcodeProtected) takes.textContent = "the link and the passcode you were given";
+
+  const detail = card.querySelector("#report-evidence-detail");
+  if (detail) {
+    detail.textContent = passcodeProtected
+      ? " This stream also has a passcode, which is not part of your link — so the link alone " +
+        "will not let them watch. Put the passcode in the box above too if you want them to be " +
+        "able to check. Otherwise they will act on your description alone."
+      : " Your link contains the key that decrypts this stream. Ticking this shares it with the " +
+        "operator, letting them see the stream before deciding. Leave it unticked and they will " +
+        "act on your description alone.";
+  }
+
+  // Reconcile with the server. The evidence option appears only if there is a webhook to send
+  // it to — with none configured there is nowhere for a key to go that is not the database,
+  // and it is not going in the database.
+  void fetch("/api/report/config")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((live: ReportConfig | null) => {
+      if (!live || !overlay.isConnected) return;
+      if (live.note_max) {
+        (card.querySelector("#report-note") as HTMLTextAreaElement | null)?.setAttribute("maxlength", String(live.note_max));
+      }
+      const known = new Set(cfg.categories);
+      for (const id of live.categories ?? []) {
+        if (known.has(id)) continue;
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = REPORT_LABELS[id] ?? id;
+        select.appendChild(opt);
+      }
+      if (live.evidence_supported) {
+        const row = card.querySelector("#report-evidence-row") as HTMLElement | null;
+        if (row) row.style.display = "block";
+      }
+    })
+    .catch(() => {
+      // Offline or blocked: the dialog is already usable, which is the point of drawing first.
+    });
+
+  const close = () => overlay.remove();
+  card.querySelector("#report-cancel")?.addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+
+  card.querySelector("#report-send")?.addEventListener("click", async () => {
+    const sendBtn = card.querySelector("#report-send") as HTMLButtonElement;
+    sendBtn.disabled = true;
+    sendBtn.textContent = "Sending…";
+
+    const shareEvidence = (card.querySelector("#report-evidence") as HTMLInputElement | null)?.checked;
+    try {
+      await fetch("/api/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stream_id: streamId,
+          category: select.value,
+          note: (card.querySelector("#report-note") as HTMLTextAreaElement).value,
+          // location.href carries the fragment, and therefore the key. Read ONLY inside this
+          // branch, so the only path by which a key can leave a viewer's browser is a person
+          // deliberately ticking a box.
+          ...(shareEvidence ? { evidence_url: location.href } : {}),
+        }),
+      });
+    } catch {
+      // Swallowed on purpose. A failed report must not leave the reporter staring at an error
+      // that invites them to retry in a loop; the operator's copy either arrived or did not.
+    }
+
+    card.innerHTML = `
+      <h2 style="margin:0 0 10px;font-size:1.2rem;">Thank you</h2>
+      <p style="margin:0 0 18px;color:#a3a3a3;line-height:1.5;font-size:0.9rem;">
+        A person will read this. There is no automatic action — reports are not a vote, and a
+        stream is never stopped by a count.
+      </p>
+      <div style="display:flex;justify-content:flex-end;">
+        <button id="report-done"
+                style="padding:9px 18px;border-radius:4px;border:0;background:#33ddc0;
+                       color:#0a0a0a;font:inherit;font-weight:600;cursor:pointer;">Close</button>
+      </div>`;
+    card.querySelector("#report-done")?.addEventListener("click", close);
+  });
+}
+
 function showWatchLoginRequired() {
   const watchView = document.getElementById("watch-view");
   if (!watchView) return;
@@ -1509,17 +2502,17 @@ function showWatchLoginRequired() {
           Google
         </button>
         <button id="watch-login-microsoft" class="btn btn-microsoft">
-          <svg viewBox="0 0 21 21" width="18" height="18">
-            <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
-            <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
-            <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
-            <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <path fill="#F25022" d="M2 2h9.5v9.5H2z"/>
+            <path fill="#7FBA00" d="M12.5 2H22v9.5h-9.5z"/>
+            <path fill="#00A4EF" d="M2 12.5h9.5V22H2z"/>
+            <path fill="#FFB900" d="M12.5 12.5H22V22h-9.5z"/>
           </svg>
           Microsoft
         </button>
         <button id="watch-login-discord" class="btn btn-discord">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-            <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <path fill="#5865F2" d="M20.3 4.4A19.8 19.8 0 0 0 15.4 3l-.3.5c1.6.4 2.9 1 4.1 1.8a13.9 13.9 0 0 0-11-1.2c-.4.1-.9.3-1.3.4.4-.2.9-.4 1.4-.6l-.2-.4a19.8 19.8 0 0 0-4.9 1.4C1 9 .4 13.4.7 17.8a19.9 19.9 0 0 0 6 3l1.2-1.9c-.7-.2-1.3-.5-1.9-.9l.5-.3a14.2 14.2 0 0 0 12 0l.5.3c-.6.4-1.2.7-1.9.9l1.2 1.9a19.9 19.9 0 0 0 6-3c.4-5.1-.6-9.5-4-13.4zM8.4 15.3c-1.2 0-2.1-1.1-2.1-2.4 0-1.3.9-2.4 2.1-2.4 1.2 0 2.2 1.1 2.1 2.4 0 1.3-.9 2.4-2.1 2.4zm7.2 0c-1.2 0-2.1-1.1-2.1-2.4 0-1.3.9-2.4 2.1-2.4 1.2 0 2.2 1.1 2.1 2.4 0 1.3-.9 2.4-2.1 2.4z"/>
           </svg>
           Discord
         </button>
@@ -1533,13 +2526,101 @@ function showWatchLoginRequired() {
 }
 
 // Initialize watch view
+// Mode C (Enterprise): turn an enterprise route into a connectable QUIC endpoint via the
+// autoscaler's proven two-step /assign flow — run from the BROWSER because only it can
+// reach the PRIVATE on-net relay. Step 1: tell the local relay to pull the broadcast from
+// the remote edge (origin) using the cluster pull pass; it replies "host:port". Step 2 is
+// the returned URL: connect there with the watchToken and subscribe to <broadcast>.
+// C1 contract: auth is the BYOK watch token as a `jwt=` QUERY PARAM (not an Authorization
+// header — a header would trigger a CORS preflight on this cross-origin call; a query param
+// doesn't). The edge resolves the tenant by the token's kid, validates it against this
+// tenant's verify_jwk, and requires a valid subscribe <broadcast> scope. No provisioning
+// bearer ever enters the browser → relay-blind preserved. `origin`/`pull` are added ONLY for
+// cross-pull (edge pulls the broadcast from the publisher's origin relay); in standalone mode
+// the worker omits edgeHost/pullToken because the publisher is already on the edge. The
+// response body is the EDGE's media endpoint "host:port" as plain text (some builds wrap it as
+// JSON {relay}, so we accept both). The browser MUST dial that returned value (NOT `origin`,
+// which is only the upstream the edge pulls from). The same watch token then drives the QUIC
+// connect. Returns null on any failure → caller falls to B/A.
+async function resolveEnterpriseConnectUrl(route: StreamRoute): Promise<string | null> {
+  if (!route.broadcast || !route.watchToken) return null;
+  try {
+    const q = new URLSearchParams({
+      broadcast: route.broadcast,
+      jwt: route.watchToken, // same watch token used on the QUIC connect step
+    });
+    if (route.edgeHost) q.set("origin", route.edgeHost); // cross-pull only (upstream, not dialed)
+    if (route.pullToken) q.set("pull", route.pullToken); // cross-pull only
+    // Transport hint from the viewer URL (?xport=): forwarded verbatim to the edge's /assign.
+    // Not secret and not part of any token, so read it straight from the page URL rather than
+    // threading it through the route resolver. xport=iroh makes the edge pull from the origin
+    // over iroh/DHT; any other value or absent leaves today's host:port behavior unchanged.
+    const xport = new URLSearchParams(location.search).get("xport");
+    if (xport) q.set("xport", xport);
+    const res = await fetch(`https://${route.relay}/assign?${q.toString()}`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.text()).trim();
+    if (!body) return null;
+    // Plain "host:port" or JSON {relay:"host:port"} (mirrors the Worker's dual-mode /assign parse).
+    let hostPort = body;
+    if (body.startsWith("{")) {
+      try {
+        hostPort = String((JSON.parse(body) as { relay?: string }).relay ?? "").trim();
+      } catch {
+        return null;
+      }
+    }
+    if (!hostPort) return null;
+    return `https://${hostPort}/?jwt=${route.watchToken}`;
+  } catch (e) {
+    console.warn("[route] enterprise /assign preflight failed", e);
+    return null;
+  }
+}
+
+// Mode C fallback: reload forcing ?noEnterprise=1 so the Worker skips Mode C and returns
+// B/A — the viewer always ends up watching even when the private relay is unreachable.
+function forceBAFallback(): void {
+  const u = new URL(window.location.href);
+  u.searchParams.set("noEnterprise", "1");
+  window.location.replace(u.toString());
+}
+
+// Promotional landing page (bare "/"). The content is static HTML in index.html; this
+// just reveals the section. The Broadcast / Watch entry points are plain links to
+// /broadcast and /watch (see getRouteInfo).
+function initLandingView() {
+  document.getElementById("landing-view")?.classList.remove("hidden");
+  // The byline is redundant on the promo page (the hero says the same thing); hide it
+  // here only — it stays in the header on the broadcast and watch pages.
+  document.getElementById("site-tagline")?.classList.add("hidden");
+  // The footer used to be hidden here, on the reasoning that MoQ | TinyMoQ | Browser Support
+  // | Server Status were operator-ish links with no place on a promo page. That reasoning
+  // expired when "How it works" moved into it: hiding the footer would leave a first-time
+  // visitor with no way to read the one explanation this product is actually selling.
+  document.querySelector("footer")?.classList.remove("hidden");
+  // Server Status is meaningless here — no relay has been assigned, so the panel can only
+  // report a placeholder, and it previously reported a fleet host this client never contacts.
+  // It belongs on the pages where a connection actually exists.
+  document.getElementById("server-status-item")?.classList.add("hidden");
+}
+
 async function initWatchView(streamId: string, user: User | null) {
   // The ".hang" suffix makes the catalog format explicit so the watcher can parse
   // the catalog and subscribe to video/audio tracks (otherwise detectFormat() is
   // undefined and the viewer only fetches catalog.json, never video/hd).
   const streamName = `${NAMESPACE_PREFIX}/${streamId}.hang`;
 
-  console.log(`Vivoh.Earth Watch - Stream: ${streamId}`);
+  console.log(`MoQplay Watch - Stream: ${streamId}`);
+
+  // Link secret and passcode, populated once the encryption block below runs. Declared here
+  // because the chat panel is created earlier in this function and derives its key lazily
+  // from whatever these hold at the moment a message is sent or received.
+  let watchLinkSecret = "";
+  let watchPasscode: string | undefined;
+  let watchSalt: string | undefined;
 
   // Show watch view, hide broadcast view
   document.getElementById("watch-view")?.classList.remove("hidden");
@@ -1560,13 +2641,26 @@ async function initWatchView(streamId: string, user: User | null) {
 
   // Live chat for viewers, when the broadcaster enabled it (right column on desktop,
   // bottom overlay on mobile). The WS is also gated server-side on chat_enabled.
-  if (settings.chat_enabled) {
-    const watchChatPanel = document.getElementById("watch-chat") as HTMLElement | null;
-    if (watchChatPanel) {
-      watchChatPanel.classList.remove("hidden");
-      initChat({ streamId, container: watchChatPanel, user });
-    }
-  }
+  // Kept as open/close helpers so the settings poll below can react to the broadcaster
+  // toggling chat mid-stream (mirrors the broadcaster's own openChat/closeChat).
+  const watchChatPanel = document.getElementById("watch-chat") as HTMLElement | null;
+  let watchChatHandle: ChatHandle | null = null;
+  const openWatchChat = () => {
+    if (!watchChatPanel || watchChatHandle) return;
+    watchChatPanel.classList.remove("hidden");
+    watchChatHandle = initChat({
+      streamId,
+      container: watchChatPanel,
+      user,
+      chatKey: () => deriveChatKey(watchLinkSecret, { streamId, salt: watchSalt, passcode: watchPasscode }),
+    });
+  };
+  const closeWatchChat = () => {
+    watchChatHandle?.destroy();
+    watchChatHandle = null;
+    watchChatPanel?.classList.add("hidden");
+  };
+  if (settings.chat_enabled) openWatchChat();
 
   // Set stream name on watcher (headless <moq-watch> core element)
   const watcher = document.querySelector("moq-watch") as MoqWatchElement | null;
@@ -1574,6 +2668,8 @@ async function initWatchView(streamId: string, user: User | null) {
     // --- TEMP timing probe: localize viewer join latency by phase ---
     const t0 = performance.now();
     const ms = () => `${Math.round(performance.now() - t0)}ms`;
+    // Strongest "we're actually playing" signal — the Mode-C fallback watchdog reads it.
+    let gotFirstFrame = false;
     const wDiag = watcher as unknown as {
       connection?: { status?: { subscribe?: (fn: (s: string) => void) => void } };
       broadcast?: { catalog?: { subscribe?: (fn: (c: unknown) => void) => void } };
@@ -1598,13 +2694,12 @@ async function initWatchView(streamId: string, user: User | null) {
         const result = origDrawImage.apply(this, args);
         // First real frame: report, then restore the prototype method (no per-frame overhead).
         delete (ctx as unknown as { drawImage?: unknown }).drawImage;
+        gotFirstFrame = true;
         const sinceLoad = performance.now(); // ms since page navigation start
+        // Console only. This used to print into the footer beside the nav links, where it read
+        // as a permanent status field on a page that is otherwise a player — the number is
+        // diagnostic, and diagnostics do not belong in a viewer's chrome.
         console.log(`[watch-timing] FIRST FRAME painted @ ${ms()} (from page load: ${Math.round(sinceLoad)}ms)`);
-        const ttffEl = document.getElementById("ttff-display");
-        if (ttffEl) {
-          ttffEl.style.color = "#737373";
-          ttffEl.textContent = ` | first frame: ${(sinceLoad / 1000).toFixed(2)}s`;
-        }
         return result;
       };
     }
@@ -1615,16 +2710,29 @@ async function initWatchView(streamId: string, user: User | null) {
     const viewerCdn = getCdnOverride("viewer-cdn");
     // Optional forced cross-cluster origin (publisher relay host:port) for testing;
     // normally the Worker derives it from the publisher's stored relay in D1.
-    const originOverride = new URLSearchParams(repairSearch(window.location.search)).get("origin")?.trim() || undefined;
+    const originOverride = new URLSearchParams(window.location.search).get("origin")?.trim() || undefined;
     if (viewerCdn) console.log("[routing] viewer CDN override:", viewerCdn, originOverride ? `(forced origin ${originOverride})` : "");
 
     // Resolve the relay via /route. There is NO static relay to fall back to — every
     // connection must use the dynamic host:port from the directory. If the broadcast
     // isn't live yet (404), poll until it is, showing a "waiting" state. Connect once.
-    let route = await getStreamRoute(streamId, viewerCdn, originOverride);
-    console.log(`[watch-timing] route resolved @ ${ms()} ->`, route?.relay ?? "(offline, polling)");
+    // After a failed enterprise (Mode C) attempt we reload with ?noEnterprise=1 so the
+    // Worker skips Mode C and returns B/A — guaranteeing the viewer ends up watching.
+    const noEnterprise = new URLSearchParams(window.location.search).get("noEnterprise") === "1";
 
-    if (!route) {
+    // Prove we hold the share link before asking for a token. Derived here, ahead of the
+    // route call, because every /route request needs it — the first one, the offline polling
+    // loop, and each token renewal. A viewer without a fragment simply has no tag and gets
+    // "offline", which is the correct answer for someone who was never given the link.
+    const routeTag = await (async () => {
+      const secret = new URLSearchParams(location.hash.replace(/^#/, "")).get("k");
+      return secret ? deriveRouteTag(secret, streamId) : undefined;
+    })();
+
+    let routeInfo = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag });
+    console.log(`[watch-timing] route resolved @ ${ms()} ->`, routeInfo?.relay ?? "(offline, polling)", routeInfo?.mode ? `(mode=${routeInfo.mode})` : "");
+
+    if (!routeInfo) {
       const section = document.querySelector("#watch-view section");
       const waitingEl = document.createElement("div");
       waitingEl.className = "watch-waiting";
@@ -1634,89 +2742,402 @@ async function initWatchView(streamId: string, user: User | null) {
 
       let stopped = false;
       window.addEventListener("beforeunload", () => { stopped = true; });
-      while (!route && !stopped) {
+      while (!routeInfo && !stopped) {
         await new Promise((r) => setTimeout(r, 1500));
-        route = await getStreamRoute(streamId, viewerCdn, originOverride);
+        routeInfo = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag });
       }
       waitingEl.remove();
       if (stopped) return;
-      console.log(`[watch-timing] route became available @ ${ms()} ->`, route?.relay);
+      console.log(`[watch-timing] route became available @ ${ms()} ->`, routeInfo?.relay);
     }
 
-    if (!route || !route.jwt) {
-      console.error("[routing] viewer route missing relay or token; cannot connect");
-      return;
-    }
-    if (!route.path) {
-      console.error("[moqpro] viewer route missing path; cannot connect");
-      return;
-    }
-    // Player overlay: the audience pill (Public / Invite-only).
-    {
+    if (!routeInfo) return; // stopped before a route resolved
+    // Relay-blind E2E: if the stream is encrypted, arm decryption and install the
+    // content key BEFORE connecting. If the key was withheld (auth-gated stream,
+    // viewer not signed in) we can't decrypt — surface the sign-in requirement.
+    // The content key is per-broadcast and relay-independent, so it survives any
+    // later relay change in the refresh loop without re-fetching.
+    if (routeInfo.encrypted) {
+      // The key comes from OUR OWN URL fragment, never from the server response. The Worker
+      // has no content key to withhold or release, so this is not an access-control check —
+      // possessing the complete link simply is the ability to decrypt.
+      const frag = new URLSearchParams(location.hash.replace(/^#/, ""));
+      const linkSecret = frag.get("k");
+      watchLinkSecret = linkSecret ?? "";
+      if (!linkSecret) {
+        console.warn("[crypto] share link carries no #k= secret; the stream cannot be decrypted");
+        showWatchKeyMissing();
+        return;
+      }
+      // `p=1` means the broadcaster mixed a passcode in. Ask before connecting so the key is
+      // complete when the first frame arrives.
+      let passcode: string | undefined;
+      if (frag.get("p") === "1") {
+        const entered = await promptPasscode();
+        if (!entered) return;
+        passcode = entered;
+        watchPasscode = entered;
+        // A wrong passcode looks exactly like a stalled stream at the pixel level. The
+        // stuck-player watchdog further down owns saying so: it polls the decrypt counters, so
+        // it can tell a wrong key from a dead decoder and re-prompt without a reload. A
+        // one-shot timer here used to do it, and had to go — it fired on a timer rather than on
+        // evidence, and would now race the watchdog into a second overlay.
+      }
+      watchSalt = routeInfo.salt ?? undefined;
+      armViewer();
+      await deriveMediaKey(linkSecret, { streamId, salt: watchSalt, passcode });
+
+      // Tell the viewer what protects what, where they form the expectation.
       const sec = document.querySelector("#watch-view section") as HTMLElement | null;
       if (sec) {
         if (!sec.style.position) sec.style.position = "relative";
         const overlay = document.createElement("div");
+        overlay.className = "watch-badges";
         overlay.style.cssText =
           "position:absolute;top:10px;right:10px;z-index:5;display:flex;align-items:center;" +
           "gap:8px;background:rgba(0,0,0,0.6);border-radius:999px;padding:4px 10px;";
-        const aud = createAudienceBadge(settings.require_auth);
-        aud.style.border = "none"; aud.style.padding = "0";
-        overlay.append(aud);
+        const rb = createRelayBlindBadge();
+        rb.style.border = "none";
+        rb.style.padding = "0";
+        overlay.append(rb);
         sec.appendChild(overlay);
       }
     }
-    setActiveRelay(route.relay);
-    // Drive the hang <moq-watch> element: point it at cdn.moq.pro and let it decode
-    // (H.264/Opus over WebTransport with a WebSocket fallback) into its <canvas> — this
-    // is what makes iOS/Safari play. The catalog format is set explicitly because the
-    // host isn't mediaoverquic.com and the broadcast name is empty (no auto-detect).
-    watcher.setAttribute("catalog-format", "hang");
-    watcher.setAttribute("name", "");
-    watcher.setAttribute("url", moqUrl(route.relay, route.path, route.jwt));
-    console.log(`[watch-timing] moq.pro watch started @ ${ms()}`);
 
-    // First click/tap unmutes (autoplay policy: video autoplays muted).
-    const enableAudio = () => {
-      try { watcher.muted = false; } catch { /* */ }
-      window.removeEventListener("click", enableAudio);
-    };
-    window.addEventListener("click", enableAudio);
-
-    // Log watch event
-    let watchEventId: number | null = null;
-
-    // Start logging when page loads
-    logWatchStart(streamId).then(id => {
-      watchEventId = id;
-      console.log("Watch started, event ID:", id);
-    });
-
-    // Log end on page unload
-    window.addEventListener("beforeunload", () => {
-      if (watchEventId) {
-        logWatchEnd(watchEventId);
+    // Mounted outside the encryption branch: a viewer must be able to report a stream whether
+    // or not decryption was set up. It creates its own pill if the badge above did not run.
+    mountReportControl(streamId);
+    if (routeInfo.mode === "enterprise") {
+      // Mode C: an ASN match does NOT guarantee the user can actually reach the private
+      // relay (VPN off-net, relay down…). Step 1 = /assign preflight to make it pull.
+      console.log(`[route] played mode=enterprise relay=${routeInfo.relay} edge=${routeInfo.edgeHost ?? "?"}`);
+      const connectUrl = await resolveEnterpriseConnectUrl(routeInfo);
+      if (!connectUrl) {
+        // Couldn't reach / provision the private relay — fall back to B/A right away.
+        console.warn("[route] enterprise relay unreachable (/assign); falling back to B/A");
+        forceBAFallback();
+        return;
       }
-    });
+      // Step 2: connect + subscribe. Watchdog still guards the case where /assign
+      // succeeded but no frame ever paints (QUIC blocked, pull stalled…).
+      setActiveRelay(routeInfo.relay);
+      watcher.setAttribute("url", connectUrl);
+      watcher.setAttribute("name", routeInfo.broadcast ?? streamName);
+      window.setTimeout(() => {
+        if (gotFirstFrame) return;
+        console.warn("[route] enterprise connected but no frame; falling back to B/A");
+        forceBAFallback();
+      }, 6000);
+    } else {
+      // Modes A/B (unchanged): publisher origin relay, or a cross-cluster edge.
+      // (Worker logs which of A/B; the player only sees a host:port here.)
+      console.log(`[route] played mode=edge/origin relay=${routeInfo.relay}${noEnterprise ? " (enterprise fell back)" : ""}`);
+      setActiveRelay(routeInfo.relay);
+      if (routeInfo.path) {
+        // moq.pro (Mode A): full connect URL + empty name + explicit hang catalog.
+        watcher.setAttribute("catalog-format", "hang");
+        watcher.setAttribute("name", "");
+        watcher.setAttribute("url", moqUrl(routeInfo.relay, routeInfo.path, routeInfo.jwt ?? ""));
+      } else {
+        watcher.setAttribute("url", `https://${routeInfo.relay}/?jwt=${routeInfo.jwt}`);
+        watcher.setAttribute("name", streamName);
+      }
+      // Cross-cluster (viewer-cdn=): the relay above is an edge that pulls from the origin.
+      // Show the confirmed origin<->edge transport (iroh/DHT vs QUIC host:port) as a stats line.
+      if (viewerCdn) startOriginLinkProbe(routeInfo.relay, streamId);
+    }
+    console.log(`[watch-timing] url set, connecting @ ${ms()}`);
 
-    // Create HTML overlay display div
-    const watchSection = document.querySelector("#watch-view section");
-    let overlayDiv = document.querySelector(".viewer-html-overlay") as HTMLDivElement;
-    if (!overlayDiv && watchSection) {
-      overlayDiv = document.createElement("div");
-      overlayDiv.className = "viewer-html-overlay";
-      watchSection.parentNode?.insertBefore(overlayDiv, watchSection.nextSibling);
+    // ── Viewer token renewal ────────────────────────────────────────────────────────────
+    // cdn.moq.pro re-checks token expiry on an ESTABLISHED session — measured, not assumed
+    // (scripts/e2e/token-expiry.mjs: a 30s token stalls at 30-40s, a 60s token at 60-70s,
+    // while the publisher keeps sending). A viewer whose token lapses is dropped by the relay
+    // no matter what its client wants.
+    //
+    // That is what makes termination enforceable rather than merely requested. Renewal must
+    // come back through the Worker, and the Worker will not renew a killed stream — so the
+    // choke point is token ISSUANCE, not client behaviour. A custom client that never ran any
+    // of this still cannot mint its own token.
+    //
+    // Scheduled from the token's OWN exp claim, so at the current 6h VIEWER_TOKEN_TTL this
+    // never fires, and it becomes the mechanism the moment that default is lowered. There is
+    // nothing to switch on.
+    let renewTimer = 0;
+    const tokenExpiry = (jwt: string | undefined): number | null => {
+      if (!jwt) return null;
+      try {
+        const claims = JSON.parse(atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+        return typeof claims.exp === "number" ? claims.exp : null;
+      } catch {
+        return null; // opaque token — fall back to never renewing rather than guessing
+      }
+    };
+
+    const scheduleRenewal = (jwt: string | undefined) => {
+      const exp = tokenExpiry(jwt);
+      if (!exp) return;
+      const remaining = exp - Math.floor(Date.now() / 1000);
+      // Renew with a quarter of the lifetime to spare (at least 5s), so a slow round trip
+      // does not land after the relay has already dropped us.
+      const lead = Math.max(5, Math.floor(remaining * 0.25));
+      const delay = Math.max(1, remaining - lead) * 1000;
+      window.clearTimeout(renewTimer);
+      renewTimer = window.setTimeout(renew, delay);
+      console.log(`[token] expires in ${remaining}s; renewing in ${Math.round(delay / 1000)}s`);
+    };
+
+    // Re-pointing the SAME element's url does not work: measured, the picture freezes on its
+    // last frame and never resumes (setAttribute returns instantly having achieved nothing).
+    // <moq-watch> cannot re-subscribe once its track has been reset — the same constraint that
+    // forces the compositor's fixed canvas.
+    //
+    // So renewal connects a SECOND element behind the first, waits until it is genuinely
+    // painting, and only then retires the old one. The overlap costs a few seconds of double
+    // subscription; the alternative is a visible hole in the stream.
+    let live = watcher;
+
+    const isPainting = (el: Element): boolean => {
+      const canvas = el.querySelector("canvas") as HTMLCanvasElement | null;
+      if (!canvas || canvas.width < 64) return false;
+      const probe = document.createElement("canvas");
+      probe.width = 32;
+      probe.height = 18;
+      const cx = probe.getContext("2d", { willReadFrequently: true });
+      if (!cx) return false;
+      try { cx.drawImage(canvas, 0, 0, 32, 18); } catch { return false; }
+      const d = cx.getImageData(0, 0, 32, 18).data;
+      let lit = 0;
+      for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] > 30) lit++;
+      return lit > (d.length / 4) * 0.05;
+    };
+
+    // Start muted; first click/tap on the player enables audio. Declared before the swap so a
+    // replacement element can re-arm it — `live` changes identity, this handler must follow.
+    const enableAudio = () => {
+      live.muted = false;
+      live.removeEventListener("click", enableAudio);
+    };
+    watcher.addEventListener("click", enableAudio);
+
+    /**
+     * Replace the player with a freshly built one pointed at `url`, and only retire the old
+     * element once the new one is genuinely painting.
+     *
+     * This is the ONLY way back from a dead player. <moq-watch> cannot re-subscribe after its
+     * track resets, and a WebCodecs decoder that has errored stays closed — so re-pointing the
+     * existing element achieves nothing (measured: the picture freezes on its last frame).
+     * Used both to renew a token and to recover a decoder killed by undecryptable frames.
+     */
+    async function swapInPlayer(url: string, why: string): Promise<boolean> {
+      const parent = live.parentElement;
+      if (!parent) return false;
+      const started = performance.now();
+
+      const next = document.createElement("moq-watch");
+      next.setAttribute("muted", "");
+      next.setAttribute("visible", "always");
+      next.setAttribute("catalog-format", "hang");
+      next.setAttribute("name", "");
+      next.appendChild(document.createElement("canvas"));
+      // Stacked underneath rather than hidden: display:none would give the element no layout,
+      // and a canvas with no box does not decode.
+      next.style.cssText = "position:absolute;inset:0;opacity:0;pointer-events:none;";
+      if (!parent.style.position) parent.style.position = "relative";
+      parent.appendChild(next);
+      next.setAttribute("url", url);
+
+      const deadline = performance.now() + 15000;
+      while (performance.now() < deadline) {
+        if (isPainting(next)) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!isPainting(next)) {
+        // Keep the old element: a frozen picture beats a black one, and the caller decides
+        // whether to try again.
+        console.warn(`[${why}] replacement never painted in ${(performance.now() - started).toFixed(0)}ms; keeping the old session`);
+        next.remove();
+        return false;
+      }
+
+      const old = live;
+      const wasUnmuted = !old.muted;
+      live = next as unknown as typeof watcher;
+      next.style.cssText = "";
+      // The audio enabler lived on the retired element; without re-arming it, a click after a
+      // swap silently stops unmuting the stream.
+      live.muted = !wasUnmuted;
+      live.addEventListener("click", enableAudio);
+      old.remove();
+      console.log(`[${why}] swapped in a fresh player in ${(performance.now() - started).toFixed(0)}ms`);
+      return true;
     }
 
-    // Function to update overlay content
-    const updateOverlay = (overlayHtml: string) => {
-      if (overlayDiv) {
-        if (overlayHtml.trim()) {
-          overlayDiv.innerHTML = overlayHtml;
-        } else {
-          overlayDiv.innerHTML = "";
-        }
+    async function renew(): Promise<void> {
+      const fresh = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag });
+      if (!fresh) {
+        // 410 (terminated) and 404 (offline) both arrive as null. Either way there is no new
+        // token, so the relay drops this session at expiry whatever we do here. That is the
+        // enforcement: refusing to renew is what ends the broadcast for a client that would
+        // otherwise ignore us. The settings poll renders the terminated message.
+        console.warn("[token] renewal refused — no new token; the relay will drop this session");
+        return;
       }
+      if (!fresh.path) {
+        console.warn("[token] renewal only implemented for the moq.pro path");
+        return;
+      }
+
+      // Either way we reschedule: on failure the old element still has a few seconds of token
+      // left, and the next attempt tries again with a newer one.
+      await swapInPlayer(moqUrl(fresh.relay, fresh.path, fresh.jwt ?? ""), "token");
+      scheduleRenewal(fresh.jwt);
+    }
+
+    scheduleRenewal(routeInfo.jwt);
+    window.addEventListener("beforeunload", () => window.clearTimeout(renewTimer));
+
+    // --- Stuck-player watchdog --------------------------------------------------------------
+    //
+    // A viewer had no way back from either failure this page can produce, and both end in the
+    // same silent black rectangle, so neither could be told from a stream that simply stopped:
+    //
+    //   Wrong key. The broadcaster cycled the passcode; frames arrive and none authenticate.
+    //   Recoverable without touching the connection — ask for the new passcode and re-derive.
+    //
+    //   Dead decoder. Frames decrypt but nothing paints, because a WebCodecs decoder that was
+    //   handed deltas without a keyframe has errored and stays closed. Nothing short of a new
+    //   element recovers it (see swapInPlayer), which is why "just wait" never worked.
+    //
+    // Decrypt counters separate the two: it is the SUCCESS delta that says whether we hold the
+    // right key, and painting that says whether the decoder survived. Failures alone cannot
+    // distinguish them, which is what made the old check blame the viewer's passcode for a
+    // decoder that had died holding a perfectly good one.
+    let lastStats = decryptStats();
+    let blankPolls = 0;
+    let recovering = false;
+
+    const watchdog = window.setInterval(async () => {
+      if (recovering) return;
+      const now = decryptStats();
+      const gotFrames = now.successes - lastStats.successes;
+      const failed = now.failures - lastStats.failures;
+      lastStats = now;
+      const painting = isPainting(live);
+
+      // Nothing arriving at all: the broadcast may have paused or ended. Not our business —
+      // the settings poll owns "terminated" and the route poll owns "offline".
+      if (gotFrames === 0 && failed === 0) { blankPolls = 0; return; }
+
+      if (gotFrames === 0 && failed > 0) {
+        recovering = true;
+        try {
+          const entered = await promptPasscode(watchPasscode ? "rotated" : "wrong");
+          if (entered) {
+            watchPasscode = entered;
+            await deriveMediaKey(watchLinkSecret, { streamId, salt: watchSalt, passcode: entered });
+            // The decoder may already have died on the frames that failed before this. Let the
+            // painting branch below notice on a later tick and swap the element.
+            blankPolls = 0;
+          }
+        } finally {
+          recovering = false;
+          lastStats = decryptStats();
+        }
+        return;
+      }
+
+      if (painting) { blankPolls = 0; return; }
+
+      // Decrypting but not painting. Give it a few ticks — a viewer that joined mid-group is
+      // legitimately blank until the next keyframe — then rebuild the player.
+      if (++blankPolls < 4) return;
+      blankPolls = 0;
+      recovering = true;
+      try {
+        const url = live.getAttribute("url");
+        if (url) await swapInPlayer(url, "watchdog");
+      } finally {
+        recovering = false;
+        lastStats = decryptStats();
+      }
+    }, 2000);
+    window.addEventListener("beforeunload", () => window.clearInterval(watchdog));
+
+    // --- Viewing session ------------------------------------------------------------------
+    //
+    // A measured session, not a page-load ping. The old version opened a row and closed it
+    // from beforeunload alone, which does not fire on iOS backgrounding, a crash, a dead
+    // network or force-quit — so rows leaked and the viewer count only ever went up.
+    //
+    // Three parts keep it honest: a heartbeat that proves we are still here, sendBeacon on
+    // pagehide (the one page-close signal mobile Safari actually delivers), and a server-side
+    // reaper for everything neither of those catches.
+    let watchSession: WatchSession | null = null;
+    let heartbeat: number | null = null;
+
+    const stopHeartbeat = () => {
+      if (heartbeat !== null) window.clearInterval(heartbeat);
+      heartbeat = null;
+    };
+
+    const startSession = async () => {
+      if (watchSession) return;
+      // routeTag is the proof we hold the share link; without it the Worker will not open a
+      // session, which is what stops audience being manufactured for a guessed stream id.
+      watchSession = await logWatchStart(streamId, routeTag);
+      if (!watchSession) return;
+      stopHeartbeat();
+      heartbeat = window.setInterval(async () => {
+        if (!watchSession) return;
+        if (await logWatchHeartbeat(watchSession)) return;
+        // The server has forgotten this session — the tab was suspended long enough to be
+        // reaped. Start a fresh one rather than beat against a closed row: the viewer really
+        // did stop watching for that gap, and stitching over it would over-report.
+        watchSession = null;
+        stopHeartbeat();
+        void startSession();
+      }, watchSession.heartbeatSeconds * 1000);
+    };
+
+    const endSession = () => {
+      stopHeartbeat();
+      if (!watchSession) return;
+      logWatchEnd(watchSession);
+      watchSession = null;
+    };
+
+    void startSession();
+
+    // pagehide is the reliable one — mobile Safari fires it on background/close where
+    // beforeunload is simply never delivered. beforeunload stays as a desktop belt-and-braces;
+    // end is idempotent, so both firing costs nothing.
+    window.addEventListener("pagehide", endSession);
+    window.addEventListener("beforeunload", endSession);
+
+    // Deliberately NOT ending on visibilitychange: switching apps for a moment is not leaving.
+    // A hidden tab keeps beating (browsers throttle to ~1/min, still inside the reaper's
+    // window); if the OS suspends it outright the reaper closes the session at its last
+    // heartbeat, and coming back opens a new one through the handler above.
+
+    // Create HTML overlay display div. It sits as a full-width block BELOW the video/chat
+    // row (its CSS is width:100%/max-width:900px/margin:auto). It must stay a direct child
+    // of #watch-view, NOT inside the flex .video-chat-layout row — flex would override the
+    // width and park it beside the video — so insert it right after the layout row.
+    const watchView = document.querySelector("#watch-view");
+    const watchLayout = watchView?.querySelector(".video-chat-layout");
+    let overlayDiv = document.querySelector(".viewer-html-overlay") as HTMLDivElement;
+    if (!overlayDiv && watchView && watchLayout) {
+      overlayDiv = document.createElement("div");
+      overlayDiv.className = "viewer-html-overlay";
+      watchLayout.after(overlayDiv);
+    }
+
+    // Render the broadcaster's overlay, SANITISED. The policy and the reasoning behind every
+    // rule in it live in src/overlay-sanitize.ts; the broadcaster's editor previews through
+    // the same function, so what they see there is what lands here.
+    const updateOverlay = (overlayHtml: string) => {
+      if (!overlayDiv) return;
+      overlayDiv.innerHTML = overlayHtml.trim() ? renderOverlay(overlayHtml).html : "";
     };
 
     // Load initial overlay content
@@ -1728,19 +3149,29 @@ async function initWatchView(streamId: string, user: User | null) {
     const settingsCheckInterval = setInterval(async () => {
       const currentSettings = await getStreamSettings(streamId);
 
+      // Terminated: checked first, because nothing below it matters afterwards.
+      if (currentSettings.killed) {
+        clearInterval(settingsCheckInterval);
+        endSession();
+        closeWatchChat();
+        stopForKill("viewer");
+        return;
+      }
+
       // Check auth requirement (anonymous viewers only)
       if (!user && currentSettings.require_auth) {
         clearInterval(settingsCheckInterval);
-        if (watchEventId) {
-          logWatchEnd(watchEventId);
-          watchEventId = null;
-        }
+        endSession();
         showWatchLoginRequired();
         return;
       }
 
       // Update overlay content
       updateOverlay(currentSettings.overlay_html);
+
+      // React to the broadcaster toggling live chat on/off mid-stream.
+      if (currentSettings.chat_enabled) openWatchChat();
+      else closeWatchChat();
     }, 5000); // Check every 5 seconds
 
     // Cleanup interval on page unload
@@ -1750,919 +3181,6 @@ async function initWatchView(streamId: string, user: User | null) {
   }
 }
 
-// Initialize stats view
-async function initStatsView(user: User | null) {
-  console.log("Vivoh.Earth Stats");
-
-  // Hide broadcast and watch views
-  document.getElementById("broadcast-view")?.classList.add("hidden");
-  document.getElementById("watch-view")?.classList.add("hidden");
-
-  // Hide footer and new stream button
-  const footer = document.querySelector("footer");
-  if (footer) footer.classList.add("hidden");
-  const newStreamBtn = document.getElementById("new-stream-btn");
-  if (newStreamBtn) newStreamBtn.classList.add("hidden");
-
-  // Create stats view container
-  const container = document.querySelector(".container");
-  if (!container) return;
-
-  const statsView = document.createElement("div");
-  statsView.id = "stats-view";
-  statsView.className = "stats-view";
-
-  // Check if logged in
-  if (!user) {
-    statsView.innerHTML = `
-      <div class="stats-login-required">
-        <h2>Sign in Required</h2>
-        <p>Please sign in to view live statistics.</p>
-        <div class="auth-buttons">
-          <button id="stats-login-google" class="btn btn-google">Google</button>
-          <button id="stats-login-microsoft" class="btn btn-microsoft">Microsoft</button>
-          <button id="stats-login-discord" class="btn btn-discord">Discord</button>
-        </div>
-      </div>
-    `;
-    container.appendChild(statsView);
-    document.getElementById("stats-login-google")?.addEventListener("click", loginWithGoogle);
-    document.getElementById("stats-login-microsoft")?.addEventListener("click", loginWithMicrosoft);
-    document.getElementById("stats-login-discord")?.addEventListener("click", loginWithDiscord);
-    return;
-  }
-
-  // Show loading state
-  statsView.innerHTML = `<p>Loading stats...</p>`;
-  container.appendChild(statsView);
-
-  // Fetch and display stats
-  const renderStats = async () => {
-    const stats = await getLiveStats();
-    if (!stats) {
-      statsView.innerHTML = `<p class="error">Failed to load stats</p>`;
-      return;
-    }
-
-    const formatTime = (dateStr: string) => {
-      const date = new Date(dateStr + "Z");
-      return date.toLocaleTimeString();
-    };
-
-    const formatDuration = (dateStr: string) => {
-      const start = new Date(dateStr + "Z");
-      const now = new Date();
-      const seconds = Math.floor((now.getTime() - start.getTime()) / 1000);
-      if (seconds < 60) return `${seconds}s`;
-      const minutes = Math.floor(seconds / 60);
-      if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-      const hours = Math.floor(minutes / 60);
-      return `${hours}h ${minutes % 60}m`;
-    };
-
-    const renderGeoFlag = (geo: { geo_country: string | null; geo_city: string | null; geo_region: string | null; geo_latitude: string | null; geo_longitude: string | null; geo_timezone: string | null }, id: string) => {
-      const flag = countryToFlag(geo.geo_country);
-      if (!flag) return "";
-      const hasCoords = geo.geo_latitude && geo.geo_longitude;
-      const mapsUrl = hasCoords ? `https://www.google.com/maps/place/${geo.geo_latitude},${geo.geo_longitude}/@${geo.geo_latitude},${geo.geo_longitude},3z` : null;
-      const tooltip = [
-        geo.geo_city,
-        geo.geo_region,
-        geo.geo_country,
-        geo.geo_timezone,
-        hasCoords ? `${geo.geo_latitude}, ${geo.geo_longitude}` : null
-      ].filter(Boolean).join(" | ");
-      return `<span class="stats-flag ${hasCoords ? 'clickable' : ''}" data-id="${id}" data-url="${mapsUrl || ''}" title="${tooltip}">${flag}</span>`;
-    };
-
-    const broadcastRows = stats.broadcasts.length === 0
-      ? `<tr><td colspan="5" class="empty">No active broadcasts</td></tr>`
-      : stats.broadcasts.map((b: LiveBroadcast) => `
-          <tr>
-            <td><a href="/${b.stream_id}" target="_blank">${b.stream_id}</a></td>
-            <td>
-              ${b.avatar_url ? `<img src="${b.avatar_url}" class="avatar-small">` : ""}
-              ${b.user_name || b.user_email}
-            </td>
-            <td>${renderGeoFlag(b, `b-${b.id}`)}</td>
-            <td>${formatDuration(b.started_at)}</td>
-            <td>${stats.viewers.filter((v: LiveViewer) => v.stream_id === b.stream_id).length}</td>
-          </tr>
-        `).join("");
-
-    const viewerRows = stats.viewers.length === 0
-      ? `<tr><td colspan="4" class="empty">No active viewers</td></tr>`
-      : stats.viewers.map((v: LiveViewer) => `
-          <tr>
-            <td><a href="/${v.stream_id}" target="_blank">${v.stream_id}</a></td>
-            <td>
-              ${v.avatar_url ? `<img src="${v.avatar_url}" class="avatar-small">` : ""}
-              ${v.user_name || v.user_email || "Anonymous"}
-            </td>
-            <td>${renderGeoFlag(v, `v-${v.id}`)}</td>
-            <td>${formatDuration(v.started_at)}</td>
-          </tr>
-        `).join("");
-
-    statsView.innerHTML = `
-      <h2>Live Statistics</h2>
-      <div class="stats-grid">
-        <section class="stats-section">
-          <h3>Active Broadcasts (${stats.broadcasts.length})</h3>
-          <table class="stats-table">
-            <thead>
-              <tr>
-                <th>Stream</th>
-                <th>Broadcaster</th>
-                <th>Location</th>
-                <th>Duration</th>
-                <th>Viewers</th>
-              </tr>
-            </thead>
-            <tbody>${broadcastRows}</tbody>
-          </table>
-        </section>
-        <section class="stats-section">
-          <h3>Active Viewers (${stats.viewers.length})</h3>
-          <table class="stats-table">
-            <thead>
-              <tr>
-                <th>Stream</th>
-                <th>Viewer</th>
-                <th>Location</th>
-                <th>Duration</th>
-              </tr>
-            </thead>
-            <tbody>${viewerRows}</tbody>
-          </table>
-        </section>
-      </div>
-      <button id="refresh-stats" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
-    `;
-
-    // Add click handlers for flags
-    statsView.querySelectorAll(".stats-flag.clickable").forEach((el) => {
-      el.addEventListener("click", () => {
-        const url = (el as HTMLElement).dataset.url;
-        if (url) window.open(url, "_blank");
-      });
-    });
-
-    document.getElementById("refresh-stats")?.addEventListener("click", renderStats);
-  };
-
-  await renderStats();
-}
-
-// Initialize stream-specific stats view (viewers only)
-async function initStreamStatsView(streamId: string) {
-  console.log(`Vivoh.Earth Stream Stats - Stream: ${streamId}`);
-
-  // Hide broadcast and watch views
-  document.getElementById("broadcast-view")?.classList.add("hidden");
-  document.getElementById("watch-view")?.classList.add("hidden");
-
-  // Hide footer and new stream button
-  const footer = document.querySelector("footer");
-  if (footer) footer.classList.add("hidden");
-  const newStreamBtn = document.getElementById("new-stream-btn");
-  if (newStreamBtn) newStreamBtn.classList.add("hidden");
-
-  // Create stats view container
-  const container = document.querySelector(".container");
-  if (!container) return;
-
-  const statsView = document.createElement("div");
-  statsView.id = "stream-stats-view";
-  statsView.className = "stats-view";
-
-  // Show loading state
-  statsView.innerHTML = `<p>Loading viewers...</p>`;
-  container.appendChild(statsView);
-
-  // Fetch and display viewers
-  const renderViewers = async () => {
-    const data = await getStreamViewers(streamId);
-    if (!data) {
-      statsView.innerHTML = `<p class="error">Failed to load viewers</p>`;
-      return;
-    }
-
-    const formatDuration = (dateStr: string) => {
-      const start = new Date(dateStr + "Z");
-      const now = new Date();
-      const seconds = Math.floor((now.getTime() - start.getTime()) / 1000);
-      if (seconds < 60) return `${seconds}s`;
-      const minutes = Math.floor(seconds / 60);
-      if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
-      const hours = Math.floor(minutes / 60);
-      return `${hours}h ${minutes % 60}m`;
-    };
-
-    const renderGeoFlag = (geo: { geo_country: string | null; geo_city: string | null; geo_region: string | null; geo_latitude: string | null; geo_longitude: string | null; geo_timezone: string | null }, id: string) => {
-      const flag = countryToFlag(geo.geo_country);
-      if (!flag) return "";
-      const hasCoords = geo.geo_latitude && geo.geo_longitude;
-      const mapsUrl = hasCoords ? `https://www.google.com/maps/place/${geo.geo_latitude},${geo.geo_longitude}/@${geo.geo_latitude},${geo.geo_longitude},3z` : null;
-      const tooltip = [
-        geo.geo_city,
-        geo.geo_region,
-        geo.geo_country,
-        geo.geo_timezone,
-        hasCoords ? `${geo.geo_latitude}, ${geo.geo_longitude}` : null
-      ].filter(Boolean).join(" | ");
-      return `<span class="stats-flag ${hasCoords ? 'clickable' : ''}" data-id="${id}" data-url="${mapsUrl || ''}" title="${tooltip}">${flag}</span>`;
-    };
-
-    const viewerRows = data.viewers.length === 0
-      ? `<tr><td colspan="3" class="empty">No active viewers</td></tr>`
-      : data.viewers.map((v: LiveViewer) => `
-          <tr>
-            <td>
-              ${v.avatar_url ? `<img src="${v.avatar_url}" class="avatar-small">` : ""}
-              ${v.user_name || v.user_email || "Anonymous"}
-            </td>
-            <td>${renderGeoFlag(v, `v-${v.id}`)}</td>
-            <td>${formatDuration(v.started_at)}</td>
-          </tr>
-        `).join("");
-
-    statsView.innerHTML = `
-      <h2>Viewers for <a href="/${streamId}" class="stream-link">${streamId}</a></h2>
-      <p><a href="/${streamId}/stats/map" class="view-toggle" title="View Map">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20">
-          <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/>
-          <line x1="8" y1="2" x2="8" y2="18"/>
-          <line x1="16" y1="6" x2="16" y2="22"/>
-        </svg>
-      </a></p>
-      <section class="stats-section">
-        <h3>Active Viewers (${data.viewers.length})</h3>
-        <table class="stats-table">
-          <thead>
-            <tr>
-              <th>Viewer</th>
-              <th>Location</th>
-              <th>Watching for</th>
-            </tr>
-          </thead>
-          <tbody>${viewerRows}</tbody>
-        </table>
-      </section>
-      <button id="refresh-stream-stats" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
-    `;
-
-    // Add click handlers for flags
-    statsView.querySelectorAll(".stats-flag.clickable").forEach((el) => {
-      el.addEventListener("click", () => {
-        const url = (el as HTMLElement).dataset.url;
-        if (url) window.open(url, "_blank");
-      });
-    });
-
-    document.getElementById("refresh-stream-stats")?.addEventListener("click", renderViewers);
-  };
-
-  await renderViewers();
-}
-
-// Initialize stats map view (all viewers on a map)
-async function initStatsMapView(user: User | null) {
-  console.log("Vivoh.Earth Stats Map");
-
-  // Hide broadcast and watch views
-  document.getElementById("broadcast-view")?.classList.add("hidden");
-  document.getElementById("watch-view")?.classList.add("hidden");
-
-  // Hide footer and new stream button
-  const footer = document.querySelector("footer");
-  if (footer) footer.classList.add("hidden");
-  const newStreamBtn = document.getElementById("new-stream-btn");
-  if (newStreamBtn) newStreamBtn.classList.add("hidden");
-
-  // Create map view container
-  const container = document.querySelector(".container");
-  if (!container) return;
-
-  const mapView = document.createElement("div");
-  mapView.id = "stats-map-view";
-  mapView.className = "stats-view";
-
-  // Check if logged in
-  if (!user) {
-    mapView.innerHTML = `
-      <div class="stats-login-required">
-        <h2>Sign in Required</h2>
-        <p>Please sign in to view the live map.</p>
-        <div class="auth-buttons">
-          <button id="map-login-google" class="btn btn-google">Google</button>
-          <button id="map-login-microsoft" class="btn btn-microsoft">Microsoft</button>
-          <button id="map-login-discord" class="btn btn-discord">Discord</button>
-        </div>
-      </div>
-    `;
-    container.appendChild(mapView);
-    document.getElementById("map-login-google")?.addEventListener("click", loginWithGoogle);
-    document.getElementById("map-login-microsoft")?.addEventListener("click", loginWithMicrosoft);
-    document.getElementById("map-login-discord")?.addEventListener("click", loginWithDiscord);
-    return;
-  }
-
-  mapView.innerHTML = `
-    <h2>Live Viewer Map</h2>
-    <p><a href="/stats" class="view-toggle" title="View Table">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20">
-        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-        <line x1="3" y1="9" x2="21" y2="9"/>
-        <line x1="3" y1="15" x2="21" y2="15"/>
-        <line x1="9" y1="3" x2="9" y2="21"/>
-      </svg>
-    </a></p>
-    <div id="leaflet-map" style="height: 500px; border-radius: 8px; margin-top: 1rem;"></div>
-    <button id="refresh-map" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
-  `;
-  container.appendChild(mapView);
-
-  const renderMap = async () => {
-    const stats = await getLiveStats();
-    if (!stats) return;
-
-    const mapEl = document.getElementById("leaflet-map");
-    if (!mapEl) return;
-
-    // Clear existing map
-    mapEl.innerHTML = "";
-
-    // @ts-expect-error Leaflet loaded from CDN
-    const map = L.map("leaflet-map").setView([20, 0], 2);
-
-    // @ts-expect-error Leaflet loaded from CDN
-    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-      attribution: '&copy; Esri'
-    }).addTo(map);
-
-    // Add viewer markers (blue)
-    stats.viewers.forEach((v: LiveViewer) => {
-      if (v.geo_latitude && v.geo_longitude) {
-        const lat = parseFloat(v.geo_latitude);
-        const lng = parseFloat(v.geo_longitude);
-        const name = v.user_name || v.user_email || "Anonymous";
-        const location = [v.geo_city, v.geo_region, v.geo_country].filter(Boolean).join(", ");
-        // @ts-expect-error Leaflet loaded from CDN
-        L.marker([lat, lng], {
-          // @ts-expect-error Leaflet loaded from CDN
-          icon: L.divIcon({
-            className: "viewer-marker",
-            html: `<div style="background: #3b82f6; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>`,
-            iconSize: [12, 12],
-            iconAnchor: [6, 6]
-          })
-        })
-          .addTo(map)
-          .bindPopup(`<strong>${name}</strong><br>Watching: ${v.stream_id}<br>${location}`);
-      }
-    });
-
-    // Add broadcaster markers (red)
-    stats.broadcasts.forEach((b: LiveBroadcast) => {
-      if (b.geo_latitude && b.geo_longitude) {
-        const lat = parseFloat(b.geo_latitude);
-        const lng = parseFloat(b.geo_longitude);
-        const name = b.user_name || b.user_email;
-        const location = [b.geo_city, b.geo_region, b.geo_country].filter(Boolean).join(", ");
-        // @ts-expect-error Leaflet loaded from CDN
-        L.marker([lat, lng], {
-          // @ts-expect-error Leaflet loaded from CDN
-          icon: L.divIcon({
-            className: "broadcaster-marker",
-            html: `<div style="background: #ef4444; width: 16px; height: 16px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>`,
-            iconSize: [16, 16],
-            iconAnchor: [8, 8]
-          })
-        })
-          .addTo(map)
-          .bindPopup(`<strong>${name}</strong> (Broadcaster)<br>Stream: ${b.stream_id}<br>${location}`);
-      }
-    });
-  };
-
-  await renderMap();
-  document.getElementById("refresh-map")?.addEventListener("click", renderMap);
-}
-
-// Initialize stream-specific stats map view (viewers for one stream on a map)
-async function initStreamStatsMapView(streamId: string) {
-  console.log(`Vivoh.Earth Stream Stats Map - Stream: ${streamId}`);
-
-  // Hide broadcast and watch views
-  document.getElementById("broadcast-view")?.classList.add("hidden");
-  document.getElementById("watch-view")?.classList.add("hidden");
-
-  // Hide footer and new stream button
-  const footer = document.querySelector("footer");
-  if (footer) footer.classList.add("hidden");
-  const newStreamBtn = document.getElementById("new-stream-btn");
-  if (newStreamBtn) newStreamBtn.classList.add("hidden");
-
-  // Create map view container
-  const container = document.querySelector(".container");
-  if (!container) return;
-
-  const mapView = document.createElement("div");
-  mapView.id = "stream-stats-map-view";
-  mapView.className = "stats-view";
-
-  mapView.innerHTML = `
-    <h2>Viewer Map for <a href="/${streamId}" class="stream-link">${streamId}</a></h2>
-    <p><a href="/${streamId}/stats" class="view-toggle" title="View Table">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20">
-        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
-        <line x1="3" y1="9" x2="21" y2="9"/>
-        <line x1="3" y1="15" x2="21" y2="15"/>
-        <line x1="9" y1="3" x2="9" y2="21"/>
-      </svg>
-    </a></p>
-    <div id="leaflet-map" style="height: 500px; border-radius: 8px; margin-top: 1rem;"></div>
-    <button id="refresh-stream-map" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
-  `;
-  container.appendChild(mapView);
-
-  const renderMap = async () => {
-    const data = await getStreamViewers(streamId);
-    if (!data) return;
-
-    const mapEl = document.getElementById("leaflet-map");
-    if (!mapEl) return;
-
-    // Clear existing map
-    mapEl.innerHTML = "";
-
-    // @ts-expect-error Leaflet loaded from CDN
-    const map = L.map("leaflet-map").setView([20, 0], 2);
-
-    // @ts-expect-error Leaflet loaded from CDN
-    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-      attribution: '&copy; Esri'
-    }).addTo(map);
-
-    // Add viewer markers
-    data.viewers.forEach((v: LiveViewer) => {
-      if (v.geo_latitude && v.geo_longitude) {
-        const lat = parseFloat(v.geo_latitude);
-        const lng = parseFloat(v.geo_longitude);
-        const name = v.user_name || v.user_email || "Anonymous";
-        const location = [v.geo_city, v.geo_region, v.geo_country].filter(Boolean).join(", ");
-        // @ts-expect-error Leaflet loaded from CDN
-        L.marker([lat, lng], {
-          // @ts-expect-error Leaflet loaded from CDN
-          icon: L.divIcon({
-            className: "viewer-marker",
-            html: `<div style="background: #3b82f6; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></div>`,
-            iconSize: [12, 12],
-            iconAnchor: [6, 6]
-          })
-        })
-          .addTo(map)
-          .bindPopup(`<strong>${name}</strong><br>${location}`);
-      }
-    });
-
-    // Fit bounds if there are markers
-    const viewersWithGeo = data.viewers.filter((v: LiveViewer) => v.geo_latitude && v.geo_longitude);
-    if (viewersWithGeo.length > 0) {
-      // @ts-expect-error Leaflet loaded from CDN
-      const bounds = L.latLngBounds(
-        viewersWithGeo.map((v: LiveViewer) => [parseFloat(v.geo_latitude!), parseFloat(v.geo_longitude!)])
-      );
-      map.fitBounds(bounds, { padding: [50, 50], maxZoom: 4 });
-    }
-  };
-
-  await renderMap();
-  document.getElementById("refresh-stream-map")?.addEventListener("click", renderMap);
-}
-
-// Initialize greet view (broadcasters only map - public)
-async function initGreetView() {
-  console.log("Vivoh.Earth Greet - Live Broadcasters");
-
-  // Hide broadcast and watch views
-  document.getElementById("broadcast-view")?.classList.add("hidden");
-  document.getElementById("watch-view")?.classList.add("hidden");
-
-  // Hide footer and new stream button
-  const footer = document.querySelector("footer");
-  if (footer) footer.classList.add("hidden");
-  const newStreamBtn = document.getElementById("new-stream-btn");
-  if (newStreamBtn) newStreamBtn.classList.add("hidden");
-
-  // Create greet view container
-  const container = document.querySelector(".container");
-  if (!container) return;
-
-  const greetView = document.createElement("div");
-  greetView.id = "greet-view";
-  greetView.className = "stats-view";
-
-  greetView.innerHTML = `
-    <h2>Live Broadcasts</h2>
-    <p class="greet-subtitle">Click a marker to watch</p>
-    <div id="leaflet-map" style="height: 600px; border-radius: 8px; margin-top: 1rem;"></div>
-    <button id="refresh-greet" class="btn btn-primary" style="margin-top: 1rem;">Refresh</button>
-  `;
-  container.appendChild(greetView);
-
-  interface GreetBroadcast {
-    id: number;
-    stream_id: string;
-    started_at: string;
-    user_name: string;
-    geo_country: string | null;
-    geo_city: string | null;
-    geo_region: string | null;
-    geo_latitude: string | null;
-    geo_longitude: string | null;
-    viewer_count: number;
-  }
-
-  const renderMap = async () => {
-    // Fetch broadcasts from public greet endpoint
-    const response = await fetch("/api/stats/greet");
-    if (!response.ok) {
-      const mapEl = document.getElementById("leaflet-map");
-      if (mapEl) {
-        mapEl.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #737373;">Failed to load broadcasts</div>`;
-      }
-      return;
-    }
-    const data = await response.json() as { broadcasts: GreetBroadcast[] };
-
-    const mapEl = document.getElementById("leaflet-map");
-    if (!mapEl) return;
-
-    // Clear existing map
-    mapEl.innerHTML = "";
-
-    // @ts-expect-error Leaflet loaded from CDN
-    const map = L.map("leaflet-map").setView([20, 0], 2);
-
-    // @ts-expect-error Leaflet loaded from CDN
-    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
-      attribution: '&copy; Esri &mdash; Esri, DeLorme, NAVTEQ'
-    }).addTo(map);
-
-    // Add broadcaster markers (red) with viewer count
-    data.broadcasts.forEach((b: GreetBroadcast) => {
-      if (b.geo_latitude && b.geo_longitude) {
-        const lat = parseFloat(b.geo_latitude);
-        const lng = parseFloat(b.geo_longitude);
-        const name = b.user_name || "Broadcaster";
-        const location = [b.geo_city, b.geo_region, b.geo_country].filter(Boolean).join(", ");
-        const viewers = b.viewer_count || 0;
-
-        // @ts-expect-error Leaflet loaded from CDN
-        const marker = L.marker([lat, lng], {
-          // @ts-expect-error Leaflet loaded from CDN
-          icon: L.divIcon({
-            className: "broadcaster-marker",
-            html: `<div style="background: #ef4444; width: 20px; height: 20px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.4); cursor: pointer;"></div>`,
-            iconSize: [20, 20],
-            iconAnchor: [10, 10]
-          })
-        }).addTo(map);
-
-        // Tooltip on hover showing viewer count
-        marker.bindTooltip(`<strong>${name}</strong><br>${location}<br><span style="color: #3b82f6;">${viewers} viewer${viewers !== 1 ? 's' : ''}</span>`, {
-          direction: 'top',
-          offset: [0, -10]
-        });
-
-        // Click to open watch page in new tab
-        marker.on('click', () => {
-          window.open(`/${b.stream_id}`, '_blank');
-        });
-      }
-    });
-
-    // If no broadcasters with geo, show message
-    const broadcastersWithGeo = data.broadcasts.filter((b: GreetBroadcast) => b.geo_latitude && b.geo_longitude);
-    if (broadcastersWithGeo.length === 0) {
-      mapEl.innerHTML = `<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #737373;">No live broadcasts at the moment</div>`;
-    }
-  };
-
-  await renderMap();
-  document.getElementById("refresh-greet")?.addEventListener("click", renderMap);
-}
-
-// Initialize admin view
-function initAdminView() {
-  console.log("Vivoh.Earth Admin Panel");
-
-  // Hide broadcast and watch views
-  document.getElementById("broadcast-view")?.classList.add("hidden");
-  document.getElementById("watch-view")?.classList.add("hidden");
-
-  // Hide footer and new stream button
-  const footer = document.querySelector("footer");
-  if (footer) footer.classList.add("hidden");
-  const newStreamBtn = document.getElementById("new-stream-btn");
-  if (newStreamBtn) newStreamBtn.classList.add("hidden");
-
-  // Create admin view container
-  const container = document.querySelector(".container");
-  if (!container) return;
-
-  const adminView = document.createElement("div");
-  adminView.id = "admin-view";
-  adminView.className = "stats-view";
-
-  adminView.innerHTML = `
-    <h2>Admin Panel</h2>
-    <div id="admin-login" class="stats-section" style="max-width: 400px; margin: 2rem auto;">
-      <h3>Password Required</h3>
-      <div style="display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem;">
-        <input type="password" id="admin-password" placeholder="Enter admin password"
-          style="background: #262626; border: 1px solid #404040; border-radius: 6px; padding: 0.75rem; color: #e5e5e5; font-size: 1rem;">
-        <button id="admin-login-btn" class="btn btn-primary">Login</button>
-        <p id="admin-error" style="color: #ef4444; display: none; text-align: center;"></p>
-      </div>
-    </div>
-    <div id="admin-panel" style="display: none;">
-      <div class="stats-section" style="max-width: 720px; margin: 2rem auto;">
-        <h3>Broadcaster Access</h3>
-        <p style="color: #a3a3a3; margin-bottom: 1rem;">
-          Default-deny: only <strong>allowed</strong> accounts can broadcast. Suspend or remove to block.
-        </p>
-        <div style="display: flex; gap: 0.5rem; margin-bottom: 1.5rem;">
-          <input type="email" id="add-email-input" placeholder="email@example.com" autocomplete="off" spellcheck="false"
-            style="flex: 1; background: #262626; border: 1px solid #404040; border-radius: 6px; padding: 0.6rem; color: #e5e5e5; font-size: 0.95rem;">
-          <button id="add-allow-btn" class="btn btn-primary">Allow</button>
-        </div>
-        <div id="broadcasters-list" style="display: flex; flex-direction: column; gap: 0.5rem;">
-          <p style="color: #737373;">Loading…</p>
-        </div>
-        <div id="access-status" style="margin-top: 1rem; padding: 0.75rem; border-radius: 6px; display: none;"></div>
-      </div>
-
-      <div class="stats-section" style="max-width: 720px; margin: 2rem auto;">
-        <h3>Data Management</h3>
-        <p style="color: #a3a3a3; margin-bottom: 1.5rem;">Warning: These actions are irreversible.</p>
-        <div style="display: flex; flex-direction: column; gap: 1rem;">
-          <button id="clear-broadcasts-btn" class="btn" style="background: #7f1d1d; border-color: #991b1b;">
-            Clear All Broadcaster Data
-          </button>
-          <button id="clear-viewers-btn" class="btn" style="background: #7f1d1d; border-color: #991b1b;">
-            Clear All Viewer Data
-          </button>
-        </div>
-        <div id="admin-status" style="margin-top: 1rem; padding: 0.75rem; border-radius: 6px; display: none;"></div>
-      </div>
-    </div>
-  `;
-  container.appendChild(adminView);
-
-  let adminPassword = "";
-
-  const showStatus = (message: string, isError: boolean) => {
-    const statusEl = document.getElementById("admin-status");
-    if (statusEl) {
-      statusEl.textContent = message;
-      statusEl.style.display = "block";
-      statusEl.style.background = isError ? "#7f1d1d" : "#14532d";
-      statusEl.style.color = "#e5e5e5";
-    }
-  };
-
-  // Login handler
-  document.getElementById("admin-login-btn")?.addEventListener("click", async () => {
-    const passwordInput = document.getElementById("admin-password") as HTMLInputElement;
-    const errorEl = document.getElementById("admin-error");
-    adminPassword = passwordInput?.value || "";
-
-    // Verify the password
-    try {
-      const response = await fetch("/api/admin/verify", {
-        method: "GET",
-        headers: {
-          "Authorization": `Bearer ${adminPassword}`
-        }
-      });
-
-      // If we get 401, password is wrong
-      if (response.status === 401) {
-        if (errorEl) {
-          errorEl.textContent = "Invalid password";
-          errorEl.style.display = "block";
-        }
-        return;
-      }
-
-      // Password is correct, show the admin panel
-      document.getElementById("admin-login")!.style.display = "none";
-      document.getElementById("admin-panel")!.style.display = "block";
-      loadBroadcasters();
-    } catch {
-      if (errorEl) {
-        errorEl.textContent = "Connection error";
-        errorEl.style.display = "block";
-      }
-    }
-  });
-
-  // --- Broadcaster access management ---
-  const showAccessStatus = (message: string, isError: boolean) => {
-    const el = document.getElementById("access-status");
-    if (!el) return;
-    el.textContent = message;
-    el.style.display = "block";
-    el.style.background = isError ? "#7f1d1d" : "#14532d";
-    el.style.color = "#e5e5e5";
-  };
-
-  interface BroadcasterRow {
-    email: string;
-    name: string | null;
-    avatar_url: string | null;
-    status: string; // 'allowed' | 'suspended' | 'none'
-    last_broadcast: string | null;
-    never_signed_in?: boolean;
-  }
-
-  const escapeHtml = (s: string) =>
-    s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
-
-  const setAccess = async (email: string, status: "allowed" | "suspended") => {
-    try {
-      const res = await fetch("/api/admin/broadcasters", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${adminPassword}` },
-        body: JSON.stringify({ email, status }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        showAccessStatus(d.error || "Failed to update access", true);
-        return;
-      }
-      showAccessStatus(`${email} is now ${status}.`, false);
-      loadBroadcasters();
-    } catch {
-      showAccessStatus("Connection error", true);
-    }
-  };
-
-  const removeAccess = async (email: string) => {
-    if (!confirm(`Remove ${email} from the allow list? They will no longer be able to broadcast.`)) return;
-    try {
-      const res = await fetch(`/api/admin/broadcasters?email=${encodeURIComponent(email)}`, {
-        method: "DELETE",
-        headers: { "Authorization": `Bearer ${adminPassword}` },
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        showAccessStatus(d.error || "Failed to remove", true);
-        return;
-      }
-      showAccessStatus(`${email} removed from the allow list.`, false);
-      loadBroadcasters();
-    } catch {
-      showAccessStatus("Connection error", true);
-    }
-  };
-
-  function loadBroadcasters() {
-    const listEl = document.getElementById("broadcasters-list");
-    if (!listEl) return;
-    fetch("/api/admin/broadcasters", { headers: { "Authorization": `Bearer ${adminPassword}` } })
-      .then((r) => (r.ok ? r.json() : Promise.reject()))
-      .then((data: { broadcasters: BroadcasterRow[] }) => {
-        const rows = data.broadcasters || [];
-        if (rows.length === 0) {
-          listEl.innerHTML = `<p style="color:#737373;">No users yet. Add an email above to pre-approve a broadcaster.</p>`;
-          return;
-        }
-        listEl.innerHTML = rows
-          .map((b) => {
-            const allowed = b.status === "allowed";
-            const statusColor = allowed ? "#22c55e" : b.status === "suspended" ? "#f59e0b" : "#737373";
-            const statusLabel = allowed ? "allowed" : b.status === "suspended" ? "suspended" : "not allowed";
-            const subtitle = b.never_signed_in
-              ? "pre-approved · never signed in"
-              : b.last_broadcast
-              ? `last broadcast ${escapeHtml(b.last_broadcast)} UTC`
-              : "signed in · never broadcast";
-            const name = escapeHtml(b.name || b.email);
-            const email = escapeHtml(b.email);
-            return `
-              <div style="display:flex; align-items:center; gap:0.75rem; padding:0.6rem 0.75rem; background:#1f1f1f; border:1px solid #333; border-radius:6px;">
-                <div style="flex:1; min-width:0;">
-                  <div style="display:flex; align-items:center; gap:0.5rem;">
-                    <span style="width:8px; height:8px; border-radius:50%; background:${statusColor}; flex:none;"></span>
-                    <strong style="color:#e5e5e5; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${name}</strong>
-                    <span style="color:${statusColor}; font-size:0.8rem;">${statusLabel}</span>
-                  </div>
-                  <div style="color:#737373; font-size:0.8rem; margin-top:0.15rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${email} · ${subtitle}</div>
-                </div>
-                <div style="display:flex; gap:0.4rem; flex:none;">
-                  ${
-                    allowed
-                      ? `<button class="btn access-suspend" data-email="${email}" style="background:#92400e; border-color:#b45309; padding:0.35rem 0.7rem; font-size:0.85rem;">Suspend</button>`
-                      : `<button class="btn access-allow" data-email="${email}" style="background:#166534; border-color:#15803d; padding:0.35rem 0.7rem; font-size:0.85rem;">Allow</button>`
-                  }
-                  <button class="btn access-remove" data-email="${email}" title="Remove from list" style="background:#3f3f3f; border-color:#525252; padding:0.35rem 0.6rem; font-size:0.85rem;">✕</button>
-                </div>
-              </div>`;
-          })
-          .join("");
-
-        listEl.querySelectorAll(".access-allow").forEach((btn) =>
-          btn.addEventListener("click", () => setAccess((btn as HTMLElement).dataset.email!, "allowed"))
-        );
-        listEl.querySelectorAll(".access-suspend").forEach((btn) =>
-          btn.addEventListener("click", () => setAccess((btn as HTMLElement).dataset.email!, "suspended"))
-        );
-        listEl.querySelectorAll(".access-remove").forEach((btn) =>
-          btn.addEventListener("click", () => removeAccess((btn as HTMLElement).dataset.email!))
-        );
-      })
-      .catch(() => {
-        listEl.innerHTML = `<p style="color:#ef4444;">Failed to load broadcasters.</p>`;
-      });
-  }
-
-  // Add-email "Allow" handler
-  const addEmail = () => {
-    const input = document.getElementById("add-email-input") as HTMLInputElement;
-    const email = input?.value.trim().toLowerCase();
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-      showAccessStatus("Enter a valid email address.", true);
-      return;
-    }
-    setAccess(email, "allowed");
-    input.value = "";
-  };
-  document.getElementById("add-allow-btn")?.addEventListener("click", addEmail);
-  document.getElementById("add-email-input")?.addEventListener("keypress", (e) => {
-    if ((e as KeyboardEvent).key === "Enter") addEmail();
-  });
-
-  // Clear broadcasts handler
-  document.getElementById("clear-broadcasts-btn")?.addEventListener("click", async () => {
-    if (!confirm("Are you sure you want to clear ALL broadcaster data? This cannot be undone.")) {
-      return;
-    }
-
-    try {
-      const response = await fetch("/api/admin/broadcasts", {
-        method: "DELETE",
-        headers: {
-          "Authorization": `Bearer ${adminPassword}`
-        }
-      });
-
-      if (response.ok) {
-        showStatus("All broadcaster data has been cleared.", false);
-      } else {
-        const data = await response.json();
-        showStatus(data.error || "Failed to clear data", true);
-      }
-    } catch {
-      showStatus("Connection error", true);
-    }
-  });
-
-  // Clear viewers handler
-  document.getElementById("clear-viewers-btn")?.addEventListener("click", async () => {
-    if (!confirm("Are you sure you want to clear ALL viewer data? This cannot be undone.")) {
-      return;
-    }
-
-    try {
-      const response = await fetch("/api/admin/viewers", {
-        method: "DELETE",
-        headers: {
-          "Authorization": `Bearer ${adminPassword}`
-        }
-      });
-
-      if (response.ok) {
-        showStatus("All viewer data has been cleared.", false);
-      } else {
-        const data = await response.json();
-        showStatus(data.error || "Failed to clear data", true);
-      }
-    } catch {
-      showStatus("Connection error", true);
-    }
-  });
-
-  // Handle enter key on password input
-  document.getElementById("admin-password")?.addEventListener("keypress", (e) => {
-    if (e.key === "Enter") {
-      document.getElementById("admin-login-btn")?.click();
-    }
-  });
-}
 
 // Initialize the app
 // TEMP diagnostic: time WebTransport bidi-stream creation. If a stream takes
@@ -2713,9 +3231,14 @@ async function init() {
   // Detect browser support (async for codec checks)
   browserSupport = await detectBrowserSupport();
 
-  // WebTransport mode - assume connected. (Safari/polyfill fallback relays are
-  // disabled; per-broadcast tokens are WebTransport-only via the dynamic relay.)
-  if (!needsPolyfill) {
+  // For Safari/polyfill mode, select the best relay server based on latency
+  if (needsPolyfill) {
+    // Safari/polyfill path is disabled (tinymoq is WebTransport-only); kept for the
+    // serverStatus side effect only. No static relay URL is used anymore — relays and
+    // per-broadcast tokens are resolved dynamically at go-live / watch time.
+    await selectBestFallbackRelay();
+  } else {
+    // WebTransport mode - assume connected
     serverStatus.connected = true;
   }
 
@@ -2726,26 +3249,19 @@ async function init() {
   // Load hang components dynamically AFTER polyfill is installed
   await loadHangComponents();
 
+  // Wallflower harvests ?pk= into localStorage here, before routing rewrites the URL. There
+  // is no publish key to harvest in this deployment — admission is the session cookie.
+
   const { view, streamId } = await getRouteInfo();
 
   // Get user first (needed for broadcast auth check)
-  const { user, geo, openAccess } = await getCurrentUser();
+  const { user, geo } = await getCurrentUser();
   updateAuthUI(user, geo);
 
-  if (view === "broadcast") {
-    initBroadcastView(streamId, user, openAccess);
-  } else if (view === "stats") {
-    await initStatsView(user);
-  } else if (view === "stats-map") {
-    await initStatsMapView(user);
-  } else if (view === "greet") {
-    await initGreetView();
-  } else if (view === "stream-stats") {
-    await initStreamStatsView(streamId);
-  } else if (view === "stream-stats-map") {
-    await initStreamStatsMapView(streamId);
-  } else if (view === "admin") {
-    initAdminView();
+  if (view === "landing") {
+    initLandingView();
+  } else if (view === "broadcast") {
+    initBroadcastView(streamId, user);
   } else {
     await initWatchView(streamId, user);
   }
@@ -2757,6 +3273,20 @@ async function init() {
     supportLink.addEventListener("click", (e) => {
       e.preventDefault();
       supportPanel.classList.toggle("hidden");
+    });
+  }
+
+  // "How it works" toggle. Moved out of the landing page into the footer so it is reachable
+  // while broadcasting or watching — which is when someone actually wonders what protects what.
+  const howLink = document.getElementById("howitworks-link");
+  const howPanel = document.getElementById("howitworks-panel");
+  if (howLink && howPanel) {
+    howLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      const open = !howPanel.classList.toggle("hidden");
+      // Browser Support now opens from inside this panel, so closing it would otherwise leave
+      // the support box stranded below with nothing on screen to close it again.
+      if (!open) supportPanel?.classList.add("hidden");
     });
   }
 

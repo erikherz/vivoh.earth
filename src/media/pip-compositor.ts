@@ -13,12 +13,106 @@
 // track — exactly the freeze we're avoiding. A constant 1280x720 canvas keeps the encoder
 // (and the viewer's subscription) stable; camera/screen content is letterboxed to fit.
 //
+// DO NOT "fix" portrait capture by resizing this canvas on rotation. Earthseed solves the
+// same problem the opposite way — it sizes the encoder to the camera's displayed dimensions
+// and reconfigures on portrait<->landscape (earthseed 7503a51) — because it owns its encoder
+// and renderer. We publish through <moq-watch>, which cannot re-subscribe after a track
+// reset, so adopting that here would trade a cosmetic crop for every viewer freezing each
+// time the broadcaster turns their phone.
+//
+// The orientation half of that fix IS already present here, arrived at independently:
+// compositing via ctx.drawImage(video, …) renders the frame as DISPLAYED on every browser,
+// including iOS Safari where `new VideoFrame(videoElement)` hands back un-rotated sensor
+// pixels. Sizing from videoWidth/videoHeight (post-rotation) rather than getSettings() is
+// the other half. So phone capture is upright; only the framing differs.
+//
+// KNOWN COST, accepted deliberately: drawCover crops a portrait source hard. A 720x1280
+// phone scales to 1280x2276 and only the middle ~32% of its vertical field of view survives.
+// drawContain would keep the whole frame at the price of pillarbox bars baked into the
+// stream. Crop was chosen over bars; revisit that as a product decision, not as a bug fix,
+// and note that neither option requires touching the fixed canvas size.
+//
 // Why a WebAudio mix: swapping the published audio track when crossing camera→screen
 // (mic → system audio) would reset the audio track the same way. Instead the mix's output
 // track is constant and we connect/disconnect mic and system-audio inputs behind it.
 
 const CANVAS_W = 1280;
 const CANVAS_H = 720;
+
+/**
+ * When the video frame currently on the canvas was captured, for the burn-in.
+ *
+ * The distinction is the whole point. drawImage() composites the frame the camera exposed some
+ * time ago — camera pipeline plus delivery into the page, tens of milliseconds on a laptop and
+ * more on a phone — so a timestamp taken at draw time says the picture is newer than it is, by
+ * an amount that is the same order as the latency the stamp exists to measure.
+ *
+ * requestVideoFrameCallback reports the real thing, in the performance.now() timebase, which is
+ * exactly the timebase the edge clock is anchored to. So `captureTime` converts to UTC with one
+ * addition and no second measurement.
+ */
+export interface StampFrameInfo {
+  /** performance.now()-timebase instant, or null if the browser would not say. */
+  captureTime: number | null;
+  /**
+   * How that instant was obtained, so the caller can be honest about it:
+   *   "capture"      — the camera's own capture time. What we want.
+   *   "presentation" — when the browser submitted the frame for composition. Later than
+   *                    capture by the pipeline delay, so an approximation, not the answer.
+   *   "draw"         — nothing available; the caller should fall back to the current time and
+   *                    mark the result as approximate.
+   */
+  source: "capture" | "presentation" | "draw";
+}
+
+interface VideoFrameMetadataish {
+  captureTime?: number;
+  presentationTime?: number;
+}
+
+type FrameCallbackVideo = HTMLVideoElement & {
+  requestVideoFrameCallback?: (cb: (now: number, md: VideoFrameMetadataish) => void) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+};
+
+// Subscribe to per-frame metadata for one source. Returns an unsubscribe.
+//
+// Safe on browsers without rVFC (Firefox at time of writing): the callback simply never fires,
+// `set` is never called, and the burn-in falls back to draw time and says so.
+function trackFrameTiming(v: HTMLVideoElement, set: (f: StampFrameInfo) => void): () => void {
+  const fv = v as FrameCallbackVideo;
+  if (typeof fv.requestVideoFrameCallback !== "function") {
+    console.warn("[compositor] no requestVideoFrameCallback; burn-in falls back to draw time");
+    return () => {};
+  }
+  let handle = 0;
+  let cancelled = false;
+  let announced = false;
+  const step = (_now: number, md: VideoFrameMetadataish) => {
+    if (cancelled) return;
+    // captureTime is only populated for sources where the UA knows it (getUserMedia and
+    // WebRTC). presentationTime is always there but means something weaker — see above.
+    const capture = typeof md?.captureTime === "number" ? md.captureTime : null;
+    const presentation = typeof md?.presentationTime === "number" ? md.presentationTime : null;
+    const info: StampFrameInfo =
+      capture != null
+        ? { captureTime: capture, source: "capture" }
+        : presentation != null
+          ? { captureTime: presentation, source: "presentation" }
+          : { captureTime: null, source: "draw" };
+    if (!announced) {
+      announced = true;
+      console.log(`[compositor] frame timing available: ${info.source}`);
+    }
+    set(info);
+    handle = fv.requestVideoFrameCallback!(step);
+  };
+  handle = fv.requestVideoFrameCallback(step);
+  return () => {
+    cancelled = true;
+    try { fv.cancelVideoFrameCallback?.(handle); } catch { /* not implemented everywhere */ }
+  };
+}
 
 export interface Compositor {
   readonly videoTrack: MediaStreamTrack; // stable: the canvas composite
@@ -30,6 +124,17 @@ export interface Compositor {
   disableCamera: () => void;
   enableScreen: (opts?: { onEnded?: () => void }) => Promise<void>;
   disableScreen: () => void;
+  /**
+   * Burn a line of text across the bottom of every composited frame, or null to stop.
+   * Called once per drawn frame with when that frame's picture was captured, so the caller
+   * can stamp the moment of capture rather than the moment of drawing.
+   */
+  setStampProvider: (fn: ((frame: StampFrameInfo) => string) | null) => void;
+  /**
+   * A broadcaster's handle, drawn as a subtle watermark in the upper left, or null for none.
+   * Static text, unlike the burn-in, so it is set rather than polled per frame.
+   */
+  setWatermark: (text: string | null) => void;
   setMicEnabled: (on: boolean) => Promise<void>;
   setSystemAudioEnabled: (on: boolean) => void;
   stop: () => void;
@@ -55,12 +160,37 @@ export function createCompositor(): Compositor {
   let screen: { stream: MediaStream; video: HTMLVideoElement } | null = null;
   let camera: { stream: MediaStream; video: HTMLVideoElement } | null = null;
 
-  // Letterbox a video into the whole canvas, preserving aspect ratio.
+  // Per-frame capture timing for each source, kept current by requestVideoFrameCallback.
+  //
+  // The read in draw() is race-free by spec: video frame callbacks run BEFORE animation frame
+  // callbacks within the same rendering opportunity, so by the time draw() executes, these
+  // describe the very frame drawImage() is about to composite.
+  const NO_FRAME_TIMING: StampFrameInfo = { captureTime: null, source: "draw" };
+  let cameraFrame: StampFrameInfo | null = null;
+  let screenFrame: StampFrameInfo | null = null;
+  let untrackCamera: (() => void) | null = null;
+  let untrackScreen: (() => void) | null = null;
+
+  // Letterbox a video into the whole canvas, preserving aspect ratio (fits inside, may
+  // leave black bars). Used for screen shares, where cropping would hide content.
   const drawContain = (v: HTMLVideoElement) => {
     const vw = v.videoWidth;
     const vh = v.videoHeight;
     if (!vw || !vh) return;
     const scale = Math.min(CANVAS_W / vw, CANVAS_H / vh);
+    const w = vw * scale;
+    const h = vh * scale;
+    ctx.drawImage(v, (CANVAS_W - w) / 2, (CANVAS_H - h) / 2, w, h);
+  };
+
+  // Fill the whole canvas with a video, preserving aspect ratio and cropping the overflow
+  // (the inverse of drawContain). Used for a single full-frame camera so a portrait phone
+  // source fills the frame instead of pillarboxing — no baked-in black bars in the stream.
+  const drawCover = (v: HTMLVideoElement) => {
+    const vw = v.videoWidth;
+    const vh = v.videoHeight;
+    if (!vw || !vh) return;
+    const scale = Math.max(CANVAS_W / vw, CANVAS_H / vh);
     const w = vw * scale;
     const h = vh * scale;
     ctx.drawImage(v, (CANVAS_W - w) / 2, (CANVAS_H - h) / 2, w, h);
@@ -75,6 +205,62 @@ export function createCompositor(): Compositor {
     const cw = camera?.video.videoWidth || 16;
     const ch = camera?.video.videoHeight || 9;
     return Math.round(insetW() * (ch / cw));
+  };
+
+  // ---- Burn-in strip (location + time), drawn last so nothing can cover it ----
+  //
+  // Drawn INTO the composite, not overlaid in the DOM, which is the whole point: it becomes
+  // picture, so it survives recording, re-encoding and screenshots, and it travels inside the
+  // E2E media encryption like every other pixel — only holders of the link and passcode see
+  // it. Cost to be aware of: the millisecond field changes every frame, so this strip is
+  // permanently "moving" and never inter-predicts away. It is a small fraction of a 1280x720
+  // frame, but it is not free at a low bitrate cap.
+  const STAMP_H = 40;
+  let stampProvider: ((frame: StampFrameInfo) => string) | null = null;
+  const drawStamp = (frame: StampFrameInfo) => {
+    if (!stampProvider) return;
+    let text = "";
+    try {
+      text = stampProvider(frame);
+    } catch {
+      return; // a throwing provider must not take down the whole draw loop
+    }
+    if (!text) return;
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.62)";
+    ctx.fillRect(0, CANVAS_H - STAMP_H, CANVAS_W, STAMP_H);
+    // Monospace so the digits don't shimmy as the milliseconds turn over.
+    ctx.font = '600 22px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#fff";
+    // maxWidth squeezes rather than overflows if a future line grows.
+    ctx.fillText(text, CANVAS_W / 2, CANVAS_H - STAMP_H / 2 + 1, CANVAS_W - 32);
+    ctx.restore();
+  };
+
+  // ---- Handle watermark (upper left) ----
+  //
+  // Subtle on purpose: semi-transparent white with a soft dark shadow, no plate behind it. The
+  // shadow is what keeps it legible over a white slide as well as a dark room — without it,
+  // "subtle" becomes "invisible" on half the content people actually broadcast.
+  //
+  // Like the burn-in, this is drawn into the composite rather than overlaid in the DOM, so it
+  // is part of the encoded picture and travels inside the E2E encryption. Unlike the burn-in,
+  // it is static text, so it costs the encoder nothing after the first frame.
+  let watermark: string | null = null;
+  const drawWatermark = () => {
+    if (!watermark) return;
+    ctx.save();
+    ctx.font = '600 26px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.shadowColor = "rgba(0,0,0,0.65)";
+    ctx.shadowBlur = 6;
+    ctx.shadowOffsetY = 1;
+    ctx.fillStyle = "rgba(255,255,255,0.62)";
+    ctx.fillText(watermark, 28, 24, CANVAS_W * 0.6);
+    ctx.restore();
   };
 
   let raf = 0;
@@ -103,8 +289,16 @@ export function createCompositor(): Compositor {
         ctx.strokeRect(px, py, w, h);
       }
     } else if (camera) {
-      drawContain(camera.video);
+      // Camera-only: fill the frame (crop) rather than letterbox, so a portrait phone
+      // camera doesn't produce black pillarbox bars in the published stream.
+      drawCover(camera.video);
     }
+    // Stamp the CAMERA's capture time when a camera is on, even while it is the small inset
+    // over a screen share: the camera is the source that witnesses the physical world, which
+    // is what a provenance stamp is about. Screen-only stamps the screen grab. Neither
+    // present (audio-only, or before the first frame) falls through to "draw".
+    drawWatermark();
+    drawStamp((camera ? cameraFrame : screen ? screenFrame : null) ?? NO_FRAME_TIMING);
     raf = requestAnimationFrame(draw);
   };
   raf = requestAnimationFrame(draw);
@@ -183,9 +377,13 @@ export function createCompositor(): Compositor {
       if (camera || stopped) return;
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       camera = { stream, video: mkVideo(new MediaStream(stream.getVideoTracks())) };
+      untrackCamera = trackFrameTiming(camera.video, (f) => { cameraFrame = f; });
       placed = false; // re-place the inset for the new camera aspect ratio
     },
     disableCamera() {
+      untrackCamera?.();
+      untrackCamera = null;
+      cameraFrame = null; // never stamp a live frame with a dead source's capture time
       camera?.stream.getTracks().forEach((t) => t.stop());
       if (camera) camera.video.srcObject = null;
       camera = null;
@@ -195,6 +393,7 @@ export function createCompositor(): Compositor {
       if (screen || stopped) return;
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       screen = { stream, video: mkVideo(new MediaStream(stream.getVideoTracks())) };
+      untrackScreen = trackFrameTiming(screen.video, (f) => { screenFrame = f; });
       placed = false;
       // If the user ends the share via the browser's own UI, tear it down + notify.
       stream.getVideoTracks()[0].addEventListener("ended", () => {
@@ -204,10 +403,21 @@ export function createCompositor(): Compositor {
     },
     disableScreen() {
       this.setSystemAudioEnabled(false);
+      untrackScreen?.();
+      untrackScreen = null;
+      screenFrame = null;
       screen?.stream.getTracks().forEach((t) => t.stop());
       if (screen) screen.video.srcObject = null;
       screen = null;
       placed = false;
+    },
+
+    setStampProvider(fn) {
+      stampProvider = stopped ? null : fn;
+    },
+
+    setWatermark(text) {
+      watermark = stopped ? null : text;
     },
 
     async setMicEnabled(on) {
@@ -246,6 +456,8 @@ export function createCompositor(): Compositor {
       if (stopped) return;
       stopped = true;
       document.removeEventListener("pointerdown", onGesture);
+      untrackCamera?.();
+      untrackScreen?.();
       cancelAnimationFrame(raf);
       screen?.stream.getTracks().forEach((t) => t.stop());
       camera?.stream.getTracks().forEach((t) => t.stop());

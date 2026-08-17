@@ -1,7 +1,15 @@
 # Local dev secrets for `wrangler dev`. Copy to `.dev.vars` (gitignored) and fill in.
 # In production these are set with `wrangler secret put <NAME>` — NEVER commit real values.
 
-# OAuth providers
+# ── OAuth ────────────────────────────────────────────────────────────────────────────
+# This is the door. Unlike Wallflower, which admits broadcasters on a bearer publish key,
+# here signing in IS admission — so a provider with a missing id or secret is simply a
+# provider nobody can use, and with none of them set nobody can broadcast at all. That is
+# the intended failure direction; do not add a bypass to get past it in dev.
+#
+# Redirect URI to register with each provider:
+#   https://vivoh.earth/api/auth/<provider>/callback
+# and for local work, whatever origin `wrangler dev` prints.
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 MICROSOFT_CLIENT_ID=
@@ -9,13 +17,42 @@ MICROSOFT_CLIENT_SECRET=
 DISCORD_CLIENT_ID=
 DISCORD_CLIENT_SECRET=
 
-# HMAC secret for signing session cookies
+# Signs the session cookie. Any long random string. Rotating it signs everyone out, which
+# is the emergency lever if a session is believed stolen.
 SESSION_SECRET=
 
-# Opaque bearer authenticating the Worker to TinyMoQ's /assign + /release provisioning API
-TINYMOQ_PROVISION_KEY=
+# ── Publishing ───────────────────────────────────────────────────────────────────────
+# Signs the stateless challenge a broadcaster must sign to prove a broadcast NAME is theirs.
+# This is ownership, not admission — it answers "what may you publish as", after OAuth has
+# already answered "may you publish". Any long random string.
+CHALLENGE_SECRET=
 
-# base64url "k" field from moq-auth.jwk — HMAC secret for signing per-broadcast relay tokens.
-# Extract with:
-#   python3 -c "import base64,json;print(json.loads(base64.urlsafe_b64decode(open('moq-auth.jwk').read().strip()+'==='))['k'])"
-MOQ_AUTH_K=
+# ── Relay: moq.pro (Mode A) ──────────────────────────────────────────────────────────
+# Set MOQ_PRO_JWK (preferred) or MOQ_PRO_K and every broadcast goes through cdn.moq.pro with
+# a per-broadcast token this Worker mints. JWK is the private half of an Ed25519 keypair whose
+# public half was uploaded via moq.pro's "Import Asymmetric" — preferred because with it the
+# CDN can VERIFY our tokens but cannot mint one. MOQ_PRO_K is the older symmetric secret,
+# which the CDN can both verify and forge with.
+MOQ_PRO_JWK=
+MOQ_PRO_K=
+# Path namespace under cdn.moq.pro. Defaults to "erik" when unset.
+MOQ_PRO_ROOT=
+
+# ── Relay: tinymoq broker/fleet (DORMANT) ────────────────────────────────────────────
+# Read only when no MOQ_PRO_* value is set. Left here because moving off moq.pro onto the
+# broker/fleet is meant to be a credential change rather than a port. Do not set these at the
+# same time as MOQ_PRO_* expecting a fallback — moq.pro wins unconditionally and silently.
+CDN_API_TOKEN=
+# BYOK: the tenant's Ed25519 private signing key as an OKP JWK, whose public half is
+# registered with the fleet as its verify_jwk.
+MOQ_AUTH_PRIVATE_JWK=
+
+# ── Operations ───────────────────────────────────────────────────────────────────────
+# Bearer for /api/admin/*. Unset ⇒ the admin surface is locked, including the kill switch.
+ADMIN_PASSWORD=
+# Where a viewer's abuse report is pushed as it arrives. The optional evidence link a
+# reporter can attach is sent HERE and nowhere else — it is never written to D1. Unset ⇒
+# reports still land in D1, and the evidence-link option is hidden from viewers.
+REPORT_WEBHOOK=
+# Days to keep viewing-session rows. Unset ⇒ keep forever.
+STATS_RETENTION_DAYS=

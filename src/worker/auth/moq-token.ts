@@ -17,9 +17,10 @@
 // everywhere, `exp` in unix SECONDS. Signing input is base64url(header) + "." +
 // base64url(payload); the token is that + "." + base64url(signature).
 
-// Earthseed's Ed25519 key id (RFC 7638 JWK thumbprint) — fallback if the private JWK
-// secret omits its own `kid`. The relay selects the verifying key by this kid.
-export const MOQ_KID = "X3KzNJpRvVarbKBM2mk_M5JGt0dDYu85ZA5z2nLb1Qk";
+// MoQplay's Ed25519 key id (RFC 7638 JWK thumbprint) — fallback if the private JWK
+// secret omits its own `kid`. The relay selects the verifying key by this kid; it must
+// match the `kid` on MoQplay's registered verify_jwk.
+export const MOQ_KID = "guAuLGEyCksxcThOpOD5xvlCBfrwHEDkUc7n8fOXDHU";
 // Managed HS256 mode: the relay has the per-stream key and ignores `kid`; keep it
 // constant so tokens stay identical to the moq-token-cli tooling.
 const HS256_KID = "9309ffde64e0bf0f";
@@ -108,18 +109,18 @@ export async function mintHs256Token(secretK: string, claims: MoqClaims): Promis
   return sign(header, claims, (input) => crypto.subtle.sign("HMAC", key, input));
 }
 
-// ── moq.pro (Luke Curley's hosted CDN) tokens ──────────────────────────────────
-// moq.pro verifies HS256 tokens signed with the ACCOUNT's symmetric key, selected by `kid`,
-// with claims { root, put, get, exp } where put/get are path prefixes UNDER `root`. The
-// broadcast path is `<root>/<name>.hang`; the client connects to cdn.moq.pro directly.
+// ── moq.pro (Luke Curley's hosted CDN) ───────────────────────────────────────
+// moq.pro verifies HS256 tokens signed with the account's OWN symmetric key (the
+// erik-erik.jwk moq.pro issued; base64url "k" stored as the MOQ_PRO_K secret) and uses a
+// DIFFERENT claim shape than the fleet tokens above: a `root` account claim plus put/get
+// scoped to "<stream>.hang". The kid is moq.pro's, fixed below.
 export const MOQ_PRO_KID = "f865ebbc-4bb8-4a1f-834c-7d2fc0ae1d07";
 export interface MoqProClaims {
   root: string; // account root, e.g. "erik"
-  put: string[]; // path prefixes (under root) the holder may publish to
-  get: string[]; // path prefixes (under root) the holder may subscribe to
+  put: string[];
+  get: string[];
   exp: number; // expiry, unix SECONDS
 }
-// Sign a moq.pro token with the account's base64url HMAC secret `k` (env.MOQ_PRO_K).
 export async function mintMoqProToken(secretK: string, claims: MoqProClaims): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -132,5 +133,27 @@ export async function mintMoqProToken(secretK: string, claims: MoqProClaims): Pr
   const enc = (o: unknown) => b64url(new TextEncoder().encode(JSON.stringify(o)));
   const signingInput = `${enc(header)}.${enc(claims)}`;
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signingInput));
+  return `${signingInput}.${b64url(sig)}`;
+}
+
+/**
+ * The same claims, signed with an ASYMMETRIC key imported through moq.pro's admin UI
+ * ("Import Asymmetric"), where only the PUBLIC half was uploaded.
+ *
+ * This is the whole difference from mintMoqProToken above. HS256 verification requires the
+ * identical secret used to sign, so moq.pro necessarily holds everything needed to mint any
+ * token we could -- their Keys page even offers it back as a Download. With EdDSA they hold
+ * only a verify key: they can check our tokens and cannot forge one, and a breach on their
+ * side yields nothing that lets anyone publish or subscribe as us.
+ *
+ * The kid travels in the header so the relay selects the right verify key.
+ */
+export async function mintMoqProTokenEd25519(privateJwk: string, claims: MoqProClaims): Promise<string> {
+  const jwk = JSON.parse(privateJwk) as JsonWebKey & { kid?: string };
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, false, ["sign"]);
+  const header = { typ: "JWT", alg: "EdDSA", kid: jwk.kid };
+  const enc = (o: unknown) => b64url(new TextEncoder().encode(JSON.stringify(o)));
+  const signingInput = `${enc(header)}.${enc(claims)}`;
+  const sig = await crypto.subtle.sign("Ed25519", key, new TextEncoder().encode(signingInput));
   return `${signingInput}.${b64url(sig)}`;
 }
