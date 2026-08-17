@@ -2762,66 +2762,10 @@ async function initWatchView(streamId: string, user: User | null) {
 
     // Start muted; first click/tap on the player enables audio. Declared before the swap so a
     // replacement element can re-arm it — `live` changes identity, this handler must follow.
-    //
-    // ── Why this is more than `live.muted = false` ────────────────────────────────────────
-    //
-    // <moq-watch> resumes its AudioContext from a reactive EFFECT keyed on the muted signal,
-    // and @moq/signals BATCHES within a microtask, comparing the final value against the one
-    // captured at the start of that batch. Both facts matter here:
-    //
-    //   1. After a token renewal, swapInPlayer restores `muted = false` programmatically —
-    //      with no user gesture. The browser refuses the resulting resume() (audio needs user
-    //      activation), so the context stays suspended. The picture comes back; the sound
-    //      does not.
-    //   2. A tap then sets muted = false when it is ALREADY false. No value change means no
-    //      notification, so the effect never re-runs and resume() is never retried. The tap
-    //      appears to do nothing, because it does nothing.
-    //
-    // So when the state is "unmuted but silent" we force a REAL edge, across a batch
-    // boundary. Setting true then false in one tick would be coalesced (old false, final
-    // false) into no notification at all — a fix that looks right and changes nothing.
-    // Transient user activation is time-based rather than call-stack-based, so the deferred
-    // half still counts as user-activated.
-    //
-    // `audioNeedsKick` is what keeps this from doing harm: without it, a permanently attached
-    // handler would briefly MUTE a perfectly good player whenever someone clicked the video.
-    // Only a swap that restored audio without a gesture arms it.
-    let audioResumeTimer = 0;
-
-    /**
-     * Keep asking the element's AudioContext to resume until it actually is.
-     *
-     * One attempt is not enough, and the reason is a RACE rather than a policy. The context is
-     * not created when the element is — it is created when the audio codec config arrives.
-     * swapInPlayer only waits for the CANVAS to paint, which is video, so a resume fired right
-     * after a swap often finds no context at all and silently does nothing; the context that
-     * shows up a moment later is created suspended and never asked again. Whether audio
-     * survived a renewal came down to which of the two arrived first — which is exactly why it
-     * alternated between working and not.
-     *
-     * So poll for a few seconds, resume the moment it exists, and stop as soon as it reports
-     * running. Idempotent and re-entrant: a later call cancels the pending timer and restarts,
-     * so tapping during a pump is harmless.
-     */
-    const pumpAudioResume = (attemptsLeft = 25) => {
-      window.clearTimeout(audioResumeTimer);
-      const tick = () => {
-        const ctx = (live as unknown as {
-          backend?: { audio?: { context?: { peek?: () => AudioContext | undefined } } };
-        })?.backend?.audio?.context?.peek?.();
-        if (ctx?.state === "running") return; // audible — nothing left to do
-        if (ctx) void ctx.resume().catch(() => { /* refused — keep trying */ });
-        if (--attemptsLeft > 0) audioResumeTimer = window.setTimeout(tick, 200);
-      };
-      tick();
-    };
-
     const enableAudio = () => {
-      live.muted = false; // idempotent — a no-op when already unmuted
-      pumpAudioResume();  // matters on the first tap AND after every swap
+      live.muted = false;
+      live.removeEventListener("click", enableAudio);
     };
-    // Deliberately NOT removed after the first unmute: every renewal can strand audio again,
-    // so the recovery has to stay available for the life of the page.
     watcher.addEventListener("click", enableAudio);
 
     /**
@@ -2889,14 +2833,6 @@ async function initWatchView(streamId: string, user: User | null) {
       // swap silently stops unmuting the stream.
       live.muted = !wasUnmuted;
       live.addEventListener("click", enableAudio);
-      if (wasUnmuted) {
-        // Try immediately: on a browser where the document already has sticky activation
-        // (desktop Chrome, typically, since the viewer tapped to unmute in the first place)
-        // this succeeds and audio simply continues across the renewal with nothing to notice.
-        // Where it is refused — Safari and iOS want a *transient* activation — the catch
-        // inside leaves the context suspended and the click handler above is the way back.
-        pumpAudioResume();
-      }
       old.remove();
       console.log(`[${why}] swapped in a fresh player in ${(performance.now() - started).toFixed(0)}ms`);
       return true;
