@@ -874,16 +874,14 @@ async function handleStreamRoutes(
     // Safe to expose publicly because it can only REDUCE privilege — a caller may ask for a
     // token that dies sooner, never one that lives longer, and the clamp enforces that.
     //
-    // It exists to answer a question the kill switch depends on: does the CDN check token
-    // expiry on an established session, or only at connect? If expiry is enforced mid-session
-    // then dropping this TTL and renewing makes termination work against ANY client, including
-    // one deliberately ignoring the `killed` flag. If it is not, kill stays cooperative and
-    // the only real fix is a disconnect API from the CDN.
+    // Kept purely as a MEASUREMENT tool — it is how token-expiry.mjs asks whether the relay
+    // enforces expiry on an established session. Nothing in normal operation sets it: the
+    // default is the full VIEWER_TOKEN_TTL, because the client no longer renews.
     const requestedTtl = Number(url.searchParams.get("ttl"));
     const viewerTtl =
       Number.isFinite(requestedTtl) && requestedTtl >= 10 && requestedTtl < VIEWER_TOKEN_TTL
         ? Math.floor(requestedTtl)
-        : VIEWER_TOKEN_TTL_RENEWED;
+        : VIEWER_TOKEN_TTL;
 
     // moq.pro (Mode A): relay is always cdn.moq.pro; mint a subscribe-only token scoped to
     // THIS stream and return the connect path. Bypasses the fleet broker/direct logic below.
@@ -924,19 +922,10 @@ async function handleStreamRoutes(
         : null;
       const relay = await assignViaBroker(env, broadcastName(streamId), request, origin ? { origin, pull } : undefined);
       if (!relay) return new Response("offline", { status: 404 });
-      // `viewerTtl`, NOT VIEWER_TOKEN_TTL. This branch used to hardcode the 6h default and
-      // ignore ?ttl= entirely, which had two consequences worth stating plainly:
-      //
-      //   1. A viewer held a six-hour token that nothing renewed, so someone ignoring the
-      //      `killed` flag kept watching for up to six hours. Termination was cooperative
-      //      here while the moq.pro path made it enforceable within 120s.
-      //   2. token-expiry.mjs works by asking for a short token via ?ttl=. Pointed at this
-      //      path it would silently be handed 6h and measure nothing — a test that passes
-      //      by not testing.
-      //
-      // viewerTtl defaults to VIEWER_TOKEN_TTL_RENEWED (120s), so the renewal loop in the
-      // client now drives this path exactly as it drives moq.pro. Mid-session expiry is
-      // moq-relay's documented behaviour, so our own boxes enforce it the same way.
+      // `viewerTtl`, NOT a hardcoded VIEWER_TOKEN_TTL. The value is the same in normal
+      // operation now that nothing renews, but this branch used to ignore ?ttl= entirely,
+      // which meant token-expiry.mjs was handed 6h and measured nothing — a test that passed
+      // by not testing. Honouring the override keeps that measurement possible.
       const viewerJwt = await tryMintMoqToken(env, { put: [], get: [broadcastName(streamId)], exp: now + viewerTtl });
       // Link-held keys: nothing to release here. Kept as constants so the response shape below is unchanged.
           const encrypted = true;
@@ -1574,20 +1563,17 @@ const PUBLISHER_TOKEN_TTL = 12 * 60 * 60; // 12h
 // Ceiling, and the lifetime still used by the fleet/brokered and enterprise paths, whose
 // clients do not implement renewal. Also the upper bound the ?ttl= test override clamps to.
 const VIEWER_TOKEN_TTL = 6 * 60 * 60; // 6h
-// The moq.pro path only, where the client DOES renew (see "Viewer token renewal" in main.ts).
+// There is deliberately NO short, renewed viewer token any more.
 //
-// This is what makes termination enforceable rather than merely requested. cdn.moq.pro drops
-// a session when its token expires (measured: scripts/e2e/token-expiry.mjs), renewal has to
-// come back through this Worker, and this Worker returns 410 for a killed stream — so a
-// client that ignores the kill flag entirely still stops within one token lifetime. 120s is a
-// HARD ceiling on that: tokens minted before a kill cannot be hoarded past their own expiry.
+// A 120s TTL with client-side renewal used to make termination enforceable against a client
+// MODIFIED to ignore the `killed` flag: no renewal, and the relay dropped it within one token
+// lifetime. Modified clients are not a supported case, so it bought nothing — while costing
+// every viewer a reconnect every 90 seconds, which on Safari/iOS rebuilt the AudioContext
+// without a user gesture and left the stream silent.
 //
-// Chosen over 30s deliberately. The renewal lead is a quarter of the lifetime, so this leaves
-// 30s of headroom for a full reconnect on a slow connection, and a quarter of the connection
-// churn on the CDN. It costs nothing against ordinary viewers, who stop in 5s via the kill
-// flag with their transport closed (scripts/e2e/kill-transport-close.mjs) — this path only
-// ever governs someone who went out of their way to keep watching.
-const VIEWER_TOKEN_TTL_RENEWED = 120;
+// Stated plainly because trust.html makes a claim about this: termination is now enforced by
+// the client honouring the kill signal — ~5s, transport closed — and NOT against a client
+// modified to ignore it, which keeps receiving until its token lapses.
 // Cross-cluster pull token (edge relay -> origin). Matches the viewer TTL so a long
 // broadcast's edge pull isn't dropped mid-stream (the moq-token-cli example used 1h).
 // SERVER-HELD only (Mode B): never leaves the Worker/relay, so a long TTL is safe.

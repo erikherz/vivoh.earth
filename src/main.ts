@@ -2693,56 +2693,28 @@ async function initWatchView(streamId: string, user: User | null) {
     }
     console.log(`[watch-timing] url set, connecting @ ${ms()}`);
 
-    // ── Viewer token renewal ────────────────────────────────────────────────────────────
-    // cdn.moq.pro re-checks token expiry on an ESTABLISHED session — measured, not assumed
-    // (scripts/e2e/token-expiry.mjs: a 30s token stalls at 30-40s, a 60s token at 60-70s,
-    // while the publisher keeps sending). A viewer whose token lapses is dropped by the relay
-    // no matter what its client wants.
+    // ── Viewer token renewal: REMOVED ───────────────────────────────────────────────────
     //
-    // That is what makes termination enforceable rather than merely requested. Renewal must
-    // come back through the Worker, and the Worker will not renew a killed stream — so the
-    // choke point is token ISSUANCE, not client behaviour. A custom client that never ran any
-    // of this still cannot mint its own token.
+    // The viewer token is issued for its full lifetime and never renewed, so nothing here
+    // reconnects and the player is never rebuilt on a timer.
     //
-    // Scheduled from the token's OWN exp claim, so it adapts to whatever the Worker issued.
-    // Both the moq.pro and fleet paths now receive VIEWER_TOKEN_TTL_RENEWED (120s) by default,
-    // so this fires on both. Mid-session expiry is moq-relay's DOCUMENTED behaviour rather
-    // than a moq.pro feature — upstream: "the relay closes the connection once exp passes" —
-    // so running our own boxes keeps the property rather than forfeiting it. That said, it is
-    // documented-on-main for a relay we pin months earlier, which makes it the one claim in
-    // this chain worth re-measuring on the fleet rather than inferring. See token-expiry.mjs.
-    let renewTimer = 0;
-    const tokenExpiry = (jwt: string | undefined): number | null => {
-      if (!jwt) return null;
-      try {
-        const claims = JSON.parse(atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-        return typeof claims.exp === "number" ? claims.exp : null;
-      } catch {
-        return null; // opaque token — fall back to never renewing rather than guessing
-      }
-    };
+    // Renewal was what made termination enforceable against a client MODIFIED to ignore the
+    // kill flag: no renewal, and the relay dropped it within one token lifetime. Modified
+    // clients are not a supported case, so that bought nothing — while costing every viewer a
+    // reconnect every 90 seconds. On Safari/iOS that reconnect rebuilt the AudioContext with
+    // no user gesture behind it, so it came back suspended and the stream went silent.
+    //
+    // Measured on 2026-08-17 with scripts/e2e/audio-across-renewal.mjs, which is worth keeping
+    // for the next person: the context's currentTime resets across a renewal (87.5 -> 1.9),
+    // proving it is rebuilt, and it is rebuilt whether the player is swapped OR the url is
+    // re-pointed. There was no version of renewal that left audio alone.
+    //
+    // Also removed with it: the tap-to-restore experiment. It worked — a tap does revive the
+    // rebuilt context on iOS — but with no renewals there is nothing left to restore.
+    //
+    // Termination still works for every supported client: the settings poll sees `killed` and
+    // stops within ~5s with the transport closed.
 
-    const scheduleRenewal = (jwt: string | undefined) => {
-      const exp = tokenExpiry(jwt);
-      if (!exp) return;
-      const remaining = exp - Math.floor(Date.now() / 1000);
-      // Renew with a quarter of the lifetime to spare (at least 5s), so a slow round trip
-      // does not land after the relay has already dropped us.
-      const lead = Math.max(5, Math.floor(remaining * 0.25));
-      const delay = Math.max(1, remaining - lead) * 1000;
-      window.clearTimeout(renewTimer);
-      renewTimer = window.setTimeout(renew, delay);
-      console.log(`[token] expires in ${remaining}s; renewing in ${Math.round(delay / 1000)}s`);
-    };
-
-    // Re-pointing the SAME element's url does not work: measured, the picture freezes on its
-    // last frame and never resumes (setAttribute returns instantly having achieved nothing).
-    // <moq-watch> cannot re-subscribe once its track has been reset — the same constraint that
-    // forces the compositor's fixed canvas.
-    //
-    // So renewal connects a SECOND element behind the first, waits until it is genuinely
-    // painting, and only then retires the old one. The overlap costs a few seconds of double
-    // subscription; the alternative is a visible hole in the stream.
     let live = watcher;
 
     const isPainting = (el: Element): boolean => {
@@ -2768,82 +2740,6 @@ async function initWatchView(streamId: string, user: User | null) {
     };
     watcher.addEventListener("click", enableAudio);
 
-    /**
-     * EXPERIMENT — does a tap revive an AudioContext that was rebuilt by a token renewal?
-     *
-     * This is the untested assumption behind "just show a tap-to-restore button", and it is
-     * worth isolating rather than assuming: on Safari/iOS a renewal rebuilds the context with
-     * no transient gesture behind it, so it starts suspended. Whether a LATER tap can resume
-     * that specific context is exactly what nobody has measured, and a button that cannot fix
-     * it would be worse than no button.
-     *
-     * Deliberately kept off the initial-unmute path. Earlier attempts called resume() from the
-     * ordinary player click and that BROKE audio at start on Safari — so this appears only
-     * after a renewal has actually left the context suspended, and never runs otherwise. The
-     * working path is untouched by construction.
-     *
-     * The button reports what happened, so the tester can say more than "it didn't work".
-     */
-    const audioCtxNow = (): AudioContext | undefined =>
-      (live as unknown as {
-        backend?: { audio?: { context?: { peek?: () => AudioContext | undefined } } };
-      })?.backend?.audio?.context?.peek?.();
-
-    let restoreBtn: HTMLButtonElement | null = null;
-
-    const offerAudioRestore = () => {
-      const ctx = audioCtxNow();
-      if (!ctx || ctx.state === "running") return; // nothing to restore
-      if (restoreBtn) return; // already offered
-
-      const host = document.querySelector("#watch-view section") as HTMLElement | null;
-      if (!host) return;
-      if (!host.style.position) host.style.position = "relative";
-
-      const btn = document.createElement("button");
-      restoreBtn = btn;
-      btn.type = "button";
-      btn.textContent = `🔇 Tap to restore audio (${ctx.state})`;
-      btn.style.cssText =
-        "position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:20;" +
-        "padding:0.7rem 1.3rem;border:0;border-radius:999px;background:#f59e0b;color:#0a0a0a;" +
-        "font:inherit;font-weight:700;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,0.4);";
-
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation(); // do not also trigger enableAudio on the player beneath
-        const c = audioCtxNow();
-        if (!c) { btn.textContent = "no audio context"; return; }
-        const before = c.state;
-        try {
-          await c.resume();
-        } catch (err) {
-          btn.textContent = `resume refused (${before} -> ${c.state})`;
-          console.warn("[audio-restore] resume rejected", err);
-          return;
-        }
-        // Report the honest outcome rather than assuming success.
-        console.log(`[audio-restore] resume: ${before} -> ${c.state}`);
-        if (c.state === "running") {
-          btn.textContent = "✅ audio restored";
-          window.setTimeout(() => { btn.remove(); restoreBtn = null; }, 1500);
-        } else {
-          btn.textContent = `still ${c.state} after resume`;
-        }
-      });
-
-      host.appendChild(btn);
-      console.log(`[audio-restore] offering restore; context is ${ctx.state}`);
-    };
-
-    /**
-     * Replace the player with a freshly built one pointed at `url`, and only retire the old
-     * element once the new one is genuinely painting.
-     *
-     * This is the ONLY way back from a dead player. <moq-watch> cannot re-subscribe after its
-     * track resets, and a WebCodecs decoder that has errored stays closed — so re-pointing the
-     * existing element achieves nothing (measured: the picture freezes on its last frame).
-     * Used both to renew a token and to recover a decoder killed by undecryptable frames.
-     */
     /**
      * `form` is the connect shape, and the two paths genuinely differ:
      *
@@ -2904,96 +2800,6 @@ async function initWatchView(streamId: string, user: User | null) {
       console.log(`[${why}] swapped in a fresh player in ${(performance.now() - started).toFixed(0)}ms`);
       return true;
     }
-
-    async function renew(): Promise<void> {
-      const fresh = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag });
-      if (!fresh) {
-        // 410 (terminated) and 404 (offline) both arrive as null. Either way there is no new
-        // token, so the relay drops this session at expiry whatever we do here. That is the
-        // enforcement: refusing to renew is what ends the broadcast for a client that would
-        // otherwise ignore us. The settings poll renders the terminated message.
-        console.warn("[token] renewal refused — no new token; the relay will drop this session");
-        return;
-      }
-      // Both paths renew. This used to bail out for anything without a moq.pro `path`, which
-      // meant the fleet path held a token nothing ever replaced — and since the Worker also
-      // minted it for six hours there, termination degraded from enforceable to a polite
-      // request. The choke point has to be token ISSUANCE on every path, or it is not a
-      // choke point: a client that ignores the killed flag is exactly the client this is for.
-      const [url, form] = fresh.path
-        ? [moqUrl(fresh.relay, fresh.path, fresh.jwt ?? ""), { name: "", catalogFormat: "hang" }]
-        : [`https://${fresh.relay}/?jwt=${fresh.jwt}`, { name: streamName, catalogFormat: null }];
-
-      // Renew WITHOUT rebuilding the player if we possibly can, because the rebuild is what
-      // silences Safari and iOS.
-      //
-      // Measured (scripts/e2e/audio-across-renewal.mjs): every swap builds a NEW AudioContext.
-      // The context's own currentTime resets — 87.5 then 1.9 — which is proof, where an
-      // earlier comparison of sampleRate was not, since both are 48000. On Chrome that new
-      // context auto-starts because the document still holds sticky activation, so the harness
-      // reads perfectly healthy. Safari and iOS want TRANSIENT activation, so a context built
-      // ninety seconds later by a timer starts suspended, and no amount of resuming it from
-      // outside recovers it — five attempts, three of which broke working audio outright.
-      //
-      // CAVEAT, measured after writing this: re-pointing does NOT save the AudioContext.
-      // Changing the url resets source.config, which re-runs the effect that builds the
-      // context, so it is rebuilt either way and Safari is no better off. What this DOES buy
-      // is avoiding the element swap entirely — one element throughout, no video interruption,
-      // bytes flowing continuously across the renewal. Keep it for that; do not mistake it for
-      // a fix to the Safari audio problem, which needs a product decision about token TTL or a
-      // visible tap-to-restore affordance.
-      if (!(await renewInPlace(url))) {
-        // Either way we reschedule: on failure the old element still has a few seconds of
-        // token left, and the next attempt tries again with a newer one.
-        await swapInPlayer(url, "token", form);
-      }
-      scheduleRenewal(fresh.jwt);
-
-      // Give the rebuilt pipeline a moment to construct its context, then — only if it really
-      // did come back suspended — offer the restore. On Chrome this never fires, because
-      // sticky activation lets the new context auto-start; on Safari/iOS it is the whole
-      // point. Checked rather than assumed, so the button's presence is itself evidence.
-      window.setTimeout(offerAudioRestore, 2500);
-    }
-
-    /**
-     * Point the EXISTING element at a new URL and confirm frames genuinely resume.
-     *
-     * The success check is the whole difficulty, and a previous version got it wrong in a way
-     * worth not repeating: it sampled the decrypt counter immediately, but the OLD connection
-     * keeps delivering for a moment after the url changes, so those in-flight frames read as
-     * success. The renewal then skipped its own fallback and the player froze permanently when
-     * the old connection finally died.
-     *
-     * So: let the old connection drain first, THEN start counting. Frames arriving after the
-     * drain window can only be coming from the new connection.
-     *
-     * Renewal fires at 75% of token lifetime — around 30s of headroom — so spending 8s here
-     * is free, and the fallback still has plenty of time to run.
-     */
-    async function renewInPlace(url: string): Promise<boolean> {
-      const started = performance.now();
-      live.setAttribute("url", url);
-
-      // Drain: anything still arriving from the old subscription lands in here and is not
-      // counted as evidence of anything.
-      await new Promise((r) => setTimeout(r, 2500));
-      const baseline = decryptStats().successes;
-
-      const deadline = performance.now() + 5500;
-      while (performance.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 250));
-        if (decryptStats().successes > baseline + 10) {
-          console.log(`[token] renewed in place in ${(performance.now() - started).toFixed(0)}ms (no player swap; the audio pipeline IS still rebuilt)`);
-          return true;
-        }
-      }
-      console.warn("[token] in-place renewal produced no post-drain frames; falling back to a player swap");
-      return false;
-    }
-
-    scheduleRenewal(routeInfo.jwt);
-    window.addEventListener("beforeunload", () => window.clearTimeout(renewTimer));
 
     // --- Stuck-player watchdog --------------------------------------------------------------
     //
