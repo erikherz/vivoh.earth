@@ -48,7 +48,7 @@ Durable Object migration tags) and `.dev.vars`.
 
 Not carried: `public/request.html`, the proof-of-work page for obtaining a publish code —
 see §3 — and `public/partner.html`, which invites operators to join the brokered fleet CDN
-this deployment does not use. Restore it from Wallflower if the broker move in §7 happens.
+this deployment does not use. Restore it from Wallflower if the broker move in §8 happens.
 
 ## 3. The publisher door
 
@@ -119,7 +119,33 @@ rendered into the page that holds the content key. Wallflower ships the same mar
 not exposed only because its sign-in never renders. Both are escaped now, and an avatar URL
 must parse as `https:` or it falls back to initials.
 
-## 6. Known gaps
+## 6. Deployed state (17 August 2026)
+
+Live at https://vivoh.earth, version `31cd7a69`, on moq.pro via `MOQ_PRO_K`.
+
+D1 was **migrated, not rebuilt.** The plan in an earlier draft of this document was to drop
+and recreate; that was wrong, because the database is not empty. It held 8 users, 57
+broadcast events, 66 watch events, 27 streams — and **10 `broadcaster_access` grants**, which
+under the new door are the only thing between a signed-in account and publishing. Dropping
+them would have silently revoked ten people. Migrations `0009`–`0014` were applied in order,
+plus the index half of `0015` (the columns it adds already existed here). All 10 grants
+survived. `0010` permanently deleted the stored geolocation on the existing rows.
+
+Verified live: all three providers 302 to their real consent screens with correct callbacks;
+`/api/auth/me` returns `user: null` when signed out, with no anonymous stand-in; `/request`
+is 404; `frame-ancestors 'none'` and `X-Frame-Options: DENY` are on the root document; and
+an unauthenticated `POST /api/stats/broadcast` returns 401.
+
+**Publishing does not work yet.** `CHALLENGE_SECRET` is unset, so `/api/publish/challenge`
+returns 503 and the ownership claim cannot be built — an approved, signed-in broadcaster is
+still refused. `ADMIN_PASSWORD` is also unset, which locks `/api/admin/*` **including the
+kill switch.** Both are `wrangler secret put`.
+
+Also worth knowing: `MOQ_PRO_K` is set but `MOQ_PRO_JWK` is not, so tokens are signed with
+the symmetric secret — the CDN can both verify our tokens and mint them. Switching to the
+asymmetric key removes that.
+
+## 7. Known gaps
 
 - **D1 has not been reset.** The remote database still carries this repo's old schema
   (migrations numbered `0001`–`0008` on a history that forked from Wallflower's at `0004`).
@@ -154,7 +180,7 @@ must parse as `https:` or it falls back to initials.
   address. It can sign in and will never match a `broadcaster_access` grant, so it can never
   publish. That is the right order of failure but looks like a bug from the outside.
 
-## 7. The moq.pro question, deliberately left open
+## 8. The moq.pro question, deliberately left open
 
 This deployment is on **moq.pro (Mode A)**: set `MOQ_PRO_JWK` (or `MOQ_PRO_K`) and every
 broadcast goes through `cdn.moq.pro` with a per-broadcast token this Worker mints. That was
