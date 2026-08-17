@@ -777,6 +777,25 @@
         #auth-container {
             position: relative;
         }
+        /* Sign-out carries a LABEL, not just the door-arrow glyph. On a site where being
+           signed in is what grants the right to broadcast, "am I signed in, and as whom?"
+           has to be answerable at a glance — a bare icon does not answer it. The label drops
+           on narrow screens, where the avatar and name still say who you are. */
+        .btn-signout {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.4rem 0.7rem;
+        }
+        .btn-signout svg {
+            width: 16px;
+            height: 16px;
+            flex-shrink: 0;
+        }
+        @media (max-width: 640px) {
+            .signout-label { display: none; }
+            .btn-signout { padding: 0.5rem; gap: 0; }
+        }
         /* Auth buttons container */
         .auth-buttons {
             display: flex;
