@@ -180,7 +180,57 @@ asymmetric key removes that.
   address. It can sign in and will never match a `broadcaster_access` grant, so it can never
   publish. That is the right order of failure but looks like a bug from the outside.
 
-## 8. The moq.pro question, deliberately left open
+## 8. The CDN, and the three defects the swap exposed
+
+**Answered 17 August 2026: Vivoh.Earth now runs on the tinymoq broker/fleet, not moq.pro.**
+Verified — stream `733ru` landed on `dal.moqcdn.net:8026`. Endpoint is
+`https://tinymoq.com/cdn/assign` with `CDN_API_TOKEN`; signing is BYOK Ed25519, whose public
+half is registered with the tenant as its `verify_jwk`.
+
+Note the endpoint host. `wrangler.jsonc` inherited `moqcdn.net` from Wallflower, which is a
+different broker and would simply refuse this tenant's token. **Do not answer "which CDN?"
+from that file** — check whether a `MOQ_PRO_*` secret is set, or look at `relay_host` on
+recent `broadcast_events` rows.
+
+Rollback is a **secret, not a deploy**: `wrangler secret put MOQ_PRO_K` makes
+`moqProAssign()` return first again, immediately, with no rebuild and no DB change. Two tags
+mark the verified states either side: `moqpro-working` and `fleet-working`.
+
+### What the flip would have broken, had it been only a flip
+
+The fleet path had been dormant behind `MOQ_PRO_K` and had never run end to end. Three
+defects, in ascending order of how quietly they failed:
+
+1. **Six-hour viewer tokens, never renewed.** The brokered branch hardcoded
+   `VIEWER_TOKEN_TTL` and ignored `?ttl=`. Someone ignoring the `killed` flag would have kept
+   watching for six hours rather than 120 seconds — and `token-expiry.mjs`, which works by
+   requesting a short token, would have been handed 6h and measured nothing. A test that
+   passes by not testing.
+2. **Renewal refused to run.** The client bailed out of `renew()` without a moq.pro `path`,
+   and `swapInPlayer` hardcoded the moq.pro connect shape (empty `name`,
+   `catalog-format=hang`), so even reaching it would have subscribed to nothing.
+3. **The salt was never sent.** Neither fleet branch returned it. `deriveFor` falls back to
+   `wf-salt|<streamId>`; publisher and viewer both fell back to the *same* value, so media
+   decrypted and the path looked healthy — while the salt, the whole mechanism behind
+   re-keying, went unread by both sides. **"New link" would have reported success and locked
+   nobody out.** A control that claims to revoke access and does not is worse than none.
+
+All three are fixed and were deployed *while still dormant*, so the flip itself was a single
+secret delete against code already in production.
+
+### The one thing still inferred rather than measured
+
+Termination is enforceable only if the relay closes a session when `exp` passes. Upstream
+`moq-relay` documents exactly that, and cdn.moq.pro was measured doing it — but the fleet
+boxes run a build pinned months before that doc. So on this path the property is **inferred**.
+`token-expiry.mjs` can finally test it now that the brokered branch honours `?ttl=` and
+echoes `token_ttl`. Until it does, treat fleet termination as unproven; if it comes back
+negative, kill degrades to cooperative and `public/trust.html` needs its language re-read.
+
+Ordinary viewers are unaffected either way — they stop within ~5s via the kill flag with the
+transport closed. This governs only someone who went out of their way to keep watching.
+
+## 9. Appendix: the moq.pro path, kept reversible
 
 This deployment is on **moq.pro (Mode A)**: set `MOQ_PRO_JWK` (or `MOQ_PRO_K`) and every
 broadcast goes through `cdn.moq.pro` with a per-broadcast token this Worker mints. That was
