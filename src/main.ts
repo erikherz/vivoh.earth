@@ -3154,7 +3154,18 @@ async function initWatchView(streamId: string, user: User | null) {
     // NOT a page reload. The element is swapped in the DOM and all page state survives: the
     // derived content key, the salt, the viewing session, and on Wallflower the passcode. A
     // viewer is never asked to re-enter anything.
-    const refreshEvery = Number(new URLSearchParams(location.search).get("refresh") ?? 0);
+    //
+    // ON BY DEFAULT, but only on WebKit, because only WebKit has the ceiling. Gating on iOS
+    // would be the obvious choice and the wrong one: macOS Safari runs the same WebTransport
+    // implementation, and every clean desktop run in this investigation was Chrome — so Safari
+    // on a Mac is untested and most likely affected. Chrome and Firefox get nothing, and pay
+    // nothing.
+    //
+    // 6 minutes against ~10 minutes of headroom at 5 frames/group. The margin is deliberate:
+    // the ceiling was measured between 6489 and 7596, so the budget is sized on the low end.
+    const REFRESH_DEFAULT_SECONDS = isSafari ? 360 : 0;
+    const refreshParam = new URLSearchParams(location.search).get("refresh");
+    const refreshEvery = refreshParam === null ? REFRESH_DEFAULT_SECONDS : Number(refreshParam);
     if (Number.isFinite(refreshEvery) && refreshEvery > 0) {
       console.log(`[refresh] rebuilding the player every ${refreshEvery}s`);
       const refreshTimer = window.setInterval(async () => {
@@ -3415,9 +3426,26 @@ function timestampConsole() {
   });
 }
 
+// How many 20ms Opus frames share one MoQ group, and therefore one QUIC unidirectional stream.
+//
+// 5 frames = 100ms per group = ~10 streams/sec instead of ~50. Against the measured iOS ceiling
+// of ~7600 cumulative streams (design against the LOWEST reading, 6489, not the best) that is
+// ~10 minutes of audio, which is what makes the 6-minute viewer refresh below safe with room
+// to spare rather than 18 seconds of margin.
+//
+// Read by the patched Track.writeFrame — see the audio seam in vite.config.ts for the full
+// reasoning, the latency argument, and what it trades away. 1 disables batching entirely.
+const AUDIO_FRAMES_PER_GROUP = 5;
+
 async function init() {
   timestampConsole();
   instrumentWebTransportStreams();
+
+  // Set before any frame is encoded. Publisher-side only in effect (viewers never call
+  // writeFrame), so it is safe to apply unconditionally.
+  const agroup = Number(new URLSearchParams(location.search).get("agroup") ?? AUDIO_FRAMES_PER_GROUP);
+  (globalThis as unknown as { __VIVOH_AUDIO_GROUP__?: number }).__VIVOH_AUDIO_GROUP__ =
+    Number.isFinite(agroup) && agroup >= 1 ? Math.floor(agroup) : AUDIO_FRAMES_PER_GROUP;
   // Wrap WebTransport before anything connects, so the ?diag=1 panel can report the QUIC
   // session itself rather than the hang element's opinion of it. @moq resolves
   // `new WebTransport(...)` off the global at call time (net/connection/connect.js), and the

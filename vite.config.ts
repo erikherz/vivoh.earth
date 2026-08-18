@@ -97,10 +97,43 @@ function mediaCryptoPatch(): Plugin {
         group.writeFrame(frame);
         group.close();
     }`;
+  // Also where AUDIO GROUP BATCHING lives, because this is the one place a frame becomes a
+  // group and a group becomes a QUIC stream.
+  //
+  // Upstream opens a group per audio frame, so 20ms Opus = ~50 unidirectional streams/sec.
+  // iOS Safari stops delivering after ~7600 cumulative streams on a session (measured across
+  // four runs at two rates), which is ~2.5 minutes of audio. Batching N frames into one group
+  // divides the stream rate by N.
+  //
+  // It costs no latency. A group is a live open stream, not a buffer: the publisher writes
+  // each frame the instant it is encoded (lite/publisher.js #runGroup loops on readFrame) and
+  // the consumer decodes each as it arrives. Frame duration, catalog jitter and the client's
+  // AV-sync target are all untouched. What it costs is loss independence — the N frames share
+  // a stream, so a lost packet delays the rest of that group by about one RTT instead of
+  // damaging a single 20ms frame.
+  //
+  // Batching is a PUBLISHER decision and reaches every viewer: one set of groups goes to the
+  // relay and there is no per-subscriber regrouping. It cannot be limited to mobile viewers.
+  //
+  // Gated on the audio track by name — writeFrame is generic and nothing else should batch.
+  // globalThis.__VIVOH_AUDIO_GROUP__ <= 1 restores upstream behaviour byte for byte.
   const AUDIO_REPLACE = `    writeFrame(frame) {
         const __mc = globalThis.__VIVOH_MEDIA_CRYPTO__;
+        const __enc = !!(__mc && __mc.shouldEncrypt(this.name));
+        const __n = globalThis.__VIVOH_AUDIO_GROUP__ | 0;
+        if (__n > 1 && String(this.name || "").indexOf("audio") === 0) {
+            if (!this.__vbGroup || this.__vbCount >= __n) {
+                if (this.__vbGroup) { __enc ? __mc.closeGroup(this.__vbGroup) : this.__vbGroup.close(); }
+                this.__vbGroup = this.appendGroup();
+                this.__vbCount = 0;
+            }
+            if (__enc) __mc.write(this.__vbGroup, frame);
+            else this.__vbGroup.writeFrame(frame);
+            this.__vbCount++;
+            return;
+        }
         const group = this.appendGroup();
-        if (__mc && __mc.shouldEncrypt(this.name)) {
+        if (__enc) {
             __mc.writeAndClose(group, frame);
         }
         else {
