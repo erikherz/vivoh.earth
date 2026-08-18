@@ -3441,14 +3441,23 @@ function timestampConsole() {
 
 // How many 20ms Opus frames share one MoQ group, and therefore one QUIC unidirectional stream.
 //
-// 5 frames = 100ms per group = ~10 streams/sec instead of ~50. Against the measured iOS ceiling
-// of ~7600 cumulative streams (design against the LOWEST reading, 6489, not the best) that is
-// ~10 minutes of audio, which is what makes the 6-minute viewer refresh below safe with room
-// to spare rather than 18 seconds of margin.
+// OFF (1) pending investigation. Turned on at 5 and measured worse where it matters.
 //
-// Read by the patched Track.writeFrame — see the audio seam in vite.config.ts for the full
-// reasoning, the latency argument, and what it trades away. 1 disables batching entirely.
-const AUDIO_FRAMES_PER_GROUP = 5;
+// The reasoning was sound for AUDIO-ONLY streams: 5 frames per group is ~10 streams/sec instead
+// of ~50, and the iOS stream-count ceiling (~6500-7600, replicated four times at two rates) then
+// arrives after ~10 minutes instead of 2.5. That much still holds.
+//
+// It does not survive contact with video. Two iPhone runs of camera+audio at agroup=5 stalled
+// after 46s (484 streams) and 66s (690 streams), against ~147s and 7188 streams for the same
+// content unbatched — an order of magnitude fewer streams and it failed THREE TIMES SOONER.
+// Nothing was constant between those two runs either: not streams, not bytes, not frame count,
+// where the audio-only ceiling had been stable to within 15%. Chrome consumed the identical
+// stream for 202s without a hiccup, so the publisher is producing correct groups.
+//
+// So there are two distinct failures and the evidence for batching came entirely from the
+// audio-only one. Do not re-enable this default without a video run that beats the unbatched
+// ~147s baseline. `?agroup=N` still forces it on for experiments.
+const AUDIO_FRAMES_PER_GROUP = 1;
 
 async function init() {
   timestampConsole();
