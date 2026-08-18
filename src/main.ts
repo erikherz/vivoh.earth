@@ -3469,9 +3469,21 @@ async function init() {
 
   // Set before any frame is encoded. Publisher-side only in effect (viewers never call
   // writeFrame), so it is safe to apply unconditionally.
-  const agroup = Number(new URLSearchParams(location.search).get("agroup") ?? AUDIO_FRAMES_PER_GROUP);
-  (globalThis as unknown as { __VIVOH_AUDIO_GROUP__?: number }).__VIVOH_AUDIO_GROUP__ =
+  const agroupRaw = new URLSearchParams(location.search).get("agroup");
+  const agroup = Number(agroupRaw ?? AUDIO_FRAMES_PER_GROUP);
+  const agroupApplied =
     Number.isFinite(agroup) && agroup >= 1 ? Math.floor(agroup) : AUDIO_FRAMES_PER_GROUP;
+  (globalThis as unknown as { __VIVOH_AUDIO_GROUP__?: number }).__VIVOH_AUDIO_GROUP__ = agroupApplied;
+  // Say so, out loud. A silent knob is a knob that gets tested without being on: a run at
+  // ?agroup=5 that quietly batched 1 frame per group looks exactly like "batching does not
+  // work", and the only place the truth showed up was the viewer's stream RATE on a different
+  // device. Announce whenever it differs from the built-in default, and warn on a value that
+  // was supplied but rejected rather than silently falling back.
+  if (agroupRaw !== null && !(Number.isFinite(agroup) && agroup >= 1)) {
+    console.warn(`[agroup] ignoring ?agroup=${agroupRaw} — want an integer >= 1; using ${agroupApplied}`);
+  } else if (agroupApplied !== 1) {
+    console.log(`[agroup] audio batching ON: ${agroupApplied} frames per group (~${(50 / agroupApplied).toFixed(0)} QUIC streams/s)`);
+  }
   // Wrap WebTransport before anything connects, so the ?diag=1 panel can report the QUIC
   // session itself rather than the hang element's opinion of it. @moq resolves
   // `new WebTransport(...)` off the global at call time (net/connection/connect.js), and the
