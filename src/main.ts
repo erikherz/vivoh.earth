@@ -2716,6 +2716,16 @@ async function initWatchView(streamId: string, user: User | null) {
     // Mounted outside the encryption branch: a viewer must be able to report a stream whether
     // or not decryption was set up. It creates its own pill if the badge above did not run.
     mountReportControl(streamId);
+
+    // The connect SHAPE this stream actually used, captured so anything that rebuilds the
+    // player can reproduce it. The two paths differ (moq.pro carries the broadcast in the URL
+    // with an empty name; the fleet uses a name attribute), and swapInPlayer defaulted to the
+    // moq.pro shape — so every watchdog rebuild on the fleet reconnected with an empty name,
+    // subscribed to nothing, and quietly failed. Assigned in each branch below.
+    let connectForm: { name: string; catalogFormat: string | null } = {
+      name: streamName,
+      catalogFormat: null,
+    };
     if (routeInfo.mode === "enterprise") {
       // Mode C: an ASN match does NOT guarantee the user can actually reach the private
       // relay (VPN off-net, relay down…). Step 1 = /assign preflight to make it pull.
@@ -2730,8 +2740,9 @@ async function initWatchView(streamId: string, user: User | null) {
       // Step 2: connect + subscribe. Watchdog still guards the case where /assign
       // succeeded but no frame ever paints (QUIC blocked, pull stalled…).
       setActiveRelay(routeInfo.relay);
+      connectForm = { name: routeInfo.broadcast ?? streamName, catalogFormat: null };
       watcher.setAttribute("url", connectUrl);
-      watcher.setAttribute("name", routeInfo.broadcast ?? streamName);
+      watcher.setAttribute("name", connectForm.name);
       window.setTimeout(() => {
         if (gotFirstFrame) return;
         console.warn("[route] enterprise connected but no frame; falling back to B/A");
@@ -2744,10 +2755,12 @@ async function initWatchView(streamId: string, user: User | null) {
       setActiveRelay(routeInfo.relay);
       if (routeInfo.path) {
         // moq.pro (Mode A): full connect URL + empty name + explicit hang catalog.
+        connectForm = { name: "", catalogFormat: "hang" };
         watcher.setAttribute("catalog-format", "hang");
         watcher.setAttribute("name", "");
         watcher.setAttribute("url", moqUrl(routeInfo.relay, routeInfo.path, routeInfo.jwt ?? ""));
       } else {
+        connectForm = { name: streamName, catalogFormat: null };
         watcher.setAttribute("url", `https://${routeInfo.relay}/?jwt=${routeInfo.jwt}`);
         watcher.setAttribute("name", streamName);
       }
@@ -2817,10 +2830,27 @@ async function initWatchView(streamId: string, user: User | null) {
      * nothing. Mirror whatever the initial connect above does, or the renewal silently
      * produces a black player instead of a fresh one.
      */
+    /**
+     * Is this element actually receiving media?
+     *
+     * Painting alone is the wrong test, and it is why the watchdog could never recover an
+     * AUDIO-ONLY stream: isPainting() needs a lit canvas, an audio-only broadcast has no video
+     * track to light one, so every rebuild was judged a failure and retried forever. Audio
+     * bytes are the other half of the answer — a fresh element starts at zero, so anything
+     * above it means media is flowing.
+     */
+    const isReceiving = (el: Element): boolean => {
+      if (isPainting(el)) return true;
+      const bytes = (el as unknown as {
+        backend?: { audio?: { stats?: { peek?: () => { bytesReceived?: number } | undefined } } };
+      })?.backend?.audio?.stats?.peek?.()?.bytesReceived;
+      return typeof bytes === "number" && bytes > 0;
+    };
+
     async function swapInPlayer(
       url: string,
       why: string,
-      form: { name: string; catalogFormat: string | null } = { name: "", catalogFormat: "hang" }
+      form: { name: string; catalogFormat: string | null } = connectForm
     ): Promise<boolean> {
       const parent = live.parentElement;
       if (!parent) return false;
@@ -2841,10 +2871,10 @@ async function initWatchView(streamId: string, user: User | null) {
 
       const deadline = performance.now() + 15000;
       while (performance.now() < deadline) {
-        if (isPainting(next)) break;
+        if (isReceiving(next)) break;
         await new Promise((r) => setTimeout(r, 100));
       }
-      if (!isPainting(next)) {
+      if (!isReceiving(next)) {
         // Keep the old element: a frozen picture beats a black one, and the caller decides
         // whether to try again.
         console.warn(`[${why}] replacement never painted in ${(performance.now() - started).toFixed(0)}ms; keeping the old session`);
@@ -3103,6 +3133,37 @@ async function initWatchView(streamId: string, user: User | null) {
       tick();
       const diagTimer = window.setInterval(tick, 1000);
       window.addEventListener("beforeunload", () => window.clearInterval(diagTimer));
+    }
+
+    // --- Timed player refresh: add ?refresh=<seconds> ----------------------------------------
+    //
+    // Rebuilds the whole player on a timer. Two things to learn from it, and the second is the
+    // reason it exists:
+    //
+    //   1. It is a candidate MITIGATION for the ~7600-stream ceiling. A rebuilt player opens a
+    //      new WebTransport session, and a new session gets a fresh stream-credit budget — so
+    //      refreshing before the ceiling means never reaching it. Free in bandwidth terms.
+    //
+    //   2. It costs the viewer a TAP. A new element builds a new AudioContext, and on iOS that
+    //      context has no user gesture behind it so it starts suspended. Video returns, sound
+    //      does not, and tapping the player cannot fix it because `muted` is already false.
+    //      offerAudioRestore() below puts up a dedicated button whose own click calls resume().
+    //      Whether that is an acceptable thing to do to someone every 90 seconds is a judgement
+    //      about the product, not about the code — which is what this parameter is for.
+    //
+    // NOT a page reload. The element is swapped in the DOM and all page state survives: the
+    // derived content key, the salt, the viewing session, and on Wallflower the passcode. A
+    // viewer is never asked to re-enter anything.
+    const refreshEvery = Number(new URLSearchParams(location.search).get("refresh") ?? 0);
+    if (Number.isFinite(refreshEvery) && refreshEvery > 0) {
+      console.log(`[refresh] rebuilding the player every ${refreshEvery}s`);
+      const refreshTimer = window.setInterval(async () => {
+        const url = live.getAttribute("url");
+        if (!url) return;
+        const ok = await swapInPlayer(url, "refresh");
+        console.log(`[refresh] rebuild ${ok ? "succeeded" : "FAILED (kept the old player)"}`);
+      }, refreshEvery * 1000);
+      window.addEventListener("beforeunload", () => window.clearInterval(refreshTimer));
     }
 
     // --- Stuck-player watchdog --------------------------------------------------------------
