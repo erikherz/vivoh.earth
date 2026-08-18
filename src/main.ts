@@ -3149,21 +3149,27 @@ async function initWatchView(streamId: string, user: User | null) {
       window.addEventListener("beforeunload", () => window.clearInterval(diagTimer));
     }
 
-    // --- Timed player refresh: add ?refresh=<seconds> ----------------------------------------
+    // --- Player rebuild before the stream ceiling --------------------------------------------
     //
-    // Rebuilds the whole player on a timer. Two things to learn from it, and the second is the
-    // reason it exists:
+    // WebKit stops delivering after ~6500-7600 cumulative incoming unidirectional streams on one
+    // WebTransport session. Rebuilding the player opens a NEW session with a fresh budget, so
+    // rebuilding before the ceiling means never reaching it. Free in bandwidth terms.
     //
-    //   1. It is a candidate MITIGATION for the ~7600-stream ceiling. A rebuilt player opens a
-    //      new WebTransport session, and a new session gets a fresh stream-credit budget — so
-    //      refreshing before the ceiling means never reaching it. Free in bandwidth terms.
+    // It costs the viewer a TAP. A new element builds a new AudioContext, and on iOS that
+    // context has no user gesture behind it so it starts suspended. Video returns, sound does
+    // not, and tapping the player cannot fix it because `muted` is already false —
+    // offerAudioRestore() below puts up a dedicated button whose own click calls resume(). So
+    // every rebuild is an interruption, and the goal is the FEWEST that still avoid a stall.
     //
-    //   2. It costs the viewer a TAP. A new element builds a new AudioContext, and on iOS that
-    //      context has no user gesture behind it so it starts suspended. Video returns, sound
-    //      does not, and tapping the player cannot fix it because `muted` is already false.
-    //      offerAudioRestore() below puts up a dedicated button whose own click calls resume().
-    //      Whether that is an acceptable thing to do to someone every 90 seconds is a judgement
-    //      about the product, not about the code — which is what this parameter is for.
+    // COUNTED, NOT TIMED, because the budget is spent per stream and streams do not arrive at a
+    // fixed rate. One clock cannot serve every stream: 20ms audio burns the budget in ~135s,
+    // ?aframe=60 takes ~450s, and a video-only stream at ~0.5 streams/s would take hours. A
+    // timer set safely for the first interrupts the third for no reason, and this is exactly how
+    // the previous version broke — 360s was chosen when audio batching made the headroom ~10
+    // minutes, batching was then reverted, and the timer was left behind, firing a full four
+    // minutes AFTER the stream it was supposed to protect had already died.
+    //
+    // Do NOT "improve" this back into a timer.
     //
     // NOT a page reload. The element is swapped in the DOM and all page state survives: the
     // derived content key, the salt, the viewing session, and on Wallflower the passcode. A
@@ -3175,22 +3181,52 @@ async function initWatchView(streamId: string, user: User | null) {
     // on a Mac is untested and most likely affected. Chrome and Firefox get nothing, and pay
     // nothing.
     //
-    // 6 minutes against ~10 minutes of headroom at 5 frames/group. The margin is deliberate:
-    // the ceiling was measured between 6489 and 7596, so the budget is sized on the low end.
     // NOT in bare mode. A rebuild is a new WebTransport session with a fresh stream budget, so
-    // leaving this on would reset the very counter ?bare=1 exists to measure — and silently, at
-    // t=360s, right where a batching run is trying to prove it reaches ~10 minutes.
-    const REFRESH_DEFAULT_SECONDS = isSafari ? 360 : 0;
+    // leaving this on would reset the very counter ?bare=1 exists to measure.
+    // Sized on the LOW end of the measured ceiling, not the average. The four unbatched runs
+    // stalled between 6489 and 7596 incoming streams; 5500 sits 15% under the worst of them.
+    // Overshooting costs a dead stream and a confused viewer, undershooting costs one extra tap,
+    // so the asymmetry decides it.
+    const STREAM_BUDGET = 5500;
+
     const refreshParam = new URLSearchParams(location.search).get("refresh");
-    const refreshEvery = refreshParam === null ? REFRESH_DEFAULT_SECONDS : Number(refreshParam);
-    if (!BARE && Number.isFinite(refreshEvery) && refreshEvery > 0) {
-      console.log(`[refresh] rebuilding the player every ${refreshEvery}s`);
-      const refreshTimer = window.setInterval(async () => {
+    const refreshEvery = Number(refreshParam);
+    const useTimer = refreshParam !== null && Number.isFinite(refreshEvery) && refreshEvery > 0;
+    // ?refresh=0 turns everything off; a positive value forces the old fixed timer for testing.
+    const useBudget = refreshParam === null && isSafari;
+
+    let rebuilding = false;
+    const rebuild = async (why: string): Promise<boolean> => {
+      // setInterval does not await, so without this a slow rebuild would be re-entered by the
+      // next tick and swap the player twice.
+      if (rebuilding) return false;
+      rebuilding = true;
+      try {
         const url = live.getAttribute("url");
-        if (!url) return;
-        const ok = await swapInPlayer(url, "refresh");
+        if (!url) return false;
+        const ok = await swapInPlayer(url, why);
         console.log(`[refresh] rebuild ${ok ? "succeeded" : "FAILED (kept the old player)"}`);
-      }, refreshEvery * 1000);
+        return ok;
+      } finally {
+        rebuilding = false;
+      }
+    };
+
+    if (!BARE && useBudget) {
+      console.log(`[refresh] rebuilding after ${STREAM_BUDGET} incoming streams`);
+      // wtProbe.uni is cumulative across sessions, so measure a DELTA from the last rebuild —
+      // an absolute compare would fire forever once the total passed the budget.
+      let base = wtProbe.uni;
+      const budgetTimer = window.setInterval(async () => {
+        const used = wtProbe.uni - base;
+        if (used < STREAM_BUDGET) return;
+        console.log(`[refresh] ${used} streams used — rebuilding before the ceiling`);
+        if (await rebuild("stream budget")) base = wtProbe.uni;
+      }, 2000);
+      window.addEventListener("beforeunload", () => window.clearInterval(budgetTimer));
+    } else if (!BARE && useTimer) {
+      console.log(`[refresh] rebuilding the player every ${refreshEvery}s (fixed timer)`);
+      const refreshTimer = window.setInterval(() => void rebuild("refresh"), refreshEvery * 1000);
       window.addEventListener("beforeunload", () => window.clearInterval(refreshTimer));
     }
 
@@ -3496,8 +3532,12 @@ async function init() {
   // why it might not. It implies the probe, since there is no point setting it blind.
   const params = new URLSearchParams(location.search);
   const wtmax = Number(params.get("wtmax") ?? 0);
-  const wantProbe = params.get("diag") === "1" || wtmax > 0;
-  if (wantProbe) installWtProbe(Number.isFinite(wtmax) && wtmax > 0 ? wtmax : 0);
+  // Installed for EVERY viewer, not just ?diag=1, because the stream count is no longer only a
+  // diagnostic: the watch page rebuilds the player on it (see STREAM_BUDGET). A clock cannot do
+  // that job — the budget is spent per STREAM, so the same 360s timer is far too late for 20ms
+  // audio (~50/s, gone in ~135s) and far too eager for a video-only stream (~0.5/s, which would
+  // take hours). Counting is the only thing that adapts to what the stream actually sends.
+  installWtProbe(Number.isFinite(wtmax) && wtmax > 0 ? wtmax : 0);
   // Detect browser support (async for codec checks)
   browserSupport = await detectBrowserSupport();
 
