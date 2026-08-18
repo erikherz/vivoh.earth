@@ -1580,9 +1580,22 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         // refresh to the defaults.
         window.history.replaceState({}, "", broadcastUrl(streamId, carryTestParams(window.location.search)));
 
-        // The passcode survives on purpose. It travels by a different channel and rotating the
-        // link already cuts everyone off; forcing the broadcaster to re-send both would make
-        // this control more expensive than it needs to be.
+        // Carry the broadcaster's SETTINGS onto the new id.
+        //
+        // Rotation used to change the id and nothing else, so the new stream had no settings
+        // row and every value silently reverted to the Worker's default while the controls kept
+        // showing the old ones. `require_auth` defaults to 1 (fail-closed), so a broadcaster who
+        // had deliberately chosen Public got an invite-only stream, the audience badge still
+        // said Public, and everyone holding the fresh link was bounced to a sign-in page. It
+        // fails safe rather than open, which is why it read as a mystery rather than a leak.
+        //
+        // Written before goLive() so a viewer who arrives on the new link immediately cannot
+        // race the settings into existence.
+        await updateStreamSettings(streamId, {
+          require_auth: requireAuthCheckbox?.checked ?? true,
+          chat_enabled: chatEnabled,
+        });
+
         if (wasLive) await goLive();
         if (chatEnabled) openChat();   // re-joins, now keyed to the new stream id
         console.log("[rotate] new identity:", streamId);
