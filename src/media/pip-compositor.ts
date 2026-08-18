@@ -196,15 +196,66 @@ export function createCompositor(): Compositor {
     ctx.drawImage(v, (CANVAS_W - w) / 2, (CANVAS_H - h) / 2, w, h);
   };
 
-  // Camera inset (only when screen + camera): ~28% width, default bottom-right, draggable.
+  // Camera inset (only when screen + camera): drag the middle to move it, drag an edge or a
+  // corner to resize. Default ~28% of frame width, bottom-right.
+  //
+  // Resizing changes ONLY this rect. The canvas stays 1280x720 — see the header: a captureStream
+  // resolution change mid-broadcast reconfigures the encoder, republishes the catalog and resets
+  // the track, which freezes every viewer. The inset is composited content, so it can be any
+  // size at any moment and no viewer notices anything but the picture moving.
+  const MIN_SCALE = 0.1;
+  const MAX_SCALE = 0.75;
+  let insetScale = 0.28;
   let px = 0;
   let py = 0;
   let placed = false;
-  const insetW = () => Math.round(CANVAS_W * 0.28);
-  const insetH = () => {
+  const camAspect = () => {
     const cw = camera?.video.videoWidth || 16;
     const ch = camera?.video.videoHeight || 9;
-    return Math.round(insetW() * (ch / cw));
+    return cw / ch;
+  };
+  const insetW = () => Math.round(CANVAS_W * insetScale);
+  const insetH = () => Math.round(insetW() / camAspect());
+  // The HEIGHT limit is what bites first on a portrait camera: at 3:4 a 75%-wide inset would be
+  // 1280 tall on a 720 canvas. Cap by whichever constraint is tighter.
+  const clampScale = (v: number) =>
+    Math.max(MIN_SCALE, Math.min(v, MAX_SCALE, (CANVAS_H / CANVAS_W) * camAspect()));
+
+  // Which part of the inset the pointer is over. Corners take priority over edges, and the
+  // interior means "move" — the behaviour this had before resizing existed.
+  type Zone = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "move";
+  const HANDLE_ZONES: Zone[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+  // In canvas units. The canvas is displayed at up to 900px for a 1280 backing store, so 20
+  // here is ~14 real pixels — comfortably grabbable with a mouse without the edge band eating
+  // a small inset's whole interior.
+  const HANDLE = 20;
+  const CURSOR: Record<Zone, string> = {
+    nw: "nwse-resize", se: "nwse-resize",
+    ne: "nesw-resize", sw: "nesw-resize",
+    n: "ns-resize", s: "ns-resize",
+    e: "ew-resize", w: "ew-resize",
+    move: "grab",
+  };
+
+  const zoneAt = (pt: { x: number; y: number }): Zone | null => {
+    if (!screen || !camera) return null;
+    const w = insetW();
+    const h = insetH();
+    if (pt.x < px - HANDLE || pt.x > px + w + HANDLE) return null;
+    if (pt.y < py - HANDLE || pt.y > py + h + HANDLE) return null;
+    const l = Math.abs(pt.x - px) <= HANDLE;
+    const r = Math.abs(pt.x - (px + w)) <= HANDLE;
+    const t = Math.abs(pt.y - py) <= HANDLE;
+    const b = Math.abs(pt.y - (py + h)) <= HANDLE;
+    if (t && l) return "nw";
+    if (t && r) return "ne";
+    if (b && l) return "sw";
+    if (b && r) return "se";
+    if (t) return "n";
+    if (b) return "s";
+    if (l) return "w";
+    if (r) return "e";
+    return pt.x >= px && pt.x <= px + w && pt.y >= py && pt.y <= py + h ? "move" : null;
   };
 
   // ---- Burn-in strip (location + time), drawn last so nothing can cover it ----
@@ -299,14 +350,20 @@ export function createCompositor(): Compositor {
     // present (audio-only, or before the first frame) falls through to "draw".
     drawWatermark();
     drawStamp((camera ? cameraFrame : screen ? screenFrame : null) ?? NO_FRAME_TIMING);
+    // Keep the DOM chrome on top of the inset it describes. Defined below; by the time any
+    // rAF callback runs, the whole factory body has finished executing.
+    syncChrome();
     raf = requestAnimationFrame(draw);
   };
   raf = requestAnimationFrame(draw);
 
-  // Drag the camera inset (only meaningful when both screen + camera are on).
-  let dragging = false;
+  // Move and resize the camera inset (only meaningful when both screen + camera are on).
+  let mode: Zone | null = null;   // what the pointer grabbed, null when idle
+  let hover: Zone | null = null;  // what it is merely over, for the chrome and the cursor
   let dx = 0;
   let dy = 0;
+  let anchorX = 0; // the corner held FIXED while resizing: the box grows away from the hand
+  let anchorY = 0;
   const toCanvas = (e: PointerEvent) => {
     const r = canvas.getBoundingClientRect();
     return {
@@ -316,27 +373,127 @@ export function createCompositor(): Compositor {
   };
   canvas.style.touchAction = "none";
   canvas.addEventListener("pointerdown", (e) => {
-    if (!screen || !camera) return;
     const p = toCanvas(e);
-    if (p.x >= px && p.x <= px + insetW() && p.y >= py && p.y <= py + insetH()) {
-      dragging = true;
+    const z = zoneAt(p);
+    if (!z) return;
+    mode = z;
+    hover = z;
+    if (z === "move") {
       dx = p.x - px;
       dy = p.y - py;
-      canvas.setPointerCapture(e.pointerId);
+      canvas.style.cursor = "grabbing";
+    } else {
+      // Anchor the OPPOSITE edge/corner. Dragging the north-west handle keeps the south-east
+      // corner planted, which is what every image editor does and what the hand expects.
+      anchorX = z.includes("w") ? px + insetW() : px;
+      anchorY = z.includes("n") ? py + insetH() : py;
     }
+    canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
   });
   canvas.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
     const p = toCanvas(e);
-    px = p.x - dx;
-    py = p.y - dy;
+    if (!mode) {
+      hover = zoneAt(p);
+      canvas.style.cursor = hover ? CURSOR[hover] : "";
+      return;
+    }
+    if (mode === "move") {
+      px = p.x - dx;
+      py = p.y - dy;
+      return;
+    }
+    // ASPECT IS LOCKED — "resize at scale". One axis drives and the other follows, so the
+    // camera is never stretched and the published inset always matches the sensor's shape.
+    const a = camAspect();
+    const fromX = mode.includes("w") ? anchorX - p.x : p.x - anchorX;
+    const fromY = mode.includes("n") ? anchorY - p.y : p.y - anchorY;
+    let want: number;
+    if (mode === "n" || mode === "s") want = fromY * a;      // vertical edge: height drives
+    else if (mode === "e" || mode === "w") want = fromX;     // horizontal edge: width drives
+    else want = Math.max(fromX, fromY * a);                  // corner: follow the bolder axis
+    insetScale = clampScale(want / CANVAS_W);
+    // Re-derive the origin from the anchor so the held corner does not creep as we clamp.
+    px = mode.includes("w") ? anchorX - insetW() : anchorX;
+    py = mode.includes("n") ? anchorY - insetH() : anchorY;
   });
   const endDrag = (e: PointerEvent) => {
-    dragging = false;
+    mode = null;
+    hover = zoneAt(toCanvas(e));
+    canvas.style.cursor = hover ? CURSOR[hover] : "";
     try { canvas.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
   };
   canvas.addEventListener("pointerup", endDrag);
   canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("pointerleave", () => {
+    if (mode) return; // a capture is in progress; leaving the box is normal mid-drag
+    hover = null;
+    canvas.style.cursor = "";
+  });
+
+  // ---- Move/resize chrome, drawn in the DOM and deliberately NOT into the canvas ----
+  //
+  // The canvas IS the published video, so every pixel ctx draws reaches every viewer. The thin
+  // white outline around the inset is drawn in because it is framing — it belongs in the
+  // picture. Hover handles do not: they would blink into the broadcast each time the publisher
+  // moved their mouse, showing the audience an interface they cannot use.
+  //
+  // So the interactive chrome is a plain <div> positioned over the canvas, tracking the same
+  // rect in CSS pixels. It costs nothing in the encoder and no viewer can ever see it.
+  let chrome: HTMLDivElement | null = null;
+  let chromeKey = "";
+
+  const ensureChrome = (): HTMLDivElement | null => {
+    if (chrome) return chrome;
+    const parent = canvas.parentElement;
+    if (!parent) return null; // not mounted yet; try again next frame
+    if (!parent.style.position) parent.style.position = "relative";
+    const el = document.createElement("div");
+    // pointer-events:none throughout — the canvas owns all the hit testing, and a handle that
+    // swallowed the pointer would break the drag it is supposed to advertise.
+    el.style.cssText =
+      "position:absolute;pointer-events:none;display:none;box-sizing:border-box;z-index:5;" +
+      "border:2px solid rgba(96,165,250,0.95);border-radius:4px;" +
+      "box-shadow:0 0 0 1px rgba(0,0,0,0.45),0 0 12px rgba(59,130,246,0.35);";
+    for (const z of HANDLE_ZONES) {
+      const h = document.createElement("div");
+      const vert = z.includes("n") ? "top:-6px;" : z.includes("s") ? "bottom:-6px;" : "top:calc(50% - 5px);";
+      const horz = z.includes("w") ? "left:-6px;" : z.includes("e") ? "right:-6px;" : "left:calc(50% - 5px);";
+      h.style.cssText =
+        "position:absolute;width:10px;height:10px;box-sizing:border-box;background:#fff;" +
+        "border:1px solid rgba(30,64,175,0.9);border-radius:2px;" + vert + horz;
+      el.appendChild(h);
+    }
+    parent.appendChild(el);
+    chrome = el;
+    return el;
+  };
+
+  // Called once per drawn frame, but only WRITES when the rect actually changed — otherwise
+  // this would touch layout 60 times a second for a box that is usually sitting still.
+  const syncChrome = () => {
+    const wanted = !!(screen && camera) && (mode !== null || hover !== null);
+    const el = wanted ? ensureChrome() : chrome;
+    if (!el) return;
+    if (!wanted) {
+      if (el.style.display !== "none") el.style.display = "none";
+      chromeKey = "";
+      return;
+    }
+    const shown = canvas.clientWidth;
+    if (!shown) return; // laid out at zero width (hidden tab); nothing sensible to draw
+    const scale = shown / CANVAS_W;
+    const w = insetW();
+    const h = insetH();
+    const key = `${Math.round(px)}|${Math.round(py)}|${w}|${h}|${scale.toFixed(4)}|${canvas.offsetLeft}|${canvas.offsetTop}`;
+    if (key === chromeKey) return;
+    chromeKey = key;
+    el.style.display = "block";
+    el.style.left = `${canvas.offsetLeft + px * scale}px`;
+    el.style.top = `${canvas.offsetTop + py * scale}px`;
+    el.style.width = `${w * scale}px`;
+    el.style.height = `${h * scale}px`;
+  };
 
   // ---- Audio mix: one stable output track; mic + system audio are inputs ----
   const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -466,6 +623,8 @@ export function createCompositor(): Compositor {
       if (screen) screen.video.srcObject = null;
       if (camera) camera.video.srcObject = null;
       void ac.close().catch(() => {});
+      chrome?.remove();
+      chrome = null;
       canvas.remove();
     },
   };

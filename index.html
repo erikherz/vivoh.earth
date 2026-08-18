@@ -1174,10 +1174,12 @@
             margin: 0 auto;
             border-radius: 8px;
             background: #000;
-            cursor: grab;
+            /* The compositor sets the cursor per hit zone (move vs the eight resize handles).
+               A blanket `grab` here would promise the whole frame is draggable when only the
+               camera inset is, and it would also override the resize cursors. */
+            cursor: default;
             touch-action: none;
         }
-        .pip-canvas:active { cursor: grabbing; }
 
         /* Broadcast status indicator (emoji + hover tooltip) */
         .publish-status {
