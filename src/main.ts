@@ -3067,14 +3067,20 @@ async function initWatchView(streamId: string, user: User | null) {
         //                  points at MAX_STREAMS_UNI credit rather than at the relay.
         const quicClosed = wtProbe.closedHow;
         const uniAgo = wtProbe.lastUniAt ? (performance.now() - wtProbe.lastUniAt) / 1000 : -1;
-        // Streams per second is what tells us an ?aframe= change actually took effect, from the
-        // phone, without trusting the broadcaster's console: ~50/s is 20ms Opus frames, ~17/s
-        // is 60ms. It is also the number that predicts when the credit budget runs out.
-        const uniRate = nowS > 0 ? wtProbe.uni / nowS : 0;
+        // Streams per second says whether an ?aframe= change actually reached the wire: ~50/s is
+        // 20ms Opus frames, ~17/s is 60ms.
+        //
+        // It MUST be measured over the span in which streams were actually arriving, not over
+        // uptime. Dividing by uptime looks right and silently lies once the stream stalls: a run
+        // that delivered 6489 streams in 131s and then sat dead for 358s reported "13.3/s",
+        // which reads exactly like 60ms frames working when the true rate was 49.5/s and the
+        // setting had not been applied at all. A wrong number that resembles the number you are
+        // hoping for is worse than no number.
+        const uniSpan = wtProbe.lastUniAt ? (wtProbe.lastUniAt - t0) / 1000 : 0;
+        const uniRate = uniSpan > 0.5 ? wtProbe.uni / uniSpan : 0;
         const quicLine = wtProbe.installed
-          ? `quic    streams=${wtProbe.uni} (${uniRate.toFixed(1)}/s)` +
-            (uniAgo >= 0 ? ` last ${uniAgo.toFixed(0)}s ago` : " none yet") +
-            `  sess=${wtProbe.constructed}\n` +
+          ? `quic    streams=${wtProbe.uni} (${uniRate.toFixed(1)}/s over ${uniSpan.toFixed(0)}s)\n` +
+            `        ${uniAgo >= 0 ? `last ${uniAgo.toFixed(0)}s ago` : "none yet"}  sess=${wtProbe.constructed}\n` +
             `closed  ${quicClosed ?? "no — session still open"}\n`
           : "";
 
