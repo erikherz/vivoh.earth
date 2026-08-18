@@ -3,6 +3,8 @@
 import { install as installWebTransportPolyfill } from "./webtransport-polyfill";
 // WebCodecs polyfill for Opus audio encoding on Safari
 import { install as installWebCodecsPolyfill } from "./webcodecs-polyfill";
+// Transport-layer instrumentation for the ~140s iOS stall (?diag=1 only)
+import { installWtProbe, wtProbe } from "./wt-probe";
 
 // Detect Safari - even Safari 17+ with WebTransport has compatibility issues with some relays
 const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
@@ -2992,10 +2994,29 @@ async function initWatchView(streamId: string, user: User | null) {
 
         const nowS = nowSec;
         const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
+
+        // The QUIC session itself, from src/wt-probe.ts. `conn` above is the hang element's
+        // belief and cannot go false; these two CAN, which is the point of showing them.
+        //
+        //   closed=...     the session really did die, with a code and reason. Read this first.
+        //   streams        MoQ sends each media group on a fresh server-opened uni stream. If
+        //                  this freezes with the session still open, delivery stopped without
+        //                  anyone reporting an error — and a halt on a round number (64/100/128)
+        //                  points at MAX_STREAMS_UNI credit rather than at the relay.
+        const quicClosed = wtProbe.closedHow;
+        const uniAgo = wtProbe.lastUniAt ? (performance.now() - wtProbe.lastUniAt) / 1000 : -1;
+        const quicLine = wtProbe.installed
+          ? `quic    streams=${wtProbe.uni}` +
+            (uniAgo >= 0 ? ` (arrived ${uniAgo.toFixed(0)}s ago)` : " (none yet)") +
+            `  sessions=${wtProbe.constructed}\n` +
+            `closed  ${quicClosed ?? "no — session still open"}\n`
+          : "";
+
         panel.style.color = stalledFor >= 3 ? "#f87171" : "#4ade80";
         panel.textContent =
           `up ${nowS.toFixed(0)}s   ${stalledFor >= 3 ? `STALLED ${stalledFor}s` : "flowing"}\n` +
           `conn    ${conn}  bcast=${bstatus}/${bactive}  ${TRANSPORT}\n` +
+          quicLine +
           `audio B ${bytes}  (moved ${(nowS - lastAudioMove).toFixed(0)}s ago)\n` +
           `video B ${vbytes}  (moved ${(nowS - lastVideoMove).toFixed(0)}s ago)  stalled=${vstalled}\n` +
           `decrypt ok ${successes} fail ${failures}  (moved ${(nowS - lastDecMove).toFixed(0)}s ago)\n` +
@@ -3263,6 +3284,13 @@ function timestampConsole() {
 async function init() {
   timestampConsole();
   instrumentWebTransportStreams();
+  // Wrap WebTransport before anything connects, so the ?diag=1 panel can report the QUIC
+  // session itself rather than the hang element's opinion of it. @moq resolves
+  // `new WebTransport(...)` off the global at call time (net/connection/connect.js), and the
+  // first connection happens well after this, so installing here is early enough. Gated
+  // inside installWtProbe's caller rather than the module so a normal viewer runs untouched
+  // code in the media path.
+  if (new URLSearchParams(location.search).get("diag") === "1") installWtProbe();
   // Detect browser support (async for codec checks)
   browserSupport = await detectBrowserSupport();
 
