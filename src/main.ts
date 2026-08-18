@@ -841,6 +841,30 @@ const DONT_SHARE_MARKER = "NOT-THE-SHARE-LINK--USE-THE-COPY-BUTTON";
 const broadcastUrl = (streamId: string, suffix = ""): string =>
   `/?stream=${streamId}${suffix}#${DONT_SHARE_MARKER}`;
 
+/**
+ * Carry test-only query parameters across the broadcast URL rewrite.
+ *
+ * `/broadcast` and the `?stream=` resume path both replaceState to a canonical URL, which
+ * silently drops anything they do not explicitly copy. That is a trap for diagnostics: a
+ * parameter typed into the address bar is gone before the code that reads it ever runs, so
+ * the experiment reports "no change" and the hypothesis looks disproved when it was simply
+ * never tested. Keep every knob the broadcast view reads listed here.
+ *
+ *   geo    — origin placement override on the broker assign
+ *   aframe — Opus frame duration in ms (the QUIC stream-rate experiment)
+ *   diag   — on-device diagnostics panel
+ */
+function carryTestParams(search: string): string {
+  const from = new URLSearchParams(search);
+  const out = new URLSearchParams();
+  for (const key of ["geo", "aframe", "diag"]) {
+    const v = from.get(key);
+    if (v !== null) out.set(key, v);
+  }
+  const s = out.toString();
+  return s ? `&${s}` : "";
+}
+
 // Determine current view and stream ID from URL
 async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
   const path = window.location.pathname;
@@ -868,11 +892,7 @@ async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
     // is not the secret. Watching needs the key in the share link's #k= fragment, and
     // publishing under it needs the signed claim in publisher-claim.ts.
     const streamId = await generateStreamId();
-    // Preserve a ?geo= test override through the URL rewrite (it drives origin placement
-    // on the broadcaster's broker assign).
-    const geo = new URLSearchParams(location.search).get("geo");
-    const suffix = geo ? `&geo=${encodeURIComponent(geo)}` : "";
-    window.history.replaceState({}, "", broadcastUrl(streamId, suffix));
+    window.history.replaceState({}, "", broadcastUrl(streamId, carryTestParams(location.search)));
     return { view: "broadcast", streamId };
   }
 
@@ -891,8 +911,7 @@ async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
     // Re-apply the warning marker for anyone who arrived here without it — a hand-typed or
     // trimmed URL should still say what it is.
     if (!location.hash.includes(DONT_SHARE_MARKER)) {
-      const geo = params.get("geo");
-      window.history.replaceState({}, "", broadcastUrl(streamId, geo ? `&geo=${encodeURIComponent(geo)}` : ""));
+      window.history.replaceState({}, "", broadcastUrl(streamId, carryTestParams(window.location.search)));
     }
     return { view: "broadcast", streamId };
   }
@@ -1557,7 +1576,9 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         if (streamDisplay) streamDisplay.textContent = streamId;
         copyBtn?.setAttribute("data-share-url", shareUrl());
         // Keep the address bar honest, so a refresh resumes the NEW broadcast, not the dead one.
-        window.history.replaceState({}, "", broadcastUrl(streamId));
+        // Test params ride along too, or a rotation mid-experiment quietly reverts the next
+        // refresh to the defaults.
+        window.history.replaceState({}, "", broadcastUrl(streamId, carryTestParams(window.location.search)));
 
         // The passcode survives on purpose. It travels by a different channel and rotating the
         // link already cuts everyone off; forcing the broadcaster to re-send both would make
@@ -1574,8 +1595,49 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // Low-level seam: a video/audio Source is just a MediaStreamTrack signal.
     const bcast = publisher.broadcast as unknown as {
       video: { source: { set(t: MediaStreamTrack | undefined): void } };
-      audio: { source: { set(t: MediaStreamTrack | undefined): void } };
+      audio: {
+        source: { set(t: MediaStreamTrack | undefined): void };
+        codec: { set(c: unknown): void };
+      };
     };
+
+    // --- Opus frame duration: ?aframe=<ms> on the BROADCAST url ------------------------------
+    //
+    // An experiment about a viewer-side failure, which is why it lives on the publisher.
+    //
+    // Audio publishes one MoQ group per encoded frame (@moq/net track.js `Track.writeFrame`
+    // opens a group, writes one frame and closes it), and the publisher turns every group into
+    // its own QUIC unidirectional stream. At the default 20ms Opus frame that is ~50 streams a
+    // second. Video does not do this — it runs through Legacy.Producer and only starts a group
+    // on a keyframe, ~0.5/s — which is why a video-only stream never stalls and audio always
+    // does, at the same ~140s regardless of bitrate.
+    //
+    // Measured on an iPhone: delivery stopped at streams=7188 with the session still open, no
+    // error, and the byte counters freezing a couple of seconds AFTER the stream counter did.
+    //
+    // WT_MAX_STREAMS credit is CUMULATIVE — it counts closed streams too, and the receiver has
+    // to keep sending capsules with higher values to replenish it (draft-ietf-webtrans-http3).
+    // If WebKit never replenishes, the relay gets a one-time budget of ~7000 streams and can
+    // then never open another one: exactly what we see.
+    //
+    // So this knob is a MEASUREMENT before it is a mitigation. A fixed credit budget predicts
+    // the ceiling is a stream COUNT, so 60ms frames (a third of the streams) should push the
+    // stall out to ~7 minutes while stopping at the same ~7000 streams. If it still stalls at
+    // ~140s then the ceiling is time-based and the credit theory is wrong.
+    //
+    // Opus only accepts certain frame durations; anything else makes the encoder throw, which
+    // would look like "audio is broken" rather than "you typed a bad number".
+    const OPUS_FRAME_MS = [2.5, 5, 10, 20, 40, 60, 80, 100, 120];
+    const aframeRaw = new URLSearchParams(location.search).get("aframe");
+    if (aframeRaw !== null) {
+      const ms = Number(aframeRaw);
+      if (!OPUS_FRAME_MS.includes(ms)) {
+        console.warn(`[aframe] ignoring ?aframe=${aframeRaw}; Opus allows ${OPUS_FRAME_MS.join(", ")}ms`);
+      } else {
+        bcast.audio.codec.set({ mime: "opus", frameDuration: ms });
+        console.log(`[aframe] Opus frames ${ms}ms (default 20) -> ~${(1000 / ms).toFixed(0)} QUIC streams/sec`);
+      }
+    }
 
     // Any video state (camera and/or screen) routes through ONE compositor whose canvas
     // and audio-mix tracks are published once and never re-set. Toggling camera/screen/
@@ -3005,10 +3067,14 @@ async function initWatchView(streamId: string, user: User | null) {
         //                  points at MAX_STREAMS_UNI credit rather than at the relay.
         const quicClosed = wtProbe.closedHow;
         const uniAgo = wtProbe.lastUniAt ? (performance.now() - wtProbe.lastUniAt) / 1000 : -1;
+        // Streams per second is what tells us an ?aframe= change actually took effect, from the
+        // phone, without trusting the broadcaster's console: ~50/s is 20ms Opus frames, ~17/s
+        // is 60ms. It is also the number that predicts when the credit budget runs out.
+        const uniRate = nowS > 0 ? wtProbe.uni / nowS : 0;
         const quicLine = wtProbe.installed
-          ? `quic    streams=${wtProbe.uni}` +
-            (uniAgo >= 0 ? ` (arrived ${uniAgo.toFixed(0)}s ago)` : " (none yet)") +
-            `  sessions=${wtProbe.constructed}\n` +
+          ? `quic    streams=${wtProbe.uni} (${uniRate.toFixed(1)}/s)` +
+            (uniAgo >= 0 ? ` last ${uniAgo.toFixed(0)}s ago` : " none yet") +
+            `  sess=${wtProbe.constructed}\n` +
             `closed  ${quicClosed ?? "no — session still open"}\n`
           : "";
 
