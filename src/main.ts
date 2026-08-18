@@ -853,11 +853,12 @@ const broadcastUrl = (streamId: string, suffix = ""): string =>
  *   geo    — origin placement override on the broker assign
  *   aframe — Opus frame duration in ms (the QUIC stream-rate experiment)
  *   diag   — on-device diagnostics panel
+ *   agroup — audio frames per group (the QUIC stream-batching experiment)
  */
 function carryTestParams(search: string): string {
   const from = new URLSearchParams(search);
   const out = new URLSearchParams();
-  for (const key of ["geo", "aframe", "diag"]) {
+  for (const key of ["geo", "aframe", "diag", "agroup"]) {
     const v = from.get(key);
     if (v !== null) out.set(key, v);
   }
@@ -3176,10 +3177,13 @@ async function initWatchView(streamId: string, user: User | null) {
     //
     // 6 minutes against ~10 minutes of headroom at 5 frames/group. The margin is deliberate:
     // the ceiling was measured between 6489 and 7596, so the budget is sized on the low end.
+    // NOT in bare mode. A rebuild is a new WebTransport session with a fresh stream budget, so
+    // leaving this on would reset the very counter ?bare=1 exists to measure — and silently, at
+    // t=360s, right where a batching run is trying to prove it reaches ~10 minutes.
     const REFRESH_DEFAULT_SECONDS = isSafari ? 360 : 0;
     const refreshParam = new URLSearchParams(location.search).get("refresh");
     const refreshEvery = refreshParam === null ? REFRESH_DEFAULT_SECONDS : Number(refreshParam);
-    if (Number.isFinite(refreshEvery) && refreshEvery > 0) {
+    if (!BARE && Number.isFinite(refreshEvery) && refreshEvery > 0) {
       console.log(`[refresh] rebuilding the player every ${refreshEvery}s`);
       const refreshTimer = window.setInterval(async () => {
         const url = live.getAttribute("url");
