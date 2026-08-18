@@ -35,6 +35,8 @@ interface WtProbe {
   closedAt: number | null;
   closedHow: string | null;
   err: string | null;
+  /** anticipatedConcurrentIncomingUnidirectionalStreams injected into the constructor, 0 = none */
+  anticipated: number;
 }
 
 export const wtProbe: WtProbe = {
@@ -45,6 +47,7 @@ export const wtProbe: WtProbe = {
   closedAt: null,
   closedHow: null,
   err: null,
+  anticipated: 0,
 };
 
 type WtCtor = new (url: string, options?: unknown) => WebTransport;
@@ -63,17 +66,40 @@ function describeClose(reason: "resolved" | "rejected", value: unknown): string 
  * Replace window.WebTransport with a counting subclass. Call AFTER any polyfill install so
  * that whichever implementation actually ends up in use is the one being measured.
  */
-export function installWtProbe(): void {
+export function installWtProbe(anticipated = 0): void {
   if (wtProbe.installed) return;
   const g = globalThis as unknown as { WebTransport?: WtCtor };
   const Orig = g.WebTransport;
   if (typeof Orig !== "function") return;
+  wtProbe.anticipated = anticipated;
 
   class ProbedWebTransport extends (Orig as WtCtor) {
     private _uni?: ReadableStream;
 
     constructor(url: string, options?: unknown) {
-      super(url, options);
+      // Ask for a larger initial unidirectional stream budget.
+      //
+      // The measured ceiling is ~7200 CUMULATIVE incoming uni streams per session, after which
+      // the peer can never open another one. WT_MAX_STREAMS credit is cumulative over closed
+      // streams and has to be replenished by the receiver — us — and the browser is the only
+      // thing that can send those capsules; there is no JS API for it. What JS CAN do is state
+      // an expectation up front: `anticipatedConcurrentIncomingUnidirectionalStreams` is a
+      // documented WebTransportOptions member, and the transport setting behind it
+      // (SETTINGS_WT_INITIAL_MAX_STREAMS_UNI) defaults to 0, i.e. "I will grant credit one
+      // capsule at a time".
+      //
+      // So if the defect is a fixed initial grant that is never topped up, a large value here
+      // should move the ceiling proportionally — a real fix rather than a mitigation, costing
+      // no latency and no loss-resilience. If the ceiling does not move, the grant is not what
+      // is being exhausted and the finding stands as a WebKit bug.
+      //
+      // The name says CONCURRENT, and a UA is free to read it that way or to clamp it; this is
+      // an experiment, not a documented lever for cumulative budget.
+      const opts =
+        anticipated > 0
+          ? { ...(options as Record<string, unknown>), anticipatedConcurrentIncomingUnidirectionalStreams: anticipated }
+          : options;
+      super(url, opts);
       wtProbe.constructed++;
       this.closed.then(
         (info) => {

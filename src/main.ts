@@ -3080,8 +3080,9 @@ async function initWatchView(streamId: string, user: User | null) {
         const uniRate = uniSpan > 0.5 ? wtProbe.uni / uniSpan : 0;
         const quicLine = wtProbe.installed
           ? `quic    streams=${wtProbe.uni} (${uniRate.toFixed(1)}/s over ${uniSpan.toFixed(0)}s)\n` +
-            `        ${uniAgo >= 0 ? `last ${uniAgo.toFixed(0)}s ago` : "none yet"}  sess=${wtProbe.constructed}\n` +
-            `closed  ${quicClosed ?? "no — session still open"}\n`
+            `        ${uniAgo >= 0 ? `last ${uniAgo.toFixed(0)}s ago` : "none yet"}  sess=${wtProbe.constructed}` +
+            (wtProbe.anticipated > 0 ? `  wtmax=${wtProbe.anticipated}` : "") +
+            `\nclosed  ${quicClosed ?? "no — session still open"}\n`
           : "";
 
         panel.style.color = stalledFor >= 3 ? "#f87171" : "#4ade80";
@@ -3362,7 +3363,14 @@ async function init() {
   // first connection happens well after this, so installing here is early enough. Gated
   // inside installWtProbe's caller rather than the module so a normal viewer runs untouched
   // code in the media path.
-  if (new URLSearchParams(location.search).get("diag") === "1") installWtProbe();
+  //
+  // ?wtmax=<n> additionally asks for a bigger initial unidirectional stream budget — the one
+  // lever JS has over the ~7200-stream ceiling. See src/wt-probe.ts for why it might work and
+  // why it might not. It implies the probe, since there is no point setting it blind.
+  const params = new URLSearchParams(location.search);
+  const wtmax = Number(params.get("wtmax") ?? 0);
+  const wantProbe = params.get("diag") === "1" || wtmax > 0;
+  if (wantProbe) installWtProbe(Number.isFinite(wtmax) && wtmax > 0 ? wtmax : 0);
   // Detect browser support (async for codec checks)
   browserSupport = await detectBrowserSupport();
 
