@@ -6,10 +6,21 @@
  * door. See the OAUTH section in src/worker/index.ts.
  *
  * Relay backend: moq.pro (Mode A). MOQ_PRO_JWK (preferred) or MOQ_PRO_K is set as a secret,
- * so moqProAssignment() returns first and every broadcast goes through cdn.moq.pro with a
+ * so moqProAssign() returns first and every broadcast goes through cdn.moq.pro with a
  * per-broadcast token this Worker mints. The FLEET_* vars below are the DORMANT alternative
  * path — they are read only when no MOQ_PRO_* secret is set. Moving to the tinymoq
  * broker/fleet is a secret change plus these vars, not a code change.
+ *
+ * The signing key is `Vivoh-Earth` (EdDSA, kid RaYsFGNb-ZyeTIflp1EME9SOBW383x0LiflXg9pNfg0),
+ * generated 27 Aug 2026 for this deployment ALONE. Deliberately not Wallflower's key: one key
+ * across both products means a compromise of either Worker forges tokens for the other.
+ *
+ * MOQ_PRO_ROOT is unset, so the path namespace is "erik" — the same one Wallflower uses. That
+ * is an accepted risk, not an oversight. Stream ids are 5 chars of [a-z0-9] (60.5M) and
+ * generateStreamId() only checks THIS deployment's D1, so nothing prevents a cross-product
+ * collision; it is simply ~1e-6 at current volume. And a token minted under a shared root
+ * grants relay access to CIPHERTEXT only — the content key is derived from the share link's
+ * fragment and never reaches any Worker. Set MOQ_PRO_ROOT if either product gains real volume.
  *
  *   wrangler secret put MOQ_PRO_JWK          (moq.pro asymmetric signing key)
  *   wrangler secret put GOOGLE_CLIENT_ID     + GOOGLE_CLIENT_SECRET
