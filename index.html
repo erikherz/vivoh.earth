@@ -1046,6 +1046,23 @@
             gap: 0.5rem;
             margin-top: 1rem;
         }
+        /* Why capture stopped, when nobody asked it to. Sits under the control bar rather
+           than over the video: a broadcaster whose camera just died is looking at the picture,
+           and covering it with the explanation would be its own small joke. */
+        .capture-notice {
+            max-width: 46rem;
+            margin: 0.6rem auto 0;
+            padding: 0.55rem 0.8rem;
+            /* Literal amber rather than a theme token: there is no warning token in this
+               palette, and a translucent tint over both backgrounds reads in either theme. */
+            border: 1px solid #b8860b;
+            border-radius: 8px;
+            background: rgba(184, 134, 11, 0.12);
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            line-height: 1.4;
+            text-align: center;
+        }
         .publish-btn {
             background: var(--bg-tertiary);
             border: 1px solid var(--input-border);

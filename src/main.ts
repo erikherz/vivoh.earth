@@ -1441,6 +1441,35 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     window.addEventListener("beforeunload", () => window.clearInterval(vsInterval));
   }
 
+  // What to tell a broadcaster when capture would not start.
+  //
+  // getUserMedia/getDisplayMedia report failures as DOMException *names*, and the name is the
+  // only part that is stable across engines — the messages differ ("Could not start video
+  // source" on Chromium, "The request is not allowed by the user agent" on WebKit), so match
+  // on the name and write the sentence ourselves. NotReadableError is the one that prompted
+  // this: Windows lets a single app hold the camera, so a camera already open in Teams or the
+  // Camera app fails here and on no other platform.
+  const captureFailureText = (e: unknown): string => {
+    const name = e instanceof Error ? e.name : "";
+    const detail = e instanceof Error && e.message ? ` (${e.message})` : "";
+    switch (name) {
+      case "NotAllowedError":
+      case "SecurityError":
+        return "The browser did not allow the camera or microphone. If you dismissed the prompt, " +
+          "reload and allow it; if you blocked it, clear this site's camera permission first.";
+      case "NotReadableError":
+      case "AbortError":
+        return "The camera could not be started — on Windows only one app can use it at a time. " +
+          "Close anything else that has it open (Teams, Zoom, the Camera app) and try again." + detail;
+      case "NotFoundError":
+      case "OverconstrainedError":
+        return "No camera or microphone was found. Check that one is connected, and that this " +
+          "browser is allowed to use it in the system's privacy settings.";
+      default:
+        return `Capture could not start${detail || "."}`;
+    }
+  };
+
   // Drive the headless <moq-publish> core element with our own control bar.
   const publisher = document.querySelector("moq-publish") as MoqPublishElement | null;
   if (publisher) {
@@ -1682,6 +1711,18 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       if (v) v.style.display = ""; // restore the element's own preview
     };
 
+    // A line under the control bar for things that happen TO the capture rather than because
+    // someone clicked. Everything here used to be a console.error, which is to say invisible:
+    // reported from Edge on Windows as "the camera does not stay open — I see it for a second
+    // and then it goes away", with nothing on screen to say why.
+    const notice = document.createElement("div");
+    notice.className = "capture-notice hidden";
+    notice.setAttribute("role", "status"); // announced, but does not steal focus
+    const say = (msg: string | null) => {
+      notice.textContent = msg ?? "";
+      notice.classList.toggle("hidden", !msg);
+    };
+
     // Serialize because getDisplayMedia/getUserMedia show permission prompts.
     let applying = false;
     const applyState = async () => {
@@ -1717,8 +1758,28 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
             } else if (!screen && comp.hasScreen()) {
               comp.disableScreen();
             }
-            if (camera && !comp.hasCamera()) await comp.enableCamera();
-            else if (!camera && comp.hasCamera()) comp.disableCamera();
+            if (camera && !comp.hasCamera()) {
+              await comp.enableCamera({
+                // The camera going away is not a click, so nothing else would ever say so.
+                onEnded: () => {
+                  capture.camera = false;
+                  syncButtons();
+                  say(
+                    "The camera stopped. Another app or the system took it — close whatever else " +
+                    "is using it, then switch Camera back on."
+                  );
+                  void applyState();
+                },
+                onMuteChange: (muted) =>
+                  say(
+                    muted
+                      ? "The camera has stopped sending frames — it is probably in use by another " +
+                        "app. Anyone watching is seeing a frozen picture."
+                      : null
+                  ),
+              });
+              say(null); // a fresh start clears whatever the last one failed with
+            } else if (!camera && comp.hasCamera()) comp.disableCamera();
 
             // Audio routing: the mic is captured whenever audio is on (incl. while screen
             // sharing — for narration), and tab/system audio is additionally mixed in when a
@@ -1747,6 +1808,10 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
             void goLive();
           } catch (e) {
             console.error("[media] capture failed (or cancelled):", e);
+            // Until 2026-08-28 this was the whole handling: revert the toggle, log, and leave
+            // the broadcaster watching a button switch itself back off for no stated reason.
+            // A console.error is only visible to whoever opens devtools, which is nobody.
+            say(captureFailureText(e));
             capture.screen = false;
             capture.camera = false;
             syncButtons();
@@ -1985,8 +2050,9 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // to be worked out.
     syncButtons();
 
-    // Place the control bar directly after the <moq-publish> element.
+    // Place the control bar directly after the <moq-publish> element, and the notice under it.
     publisher.insertAdjacentElement("afterend", bar);
+    bar.insertAdjacentElement("afterend", notice);
 
     // --- Status indicator (display only; go-live logging is handled by goLive) ---
     const refreshStatus = () => {

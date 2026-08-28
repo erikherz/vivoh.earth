@@ -120,7 +120,20 @@ export interface Compositor {
   readonly canvas: HTMLCanvasElement; // publisher preview; drag the camera inset to move it
   hasCamera: () => boolean;
   hasScreen: () => boolean;
-  enableCamera: () => Promise<void>;
+  /**
+   * Start the camera.
+   *
+   * `onEnded` fires when the SOURCE goes away by itself — the OS handing the camera to
+   * another app, a USB camera unplugged, a driver reset. Windows does this routinely, and it
+   * is not otherwise detectable: the track just stops, the video element's dimensions drop to
+   * zero, and drawCover then paints nothing over the black background. So the composite turns
+   * into a black rectangle while the Camera button is still lit — see scripts/e2e/camera-yanked.mjs.
+   *
+   * `onMuteChange(true)` fires when frames stop arriving from a track that is still live,
+   * which is the other half of the same Windows behaviour. The last frame stays on the canvas
+   * (a freeze rather than a blackout), so this is a warning, not a teardown.
+   */
+  enableCamera: (opts?: { onEnded?: () => void; onMuteChange?: (muted: boolean) => void }) => Promise<void>;
   disableCamera: () => void;
   enableScreen: (opts?: { onEnded?: () => void }) => Promise<void>;
   disableScreen: () => void;
@@ -530,12 +543,21 @@ export function createCompositor(): Compositor {
     hasCamera: () => !!camera,
     hasScreen: () => !!screen,
 
-    async enableCamera() {
+    async enableCamera(opts) {
       if (camera || stopped) return;
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       camera = { stream, video: mkVideo(new MediaStream(stream.getVideoTracks())) };
       untrackCamera = trackFrameTiming(camera.video, (f) => { cameraFrame = f; });
       placed = false; // re-place the inset for the new camera aspect ratio
+      // The camera can be taken away without the page doing anything — the screen share has
+      // always handled that (below) and the camera never did. Same treatment.
+      const track = stream.getVideoTracks()[0];
+      track?.addEventListener("ended", () => {
+        this.disableCamera();
+        opts?.onEnded?.();
+      });
+      track?.addEventListener("mute", () => opts?.onMuteChange?.(true));
+      track?.addEventListener("unmute", () => opts?.onMuteChange?.(false));
     },
     disableCamera() {
       untrackCamera?.();
