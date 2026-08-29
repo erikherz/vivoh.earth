@@ -130,13 +130,24 @@ export function logout(): void {
 
 // Stats logging functions
 export interface BroadcastStart {
-  eventId: number;
+  eventId: number | null; // null when go-live failed, so no row was written
   relay: string | null; // assigned tinymoq relay "host:port", or null on failure
   jwt: string | null; // per-broadcast publisher token (scoped to this stream), or null
   path?: string | null; // moq.pro connect path "<root>/<stream>.hang" (Mode A); absent in fleet mode
   encrypted?: boolean; // true if this stream uses relay-blind E2E media encryption
   contentKey?: string | null; // always null now: the key is derived from the link fragment
   salt?: string | null;       // public HKDF salt; rotating it re-keys the stream
+  /**
+   * Why go-live failed, for the caller to show a person.
+   *
+   * This used to be a bare `return null`, which meant eight distinct refusals — no publish
+   * key, an expired one, a terminated stream, an expired challenge, a name already in use, a
+   * broker that is down — all arrived at the UI as the single phrase "(no relay assigned)".
+   * The reason was read here and then dropped on the floor. `status` is the HTTP status, or 0
+   * when the request never completed at all.
+   */
+  status?: number;
+  error?: string;
 }
 
 export async function logBroadcastStart(
@@ -173,7 +184,15 @@ export async function logBroadcastStart(
     if (!response.ok) {
       const errorText = await response.text();
       console.error("Failed to log broadcast start:", response.status, errorText);
-      return null;
+      // The Worker answers refusals as {"error": "..."} — its own words, already written for a
+      // person. Anything else (an HTML error page from in front of it, an empty body) is not
+      // worth showing raw, so it falls back to the status alone.
+      let error = "";
+      try {
+        const parsed = JSON.parse(errorText);
+        if (typeof parsed?.error === "string") error = parsed.error;
+      } catch { /* not JSON: the status is all we have */ }
+      return { eventId: null, relay: null, jwt: null, status: response.status, error };
     }
     const data = await response.json();
     console.log("Broadcast started with geo:", data.geo, "relay:", data.relay);
@@ -188,7 +207,9 @@ export async function logBroadcastStart(
     };
   } catch (e) {
     console.error("Error logging broadcast start:", e);
-    return null;
+    // Never reached the Worker at all — offline, DNS, a captive portal. status 0 marks that
+    // apart from a refusal, because the advice differs completely.
+    return { eventId: null, relay: null, jwt: null, status: 0, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -266,11 +287,37 @@ export async function getStreamRoute(
   }
 }
 
-export async function logBroadcastEnd(eventId: number): Promise<void> {
+/**
+ * Mark a broadcast ended and free its relay assignment.
+ *
+ * sendBeacon, for the same reason logWatchEnd uses it: this fires from pagehide/beforeunload,
+ * and a normal fetch() started there is routinely cancelled when the document goes away. The
+ * viewer side learned that; this one had not, and here it costs more than a miscounted
+ * session. An unclosed row keeps `ended_at IS NULL`, and nameIsAvailable() then refuses the
+ * NEXT go-live under that stream id with 409 "that broadcast name is in use" — because the
+ * claim keypair is deliberately lost on reload, so a returning broadcaster cannot prove they
+ * are the same publisher. The id survives a reload in ?stream=, so the effect is a broadcaster
+ * permanently locked out of their own link by closing a tab. Wallflower, which shares this
+ * code, had accumulated 131 such rows blocking 131 ids over sixteen days.
+ *
+ * The Worker's reaper closes anything this still fails to deliver.
+ */
+export function logBroadcastEnd(eventId: number): void {
+  const url = `/api/stats/broadcast/${eventId}/end`;
   try {
-    await fetch(`/api/stats/broadcast/${eventId}/end`, { method: "POST" });
+    // No body: the route takes the id from the path. An empty blob still needs a type that
+    // does not trip a CORS preflight, same as logWatchEnd.
+    if (navigator.sendBeacon?.(url, new Blob([""], { type: "text/plain;charset=UTF-8" }))) {
+      return;
+    }
   } catch {
-    // Ignore errors
+    // fall through to fetch
+  }
+  try {
+    // See logWatchEnd for why the cast is needed.
+    void fetch(url, { method: "POST", keepalive: true } as RequestInit);
+  } catch {
+    // Ignore errors — the reaper closes anything we fail to report.
   }
 }
 

@@ -1063,6 +1063,21 @@
             line-height: 1.4;
             text-align: center;
         }
+        /* The way out, inside the sentence that explains why you need one. Inline rather
+           than a row of its own: it belongs to this message and disappears with it. */
+        .notice-action {
+            display: inline-block;
+            margin-left: 0.6rem;
+            padding: 0.25rem 0.7rem;
+            border: 1px solid #b8860b;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-primary);
+            font: inherit;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        .notice-action:hover { background: rgba(184, 134, 11, 0.2); }
         .publish-btn {
             background: var(--bg-tertiary);
             border: 1px solid var(--input-border);

@@ -239,6 +239,8 @@ export default {
   async scheduled(_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
     const { closed, purged } = await reapSessions(env);
     if (closed || purged) console.log(`[reaper] closed=${closed} purged=${purged}`);
+    const broadcasts = await reapBroadcasts(env);
+    if (broadcasts) console.log(`[reaper] broadcasts closed=${broadcasts}`);
   },
 };
 
@@ -1703,6 +1705,42 @@ async function reapSessions(env: Env): Promise<{ closed: number; purged: number 
   }
 
   return { closed: closed.meta?.changes ?? 0, purged };
+}
+
+/**
+ * Close broadcast rows that can no longer be broadcasting.
+ *
+ * The problem this solves: a row with `ended_at IS NULL` makes nameIsAvailable() refuse the
+ * next go-live under that stream id with 409, and the claim keypair is deliberately lost on a
+ * reload while the id survives in ?stream= — so the person locked out is almost always the
+ * broadcaster themselves, permanently, for closing a tab. /end now goes out by sendBeacon,
+ * which covers an orderly close; this covers a crash, a dead battery, a killed tab. Wallflower,
+ * which shares this code, had accumulated 131 such rows blocking 131 ids over sixteen days
+ * before the same fix was applied there.
+ *
+ * There is no heartbeat on a broadcast, so staleness is bounded by the only fact available:
+ * PUBLISHER_TOKEN_TTL. The publisher token minted at go-live expires after it, and the relay
+ * stops accepting the publisher at that point, so a row older than its own token's lifetime
+ * cannot still be publishing. That makes this provably unable to close a live broadcast, which
+ * matters more here than closing stale rows promptly — a broadcaster cut off mid-stream by our
+ * own housekeeping would be a far worse bug than the one being fixed. Anyone who hits a 409
+ * inside the window is offered a new link on the spot, which is the fast path out.
+ *
+ * Deliberately does NOT call releaseRelay(). A relay assignment tied to an expired publisher
+ * token is already dead, and firing a release per row would put an unbounded burst of broker
+ * calls inside a one-minute cron. Nothing is made worse: today none of these rows release
+ * anything at all.
+ */
+async function reapBroadcasts(env: Env): Promise<number> {
+  const res = await env.DB
+    .prepare(
+      `UPDATE broadcast_events
+          SET ended_at = datetime('now')
+        WHERE ended_at IS NULL
+          AND started_at <= datetime('now', '-${PUBLISHER_TOKEN_TTL} seconds')`
+    )
+    .run();
+  return res.meta?.changes ?? 0;
 }
 
 async function handleStatsRoutes(

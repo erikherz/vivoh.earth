@@ -751,6 +751,7 @@ import {
   logout,
   logBroadcastStart,
   logBroadcastEnd,
+  type BroadcastStart,
   logWatchStart,
   logWatchHeartbeat,
   logWatchEnd,
@@ -1470,12 +1471,78 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     }
   };
 
+  // What to tell a broadcaster when going live did not.
+  //
+  // The Worker already writes its refusals for a person ("that broadcast name is in use",
+  // "This stream has been terminated."), so those are passed through rather than re-worded —
+  // re-wording them here would mean two places to keep in step, and the second one always
+  // drifts. What is added is the part the Worker cannot know: what to do about it.
+  //
+  // `null` means go-live never got as far as asking, because no publisher claim could be
+  // built: either no admission credential on this device, or the challenge was declined.
+  const goLiveFailureText = (res: BroadcastStart | null): string => {
+    if (!res) {
+      return "Could not prove this broadcast is yours. Check that you are still signed in, " +
+        "then switch a camera or microphone back on to try again.";
+    }
+    const said = res.error ? ` ${res.error}` : "";
+    if (res.status === 0) {
+      return `Could not reach ${location.host} to start the broadcast — this looks like a ` +
+        `network problem at this end. Check the connection and try again.${said}`;
+    }
+    switch (res.status) {
+      case 401:
+      case 403:
+        return `The server would not start this broadcast:${said || " permission was refused."} ` +
+          "If you have been signed out, sign in again; if the stream was terminated, starting " +
+          "a new link is the way on.";
+      case 503:
+        return "Broadcasting is not available right now — the server is not configured to " +
+          `issue publish tokens.${said} This is at our end, not yours.`;
+      default:
+        // Includes the case this branch always used to claim: a 200 with no relay, which is
+        // the broker being down. Everything else lands here with its own status attached.
+        return "Could not start the broadcast." +
+          (said || ` The server answered ${res.status ?? "nothing"}.`) +
+          " Switch a camera or microphone back on to try again.";
+    }
+  };
+
   // Drive the headless <moq-publish> core element with our own control bar.
   const publisher = document.querySelector("moq-publish") as MoqPublishElement | null;
   if (publisher) {
     // The relay URL is NOT static: on go-live the Worker calls tinymoq /assign and
     // returns the relay hosting this broadcast; we point the publisher at it then.
     publisher.setAttribute("name", streamName);
+
+    // A line under the control bar for things that happen TO a broadcast rather than because
+    // someone clicked. Everything here used to be a console.error, which is to say invisible:
+    // reported from Edge on Windows as "the camera does not stay open — I see it for a second
+    // and then it goes away", and from another broadcaster as a Server Status card reading
+    // "(no relay assigned)" with nothing anywhere to say why.
+    //
+    // Declared up here rather than beside the control bar because goLive() below reports
+    // through it, and goLive is defined first.
+    const notice = document.createElement("div");
+    notice.className = "capture-notice hidden";
+    notice.setAttribute("role", "status"); // announced, but does not steal focus
+    /**
+     * Show one sentence, or null to clear.
+     *
+     * `action` adds a button to it. Reserved for failures the broadcaster can actually undo
+     * from here — a message that explains and then leaves you stuck is only half an answer.
+     */
+    const say = (msg: string | null, action?: { label: string; run: () => void }) => {
+      notice.textContent = msg ?? ""; // also drops any button from a previous message
+      notice.classList.toggle("hidden", !msg);
+      if (!msg || !action) return;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "notice-action";
+      btn.textContent = action.label;
+      btn.addEventListener("click", action.run);
+      notice.appendChild(btn);
+    };
 
     let broadcastEventId: number | null = null;
     let goLivePromise: Promise<void> | null = null;
@@ -1506,12 +1573,31 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         const relay = res?.relay;
         const jwt = res?.jwt;
         if (!relay || !jwt) {
-          // /assign failed or no token was minted — there is no static relay/token to
-          // fall back to. Allow a retry on the next device action rather than
-          // connecting to a dead endpoint.
-          console.error("[routing] go-live got no relay/token (assign unavailable); pick a device again to retry");
+          // Until 2026-08-29 this branch blamed the broker for everything and told nobody:
+          // a console line, and a Server Status card reading "(no relay assigned)". At least
+          // eight unrelated refusals arrive here, only one of which is actually /assign being
+          // down, and the most common of them was recoverable in one click by someone who had
+          // no way to know that. Allow a retry on the next device action rather than
+          // connecting to a dead endpoint, but say what happened first.
+          console.error(
+            "[routing] go-live got no relay/token:",
+            res ? `HTTP ${res.status ?? "?"} ${res.error ?? ""}` : "no publisher claim"
+          );
           setActiveRelay(null);
           goLivePromise = null;
+          // 409 means a row for this stream id is still open under a different publisher key.
+          // Nearly always that is the SAME person: the keypair is deliberately lost on reload
+          // while the id survives in ?stream=, so returning to your own tab looks to the
+          // Worker like a stranger. Rotating the id both frees the old row and sidesteps it.
+          if (res?.status === 409) {
+            say(
+              "This broadcast link is still marked as live from an earlier session, so it " +
+              "cannot be started again under the same name. Starting a new link fixes it.",
+              { label: "Start a new link", run: () => void rotateIdentity({ confirm: false }) }
+            );
+          } else {
+            say(goLiveFailureText(res));
+          }
           return;
         }
         // Relay-blind E2E: install the per-broadcast content key BEFORE connecting,
@@ -1537,6 +1623,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
           publisher.setAttribute("url", `https://${relay}/?jwt=${jwt}`);
         }
         setActiveRelay(relay);
+        say(null); // whatever the last attempt failed with, it is no longer true
         console.log("[routing] broadcaster relay:", relay, "eventId:", broadcastEventId);
       });
       return goLivePromise;
@@ -1579,11 +1666,15 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // screen exactly as they had them and only the address changes.
     const newIdBtn = document.getElementById("newid-btn");
     let rotating = false;
-    const rotateIdentity = async () => {
+    const rotateIdentity = async (opts?: { confirm?: boolean }) => {
       if (rotating) return;
       // Only guard once there is an audience to lose. Before go-live nobody holds the link,
       // so a confirmation would be noise on the one click that costs nothing.
-      if (anyActive && !window.confirm(
+      //
+      // `confirm: false` is the recovery path from a name conflict: capture is on (which is
+      // what triggered go-live), so anyActive is true, but the broadcast never started and
+      // nobody is watching. Warning that everyone will be cut off would be false.
+      if (opts?.confirm !== false && anyActive && !window.confirm(
         "Start a new link?\n\nThis ends the current broadcast and starts a fresh one. " +
         "Everyone watching now — and anyone holding the old link — will be cut off until " +
         "you send them the new one."
@@ -1709,18 +1800,6 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       bcast.audio.source.set(undefined);
       const v = publisher.querySelector("video") as HTMLElement | null;
       if (v) v.style.display = ""; // restore the element's own preview
-    };
-
-    // A line under the control bar for things that happen TO the capture rather than because
-    // someone clicked. Everything here used to be a console.error, which is to say invisible:
-    // reported from Edge on Windows as "the camera does not stay open — I see it for a second
-    // and then it goes away", with nothing on screen to say why.
-    const notice = document.createElement("div");
-    notice.className = "capture-notice hidden";
-    notice.setAttribute("role", "status"); // announced, but does not steal focus
-    const say = (msg: string | null) => {
-      notice.textContent = msg ?? "";
-      notice.classList.toggle("hidden", !msg);
     };
 
     // Serialize because getDisplayMedia/getUserMedia show permission prompts.
@@ -2079,12 +2158,19 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     }
     refreshStatus();
 
-    // Log end on page unload
-    window.addEventListener("beforeunload", () => {
-      if (broadcastEventId) {
-        logBroadcastEnd(broadcastEventId);
-      }
-    });
+    // Log end on page unload.
+    //
+    // pagehide is the load-bearing one: mobile Safari fires it on background/close where
+    // beforeunload is simply never delivered, and this is the exact reasoning the watch
+    // session path already carries. A missed end here is worse than a miscounted session — it
+    // leaves the row open and locks this stream id out of its own next go-live with a 409.
+    // beforeunload stays as desktop belt-and-braces; logBroadcastEnd is idempotent, so both
+    // firing is fine.
+    const endOnUnload = () => {
+      if (broadcastEventId) logBroadcastEnd(broadcastEventId);
+    };
+    window.addEventListener("pagehide", endOnUnload);
+    window.addEventListener("beforeunload", endOnUnload);
 
     // --- HTML overlay editor (broadcaster-authored HTML shown to viewers) ---
     const overlayBtn = document.createElement("button");

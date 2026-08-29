@@ -328,6 +328,29 @@ export function createCompositor(): Compositor {
   };
 
   let raf = 0;
+  // Declared up here, not beside stop(), because startLoop() below reads it and runs during
+  // this factory's own body. Left further down it is a temporal-dead-zone crash on every
+  // broadcast — which is exactly what happened when this was first written in Wallflower, and
+  // `vite preview` caught it before it shipped.
+  let stopped = false;
+  // The draw loop is scheduled two different ways, and which one runs depends on whether
+  // anybody can see this tab.
+  //
+  // requestAnimationFrame does not fire in a hidden tab, and canvas.captureStream() only
+  // produces a frame when the canvas is painted. So a broadcaster who switched to another tab —
+  // to open their own share link, say — stopped sending pictures, and everyone watching froze on
+  // the last frame. Nothing errored: the publisher stayed connected, the status light stayed
+  // green, audio kept flowing (WebAudio is not rAF-driven), and only the picture stopped.
+  //
+  // Measured on the deployed Wallflower build 2026-08-29, which shares this compositor: rAF 60/s
+  // visible, 0/s hidden; setInterval 30/s in BOTH, because a page holding a live getUserMedia
+  // capture is exempt from Chrome's intensive background timer throttling. That is what makes
+  // the timer a real fallback rather than one frame a second of token effort.
+  //
+  // rAF stays the path whenever the tab is visible: vsync-aligned, and free when the compositor
+  // would be idle anyway.
+  const HIDDEN_FRAME_MS = 1000 / 30;
+  let timer: ReturnType<typeof setInterval> | null = null;
   const draw = () => {
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
@@ -366,9 +389,55 @@ export function createCompositor(): Compositor {
     // Keep the DOM chrome on top of the inset it describes. Defined below; by the time any
     // rAF callback runs, the whole factory body has finished executing.
     syncChrome();
-    raf = requestAnimationFrame(draw);
   };
-  raf = requestAnimationFrame(draw);
+
+  const stopLoop = () => {
+    if (raf) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+    if (timer !== null) {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
+
+  // One frame, and never a thrown one.
+  //
+  // The re-schedule used to be the last statement of draw(), so ANY exception anywhere in it
+  // silently ended the broadcast for good — the canvas kept its last picture and went on being
+  // published. Nothing in draw() is expected to throw, which is exactly why it must not be able
+  // to take the loop with it if it ever does.
+  let drawFailed = false;
+  const paint = () => {
+    try {
+      draw();
+    } catch (e) {
+      // Once, not sixty times a second. A loop that fails every frame would otherwise bury the
+      // first and most useful report under thousands of copies of itself.
+      if (!drawFailed) {
+        drawFailed = true;
+        console.error("[compositor] draw failed; the loop continues", e);
+      }
+    }
+  };
+
+  const startLoop = () => {
+    stopLoop();
+    if (stopped) return;
+    if (document.hidden) timer = setInterval(paint, HIDDEN_FRAME_MS);
+    else {
+      const tick = () => {
+        paint();
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+    }
+  };
+
+  const onVisibility = () => startLoop();
+  document.addEventListener("visibilitychange", onVisibility);
+  startLoop();
 
   // Move and resize the camera inset (only meaningful when both screen + camera are on).
   let mode: Zone | null = null;   // what the pointer grabbed, null when idle
@@ -534,7 +603,6 @@ export function createCompositor(): Compositor {
   const videoTrack = composite.getVideoTracks()[0];
   const audioTrack = dest.stream.getAudioTracks()[0];
 
-  let stopped = false;
 
   return {
     videoTrack,
@@ -635,9 +703,10 @@ export function createCompositor(): Compositor {
       if (stopped) return;
       stopped = true;
       document.removeEventListener("pointerdown", onGesture);
+      document.removeEventListener("visibilitychange", onVisibility);
       untrackCamera?.();
       untrackScreen?.();
-      cancelAnimationFrame(raf);
+      stopLoop();
       screen?.stream.getTracks().forEach((t) => t.stop());
       camera?.stream.getTracks().forEach((t) => t.stop());
       micStream?.getTracks().forEach((t) => t.stop());
