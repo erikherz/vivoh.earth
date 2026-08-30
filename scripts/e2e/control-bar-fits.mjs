@@ -4,6 +4,12 @@
 //
 // It is `flex-wrap: nowrap` on purpose — a row of live controls that reflows to a second line
 // mid-broadcast is worse than a slightly smaller one — so nothing catches an overflow for us.
+//
+// TWO LAYOUTS since Flip landed (2026-08-30). Flip only exists on a phone and only while the
+// camera is live, and it does not fit: the row wants 358px inside 326px on a 390px iPhone. So
+// .publish-controls.has-flip is allowed a second line and that layout is measured separately.
+// The RESTING row — what a broadcaster sees before touching anything — must still be one line,
+// and this file fails if that stops being true.
 // It just pushes off the side of the screen, which is how this was found: on an iPhone in
 // portrait, after the location, handle and chat buttons had grown the row to eight controls.
 //
@@ -53,6 +59,22 @@ const BAR = `
   <button class="publish-btn toggle-btn group-start" id="chat-btn">${faced(ICON, "Chat")}</button>
 </div>`;
 
+// The same bar with Flip in it, which is what a phone shows the moment the camera is on.
+// .has-flip is what main.ts adds alongside the button, and it is what unlocks the second line.
+const BAR_FLIP = BAR
+  .replace('class="publish-controls"', 'class="publish-controls has-flip"')
+  .replace(
+    `<button class="publish-btn toggle-btn">${faced(ICON, "Audio")}</button>`,
+    `<button class="publish-btn toggle-btn cap-mobile" id="flip-camera-btn">${faced(ICON, "Back")}</button>` +
+      `<button class="publish-btn toggle-btn">${faced(ICON, "Audio")}</button>`
+  );
+
+// `wrap: true` says a second line is ALLOWED for this layout, not that one is expected.
+const LAYOUTS = [
+  ["resting", BAR, { wrap: false }],
+  ["camera on, Flip present", BAR_FLIP, { wrap: true }],
+];
+
 // Portrait widths of phones people actually hold. The narrowest and the widest bracket the
 // two breakpoints; 390 is the one that failed.
 const DEVICES = [
@@ -79,6 +101,8 @@ try {
   const page = await browser.newPage();
   console.log("\nbroadcaster control bar, portrait\n");
 
+  for (const [layoutName, LAYOUT, opt] of LAYOUTS) {
+  console.log(`  — ${layoutName} —`);
   for (const [name, width] of DEVICES) {
     // isMobile + hasTouch so `(hover: none) and (pointer: coarse)` matches and the screen
     // toggle is hidden, exactly as on a real phone.
@@ -87,33 +111,56 @@ try {
     // width media query silently reports the desktop answer.
     await page.setContent(
       `<meta name="viewport" content="width=device-width, initial-scale=1">` +
-      `<style>${styles}</style><div class="container">${BAR}</div>`,
+      `<style>${styles}</style><div class="container">${LAYOUT}</div>`,
       { waitUntil: "load" }
     );
 
     const m = await page.evaluate(() => {
       const bar = document.querySelector(".publish-controls");
       const shown = [...bar.children].filter((c) => getComputedStyle(c).display !== "none");
-      const first = shown[0].getBoundingClientRect();
-      const last = shown[shown.length - 1].getBoundingClientRect();
       const btn = shown.find((c) => c.classList.contains("publish-btn")).getBoundingClientRect();
+      // Widest single line, not first-to-last: with wrapping allowed, last.right - first.left
+      // measures a rectangle spanning two rows and reports nonsense.
+      //
+      // Group by vertical CENTRE, not by top. The status dot is shorter than the buttons and
+      // is centred against them, so its top differs by several pixels — grouping on top would
+      // put it on a line of its own and report every layout as wrapped.
+      const lines = [];
+      for (const c of shown) {
+        const r = c.getBoundingClientRect();
+        const cy = r.top + r.height / 2;
+        let line = lines.find((l) => Math.abs(l.cy - cy) < btn.height / 2);
+        if (!line) {
+          line = { cy, left: Infinity, right: -Infinity };
+          lines.push(line);
+        }
+        line.left = Math.min(line.left, r.left);
+        line.right = Math.max(line.right, r.right);
+      }
+      const widest = Math.max(...lines.map((l) => l.right - l.left));
       return {
         controls: shown.length,
-        row: Math.round(last.right - first.left),
+        rows: lines.length,
+        row: Math.round(widest),
         available: Math.round(bar.getBoundingClientRect().width),
         tap: Math.round(Math.min(btn.width, btn.height)),
         scrolls: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       };
     });
 
-    const fits = m.row <= m.available && !m.scrolls;
+    // A second line is a failure unless this layout is allowed one.
+    const wrapped = m.rows > 1;
+    const fits = m.row <= m.available && !m.scrolls && (opt.wrap || !wrapped);
     check(
       fits && m.tap >= MIN_TAP_PX,
-      `${name} (${width}px): ${m.controls} controls at ${m.tap}px, row ${m.row}px in ${m.available}px` +
+      `${name} (${width}px): ${m.controls} controls at ${m.tap}px, widest line ${m.row}px in ${m.available}px` +
+        (wrapped ? ` on ${m.rows} rows` : "") +
         (m.scrolls ? "  — THE PAGE SCROLLS SIDEWAYS" : "") +
-        (!fits ? "  — THE ROW OVERFLOWS" : "") +
+        (m.row > m.available ? "  — THE ROW OVERFLOWS" : "") +
+        (wrapped && !opt.wrap ? "  — THIS LAYOUT MUST NOT WRAP" : "") +
         (m.tap < MIN_TAP_PX ? `  — tap target under ${MIN_TAP_PX}px` : `  (${m.available - m.row}px spare)`)
     );
+  }
   }
 
   // ---- Labelled layout ----

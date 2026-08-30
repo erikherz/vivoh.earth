@@ -1168,6 +1168,19 @@
         @media (hover: none) and (pointer: coarse) {
             .publish-btn.cap-screen { display: none; }
         }
+        /* The `hidden` ATTRIBUTE has to beat .publish-btn's own display, or a control that
+           JavaScript has marked hidden stays on screen looking perfectly clickable. The UA
+           stylesheet's [hidden] rule loses to any class that sets display, which .publish-btn
+           does. Flip is set this way whenever the camera is off. */
+        .publish-btn[hidden] { display: none; }
+        /* Flip is a PHONE control. A desktop can have two webcams, but "front and back" means
+           nothing there — they are two cameras pointing wherever they were put, and Chrome
+           reports no facingMode for either, so the button would relabel itself with a
+           direction it cannot know. The inverse of cap-screen above. */
+        .publish-btn.cap-mobile { display: none; }
+        @media (hover: none) and (pointer: coarse) {
+            .publish-btn.cap-mobile:not([hidden]) { display: inline-flex; }
+        }
         /* Narrow portrait phones: the bar is nowrap by design (a control that reflows to a
            second row while you are live is worse than a tighter one), so it has to fit.
 
@@ -1185,6 +1198,18 @@
             .publish-controls { gap: 0.15rem; }
             .publish-btn.group-start { margin-left: 0.35rem; }
             .publish-status { font-size: 1rem; }
+            /* The one place the nowrap rule gives.
+
+               Flip appears only on a phone and only while the camera is live, and it is one
+               control more than this row can hold: measured at 358px inside 326px on a 390px
+               iPhone, so four of the five common widths would clip it off the right edge.
+               Something has to give, and a control silently pushed off screen is worse than a
+               second line — the same trade Wallflower made when its own row outgrew a phone.
+
+               Keyed to .has-flip so it applies ONLY while that control is present. The resting
+               row every broadcaster sees before touching anything is still one line, and
+               scripts/e2e/control-bar-fits.mjs fails if that ever stops being true. */
+            .publish-controls.has-flip { flex-wrap: wrap; row-gap: 0.25rem; }
         }
         /* iPhone SE and friends. 44px fits here to the pixel, with nothing spare — one wider
            glyph or a different system font and the row is off the screen again. 40px buys

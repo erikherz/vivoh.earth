@@ -114,6 +114,16 @@ function trackFrameTiming(v: HTMLVideoElement, set: (f: StampFrameInfo) => void)
   };
 }
 
+/** Which way a camera points. The only two values getUserMedia's facingMode agrees on. */
+export type CameraFacing = "user" | "environment";
+
+export interface EnableCameraOpts {
+  /** Which camera to ask for. Omitted means "whatever this compositor used last". */
+  facing?: CameraFacing;
+  onEnded?: () => void;
+  onMuteChange?: (muted: boolean) => void;
+}
+
 export interface Compositor {
   readonly videoTrack: MediaStreamTrack; // stable: the canvas composite
   readonly audioTrack: MediaStreamTrack; // stable: the WebAudio mix destination
@@ -133,8 +143,20 @@ export interface Compositor {
    * which is the other half of the same Windows behaviour. The last frame stays on the canvas
    * (a freeze rather than a blackout), so this is a warning, not a teardown.
    */
-  enableCamera: (opts?: { onEnded?: () => void; onMuteChange?: (muted: boolean) => void }) => Promise<void>;
+  enableCamera: (opts?: EnableCameraOpts) => Promise<void>;
   disableCamera: () => void;
+  /** Which camera is live, or null when the camera is off. */
+  cameraFacing: () => CameraFacing | null;
+  /**
+   * Swap front camera for back, or back for front. Resolves to the facing that is actually
+   * live afterwards — which is not necessarily the one requested, so callers should label the
+   * control from the return value rather than from what they asked for.
+   *
+   * Resolves to null only when the camera could not be brought back at all; `onEnded` from the
+   * original enableCamera fires in that case, because a broadcaster must never be left with a
+   * lit Camera button over a black rectangle.
+   */
+  switchCamera: () => Promise<CameraFacing | null>;
   enableScreen: (opts?: { onEnded?: () => void }) => Promise<void>;
   disableScreen: () => void;
   /**
@@ -182,6 +204,14 @@ export function createCompositor(): Compositor {
   let cameraFrame: StampFrameInfo | null = null;
   let screenFrame: StampFrameInfo | null = null;
   let untrackCamera: (() => void) | null = null;
+  // Remembered across an off/on cycle so a broadcaster who chose the back camera does not
+  // silently get the front one back when they toggle Camera off and on again.
+  let facing: CameraFacing = "user";
+  let facingLive = false;
+  // The handlers the caller registered. switchCamera tears the camera down and builds it
+  // again, and those listeners have to survive that or the second camera loses its
+  // taken-away-by-the-OS detection.
+  let cameraOpts: EnableCameraOpts | null = null;
   let untrackScreen: (() => void) | null = null;
 
   // Letterbox a video into the whole canvas, preserving aspect ratio (fits inside, may
@@ -613,8 +643,22 @@ export function createCompositor(): Compositor {
 
     async enableCamera(opts) {
       if (camera || stopped) return;
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      cameraOpts = opts ?? cameraOpts;
+      const want = opts?.facing ?? facing;
+      // `ideal`, not `exact`. A laptop with one camera satisfies an ideal constraint by
+      // handing back the camera it has; `exact` would throw OverconstrainedError and turn a
+      // harmless preference into a failure to start at all.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: want } },
+        audio: false,
+      });
       camera = { stream, video: mkVideo(new MediaStream(stream.getVideoTracks())) };
+      // What we ASKED for and what we GOT are different questions, and only the second one
+      // should reach a label. Chrome on a desktop reports no facingMode at all, so an absent
+      // value means "unknown" and the request stands in for it.
+      const got = stream.getVideoTracks()[0]?.getSettings().facingMode;
+      facing = got === "user" || got === "environment" ? got : want;
+      facingLive = true;
       untrackCamera = trackFrameTiming(camera.video, (f) => { cameraFrame = f; });
       placed = false; // re-place the inset for the new camera aspect ratio
       // The camera can be taken away without the page doing anything — the screen share has
@@ -634,6 +678,37 @@ export function createCompositor(): Compositor {
       camera?.stream.getTracks().forEach((t) => t.stop());
       if (camera) camera.video.srcObject = null;
       camera = null;
+      facingLive = false;
+    },
+
+    cameraFacing: () => (facingLive ? facing : null),
+
+    async switchCamera() {
+      if (!camera || stopped) return null;
+      const from = facing;
+      const want: CameraFacing = from === "environment" ? "user" : "environment";
+      const opts = cameraOpts ?? undefined;
+
+      // The old camera must be released BEFORE the new one is requested. iOS will not hand
+      // out a second camera while one is live, and the failure is not a clean rejection —
+      // the first track goes mute and the page is left showing a frozen picture.
+      this.disableCamera();
+      try {
+        await this.enableCamera({ ...opts, facing: want });
+        return facing;
+      } catch {
+        // Put back what was working a moment ago. Nothing else can: the old track is stopped
+        // and a stopped track cannot be restarted.
+        try {
+          await this.enableCamera({ ...opts, facing: from });
+          return facing;
+        } catch {
+          // Both failed, so the camera is genuinely gone — another app took it during the
+          // gap, most likely. Say so through the same channel as any other camera loss.
+          opts?.onEnded?.();
+          return null;
+        }
+      }
     },
 
     async enableScreen(opts) {

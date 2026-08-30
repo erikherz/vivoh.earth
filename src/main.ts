@@ -783,7 +783,7 @@ import {
 } from "./crypto/media-crypto";
 import { initChat, type ChatHandle } from "./chat/chat-client";
 import { describeLocation } from "./geo/nearest-city";
-import { createCompositor, type Compositor } from "./media/pip-compositor";
+import { createCompositor, type CameraFacing, type Compositor } from "./media/pip-compositor";
 import { createGeoStamp, type GeoStamp } from "./media/geo-stamp";
 
 // /stats, /<id>/stats and /cleardata were removed: they existed to show who was broadcasting
@@ -1781,6 +1781,10 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // the publish path never switches the element's source mode mid-broadcast — that switch
     // silently dropped audio when the sequence was audio-first-then-video.
     let comp: Compositor | null = null;
+    // Filled in when the control bar is built, further down. A mutable hook rather than a
+    // direct call because applyState is DEFINED above that code and would otherwise read a
+    // `const` from its temporal dead zone the first time a button was clicked.
+    let onCameraChanged: () => void = () => {};
     // Location + time burn-in, armed independently of capture (see the stamp button below).
     let geoStamp: GeoStamp | null = null;
     // The handle watermark, likewise armed independently (see the @ button below).
@@ -1800,6 +1804,9 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       bcast.audio.source.set(undefined);
       const v = publisher.querySelector("video") as HTMLElement | null;
       if (v) v.style.display = ""; // restore the element's own preview
+      // Switching off the LAST capture never reaches the source reconcile below — it stops
+      // here — so anything watching the camera has to be told from both places, not one.
+      onCameraChanged();
     };
 
     // Serialize because getDisplayMedia/getUserMedia show permission prompts.
@@ -1859,6 +1866,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
               });
               say(null); // a fresh start clears whatever the last one failed with
             } else if (!camera && comp.hasCamera()) comp.disableCamera();
+            onCameraChanged();
 
             // Audio routing: the mic is captured whenever audio is on (incl. while screen
             // sharing — for narration), and tab/system audio is additionally mixed in when a
@@ -1933,6 +1941,17 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M6 11a1 1 0 1 1 2 0 4 4 0 0 0 8 0 1 1 0 1 1 2 0 6 6 0 0 1-5 5.92V20h2a1 1 0 1 1 0 2H9a1 1 0 1 1 0-2h2v-3.08A6 6 0 0 1 6 11z"/></svg>',
       screen:
         '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"><path d="M3 4h18a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-7v2h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/></svg>',
+      // An eye between two big arrows: one pointing right above it, one pointing left below.
+      // It began as arrows curling AROUND the eye, and that failed for a reason worth keeping:
+      // a ring at 18px has to be thin to stay a ring, and a thin curve is the first thing to
+      // disappear. Straight arrows can be as heavy as the glyph allows, so the part carrying
+      // the meaning is the part with the most ink.
+      //
+      // The eye is a filled lens with the pupil knocked out (fill-rule: evenodd) rather than
+      // an outline, for the same reason — an outlined eye reads as a smudge beside arrows
+      // this solid.
+      flip:
+        '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"><path d="M2 3.1h12.2V1L22 4.2 14.2 7.4V5.3H2z"/><path d="M22 20.9H9.8V23L2 19.8 9.8 16.6V18.7H22z"/><path fill-rule="evenodd" d="M6.6 12Q12 7 17.4 12Q12 17 6.6 12ZM12 13.8a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6z"/></svg>',
     } as const;
     // Icon plus a short name, the name shown only where there is room for it (see .btn-label).
     //
@@ -1964,6 +1983,74 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     makeToggle("camera", ICONS.camera, "Camera", "Camera");
     makeToggle("audio", ICONS.audio, "Audio (microphone; also mixes in tab/system audio when screen sharing)", "Audio");
     makeToggle("screen", ICONS.screen, "Screen", "Screen");
+
+    // --- Flip: front camera <-> back camera ---------------------------------------------
+    //
+    // An ACTION, not a toggle: it carries no on/off state and never lights up. Pressing it
+    // changes the picture immediately and visibly, which is its own feedback.
+    //
+    // PHONE ONLY, via .cap-mobile. A desktop with two webcams has two cameras pointing
+    // wherever they happen to point — "front" and "back" describe a phone, and Chrome reports
+    // no facingMode to tell them apart anyway.
+    //
+    // Shown whenever the camera is live. Nothing else is consulted, and in particular NOT the
+    // number of cameras enumerateDevices reports: iOS Safari reports ONE videoinput for a
+    // phone with three cameras, exposing front and back through the facingMode constraint
+    // instead of as separate devices. Gating on that count hid the control on every iPhone
+    // when Wallflower tried it, and the cost of not gating is only that a single-camera phone
+    // gets a button which re-acquires the same camera.
+    //
+    // It sits beside Camera in the row. Wallflower keeps this one inside its More menu, which
+    // this codebase does not have — that disclosure landed there after the two forked, and
+    // porting a menu is not porting a camera control.
+    //
+    // The label never renders on the devices this appears on (.btn-label is display:none
+    // below 601px), so the icon carries the whole meaning and aria-label carries it for
+    // anyone not looking at the icon.
+    const flipBtn = document.createElement("button");
+    flipBtn.type = "button";
+    flipBtn.className = "publish-btn toggle-btn cap-mobile";
+    flipBtn.id = "flip-camera-btn";
+    flipBtn.hidden = true;
+
+    // Name the camera you would GET, not the one you are on. A button reading "Back" while
+    // the back camera is live looks like a state indicator, and gets pressed to leave it.
+    const labelFlip = (live: CameraFacing): void => {
+      const next = live === "environment" ? "Front" : "Back";
+      const say = `Switch to the ${next.toLowerCase()} camera`;
+      flipBtn.title = say;
+      flipBtn.setAttribute("aria-label", say);
+      flipBtn.innerHTML = faced(ICONS.flip, next);
+    };
+    labelFlip("user");
+
+    let flipping = false;
+    flipBtn.addEventListener("click", () => {
+      if (flipping || !comp?.hasCamera()) return;
+      flipping = true;
+      flipBtn.disabled = true;
+      void comp
+        .switchCamera()
+        .then((live) => {
+          // null means neither camera came back. switchCamera has already fired onEnded,
+          // which switches Camera off and says why, so there is nothing to add here.
+          if (live) labelFlip(live);
+        })
+        .finally(() => {
+          flipping = false;
+          flipBtn.disabled = false;
+        });
+    });
+    toggleButtons.camera?.insertAdjacentElement("afterend", flipBtn);
+
+    onCameraChanged = () => {
+      const live = comp?.cameraFacing() ?? null;
+      flipBtn.hidden = !live;
+      // Unlocks a second line on a phone, and only while Flip is actually in the row. See
+      // .publish-controls.has-flip in index.html for the measurement behind it.
+      bar.classList.toggle("has-flip", !!live);
+      if (live) labelFlip(live);
+    };
 
     // --- Location + time burn-in ---
     //
