@@ -2453,19 +2453,200 @@ function stopForKill(role: "viewer" | "broadcaster"): void {
 // fragment is not read here, and must not be: browsers do not transmit it, and quietly
 // attaching it would hand the server the one thing the whole design keeps out of its reach.
 
+interface ReportGroup {
+  label: string;
+  ids: string[];
+}
+
 interface ReportConfig {
   categories: string[];
+  /** Absent from a Worker older than the grouped categories; the dialog falls back to flat. */
+  groups?: ReportGroup[];
   note_max: number;
   evidence_supported: boolean;
 }
 
+/**
+ * Longest edge of an attached frame, in pixels.
+ *
+ * Not chosen for how it looks to a person — a human can judge a 200px thumbnail. It is sized
+ * for the machine that will eventually read these, since vision models tokenise around this
+ * scale and anything larger is bytes spent on detail nothing downstream uses.
+ */
+const REPORT_FRAME_LONG_EDGE = 512;
+
+/**
+ * Budget for the encoded frame, in base64 characters. Deliberately UNDER the Worker's
+ * REPORT_FRAME_MAX_B64 (96,000) rather than equal to it: two constants that must agree
+ * exactly is a bug waiting for the day one of them moves, and the failure would be silent —
+ * the report still files, the picture just vanishes.
+ */
+const REPORT_FRAME_MAX_B64 = 90_000;
+
+interface CapturedFrame {
+  b64: string;
+  w: number;
+  h: number;
+}
+
+/**
+ * A still of what this viewer is actually seeing, taken from the player's own canvas.
+ *
+ * Only reachable from the watch page, and only for a viewer, which is the whole reason it can
+ * exist: the frame is already decrypted in this browser because this browser holds the key.
+ * Nothing here is a new capability — a viewer could always screenshot — it is a way to hand
+ * one frame to an operator without handing over the link that decrypts everything.
+ *
+ * Returns null rather than a black rectangle when there is nothing to capture. An operator
+ * looking at a queue must be able to read "no frame" as "we have nothing", not wonder whether
+ * the broadcast really was a dark room.
+ */
+function captureWatchFrame(): CapturedFrame | null {
+  const canvas = document.querySelector("moq-watch canvas") as HTMLCanvasElement | null;
+  if (!canvas || canvas.width < 64 || canvas.height < 64) return null;
+
+  try {
+    // Is the player showing anything? <moq-watch> paints black with fillRect before any frame
+    // arrives, and a viewer who opens Report during the passcode prompt or a reconnect would
+    // otherwise attach a picture of nothing. A tiny probe is enough: a real frame has spread.
+    const probe = document.createElement("canvas");
+    probe.width = 32;
+    probe.height = 18;
+    const pctx = probe.getContext("2d", { willReadFrequently: true });
+    if (!pctx) return null;
+    pctx.drawImage(canvas, 0, 0, 32, 18);
+    const px = pctx.getImageData(0, 0, 32, 18).data;
+    let lo = 255;
+    let hi = 0;
+    for (let i = 0; i < px.length; i += 4) {
+      const luma = (px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000;
+      if (luma < lo) lo = luma;
+      if (luma > hi) hi = luma;
+    }
+    // 8 levels out of 255. A genuinely near-black shot loses its frame, which is the right
+    // way to be wrong: nothing is claimed that the picture does not support.
+    if (hi - lo < 8) return null;
+
+    // Shrink, then encode, stepping quality down until it fits. Two passes over the edge
+    // length as well, because a 4K screen share at 512px can still exceed the budget at the
+    // lowest quality that is worth sending at all.
+    const out = document.createElement("canvas");
+    const octx = out.getContext("2d");
+    if (!octx) return null;
+    for (const edge of [REPORT_FRAME_LONG_EDGE, 384, 256]) {
+      const scale = Math.min(1, edge / Math.max(canvas.width, canvas.height));
+      out.width = Math.max(1, Math.round(canvas.width * scale));
+      out.height = Math.max(1, Math.round(canvas.height * scale));
+      octx.drawImage(canvas, 0, 0, out.width, out.height);
+      for (const q of [0.72, 0.6, 0.5, 0.38]) {
+        const url = out.toDataURL("image/jpeg", q);
+        const b64 = url.slice(url.indexOf(",") + 1);
+        if (b64.length <= REPORT_FRAME_MAX_B64) return { b64, w: out.width, h: out.height };
+      }
+    }
+    return null;
+  } catch {
+    // A tainted canvas would throw here. It should not be possible — these frames were decoded
+    // in this document from bytes we decrypted ourselves — but a report must not die on it.
+    return null;
+  }
+}
+
+/**
+ * What each category says to the person reporting.
+ *
+ * Written for somebody upset, on a phone, who wants this over with. Every label is a plain
+ * description of a thing you could be looking at — never a policy term, never a citation, and
+ * never the wording of the payment rule underneath it. The Worker holds the mapping from these
+ * to Stripe's prohibited-business bullets (see REPORT_GROUPS there); a reporter should not have
+ * to translate "designed for the purpose of sexual gratification" into what is on their screen.
+ *
+ * The four sexual-content labels are deliberately distinguishable at a glance, because the
+ * difference between them is the difference between a policy problem and a criminal one, and
+ * a misfiled report costs a broadcaster far more than a vague one costs us.
+ */
 const REPORT_LABELS: Record<string, string> = {
   "sexual-content-involving-minors": "Sexual content involving a minor",
+  "adult-sexual-content": "Nudity or sexual activity",
+  "adult-services": "Selling or advertising sexual services",
+  "adult-paid-performance": "A paid sexual performance or live sex chat",
+  "adult-ai-generated": "AI-generated sexual imagery",
   "violence-or-threats": "Violence or threats",
   "non-consensual-content": "Someone filmed without their consent",
   harassment: "Harassment",
   other: "Something else",
 };
+
+/**
+ * The dialog's fallback grouping, replaced by the Worker's if it answers in time.
+ *
+ * Present at all for the same reason the whole dialog is drawn before /api/report/config
+ * returns: someone reaching for this button is not in a mood to wait on a round trip, and a
+ * report filed against a slightly stale category list still reaches a person. Kept in the same
+ * order as the Worker's so the two agree on which option is first — which matters, because
+ * the first option is the one a misclick lands on.
+ */
+const REPORT_FALLBACK_GROUPS: ReportGroup[] = [
+  { label: "Most serious", ids: ["sexual-content-involving-minors"] },
+  {
+    label: "Sexual content",
+    ids: ["adult-sexual-content", "adult-services", "adult-paid-performance", "adult-ai-generated"],
+  },
+  {
+    label: "Other harm",
+    ids: ["violence-or-threats", "non-consensual-content", "harassment", "other"],
+  },
+];
+
+/**
+ * Draw the category list, grouped.
+ *
+ * Rebuilds from scratch rather than appending, because it runs twice — once immediately with
+ * the built-in list, once when the Worker answers — and appending the second time would leave
+ * a dropdown with every option in it twice. The reporter's current choice is carried across,
+ * so a slow network cannot silently reset a selection somebody already made.
+ */
+function paintReportCategories(select: HTMLSelectElement, groups: ReportGroup[]): void {
+  const chosen = select.value;
+  select.textContent = "";
+
+  // A PLACEHOLDER FIRST, and it is not decoration.
+  //
+  // A <select> selects its first option by default, and the first group here is the gravest
+  // category there is. Without this, a viewer who opens the dialog, types what happened and
+  // presses Send — never touching the dropdown, because it already showed something — files a
+  // report of child sexual abuse against a stranger. The two-click confirmation catches that,
+  // but a confirmation is the wrong place to be discovering a default nobody chose.
+  //
+  // `disabled` so it cannot be selected back into once a real answer is given, and so the
+  // browser skips it under keyboard navigation. `selected` because on a repaint the browser
+  // would otherwise fall through to the first enabled option, which is exactly the one this
+  // exists to keep out of the way.
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Choose from a category below";
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  select.appendChild(placeholder);
+
+  for (const group of groups) {
+    const ids = group.ids.filter((id) => REPORT_LABELS[id] || id);
+    if (!ids.length) continue;
+    const optgroup = document.createElement("optgroup");
+    optgroup.label = group.label;
+    for (const id of ids) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      // Unknown ids are shown by their raw value rather than dropped: a Worker that knows a
+      // category this bundle does not must still be reportable, and a visible slug is a far
+      // smaller problem than an option nobody can pick.
+      opt.textContent = REPORT_LABELS[id] ?? id;
+      optgroup.appendChild(opt);
+    }
+    select.appendChild(optgroup);
+  }
+  if (chosen && select.querySelector(`option[value="${CSS.escape(chosen)}"]`)) select.value = chosen;
+}
 
 /** Small "Report" affordance in the badge pill above the player. */
 function mountReportControl(streamId: string): void {
@@ -2493,7 +2674,10 @@ function mountReportControl(streamId: string): void {
     "font-size:0.75rem;cursor:pointer;border-left:1px solid #444;line-height:1;";
   btn.addEventListener("mouseenter", () => { btn.style.color = "#e5e5e5"; });
   btn.addEventListener("mouseleave", () => { btn.style.color = "#a3a3a3"; });
-  btn.addEventListener("click", () => openReportDialog(streamId));
+  // Captured HERE, on the click, not later when the dialog is submitted. The moment someone
+  // reaches for this button is the moment worth keeping; by the time they have picked a
+  // category and typed a sentence, whatever prompted them may be thirty seconds gone.
+  btn.addEventListener("click", () => openReportDialog(streamId, captureWatchFrame()));
   pill.appendChild(btn);
 }
 
@@ -2502,13 +2686,14 @@ function mountReportControl(streamId: string): void {
  * <moq-watch> element and the stream never comes back. (Learned the hard way on the passcode
  * prompt, which had exactly this bug.)
  */
-function openReportDialog(streamId: string): void {
+function openReportDialog(streamId: string, frame: CapturedFrame | null): void {
   // Rendered from local defaults FIRST, then reconciled with the server's config when it
   // arrives. Awaiting the fetch before drawing anything makes the button feel dead on a slow
   // connection — and someone reaching for a report button is not in a mood to wonder whether
   // they missed. A report filed against a guessed category list still reaches a person.
   const cfg: ReportConfig = {
     categories: Object.keys(REPORT_LABELS),
+    groups: REPORT_FALLBACK_GROUPS,
     note_max: 500,
     evidence_supported: false,
   };
@@ -2539,6 +2724,20 @@ function openReportDialog(streamId: string): void {
               placeholder="Please don't include personal details about yourself or anyone else."
               style="width:100%;padding:9px 10px;border-radius:4px;border:1px solid #3a3a3a;
                      background:#1a1a1a;color:#e5e5e5;font:inherit;resize:vertical;"></textarea>
+    <div id="report-frame-row" style="margin:16px 0 0;display:none;">
+      <label style="display:flex;gap:9px;align-items:flex-start;font-size:0.85rem;color:#a3a3a3;
+                    line-height:1.45;cursor:pointer;">
+        <input type="checkbox" id="report-frame-send" checked style="margin-top:3px;flex:none;">
+        <span>
+          <strong style="color:#d4d4d4;font-weight:600;">Send this picture with the report.</strong>
+          It is what your player was showing the moment you pressed Report — one frame, not a
+          recording. Without it an operator has only your description to act on.
+        </span>
+      </label>
+      <img id="report-frame-img" alt="The single frame that will be sent with this report"
+           style="display:block;width:100%;max-width:19em;margin:10px 0 0 27px;border-radius:4px;
+                  border:1px solid #2a2a2a;background:#000;">
+    </div>
     <div id="report-evidence-row" style="margin:14px 0 0;display:none;">
       <label style="display:flex;gap:9px;align-items:flex-start;font-size:0.85rem;color:#a3a3a3;
                     line-height:1.45;cursor:pointer;">
@@ -2563,11 +2762,20 @@ function openReportDialog(streamId: string): void {
   // Options built through the DOM rather than interpolated into innerHTML: the category list
   // arrives over the network, and this page is holding a content key.
   const select = card.querySelector("#report-category") as HTMLSelectElement;
-  for (const id of cfg.categories) {
-    const opt = document.createElement("option");
-    opt.value = id;
-    opt.textContent = REPORT_LABELS[id] ?? id;
-    select.appendChild(opt);
+  paintReportCategories(select, cfg.groups ?? REPORT_FALLBACK_GROUPS);
+
+  // Shown, never sent silently. The frame is broadcast content leaving the encrypted side of
+  // the design, and the reporter is the only person in a position to consent to that — so they
+  // see exactly what will go, and one click removes it. `src` is assigned as a property rather
+  // than interpolated into the innerHTML above: no reason to put a 90 KB data URL through an
+  // HTML parser on a page holding a content key.
+  if (frame) {
+    const row = card.querySelector("#report-frame-row") as HTMLElement | null;
+    const img = card.querySelector("#report-frame-img") as HTMLImageElement | null;
+    if (row && img) {
+      img.src = `data:image/jpeg;base64,${frame.b64}`;
+      row.style.display = "block";
+    }
   }
 
   // There is no passcode variant to account for any more: the link carries `#k=` and that is
@@ -2593,14 +2801,15 @@ function openReportDialog(streamId: string): void {
       if (live.note_max) {
         (card.querySelector("#report-note") as HTMLTextAreaElement | null)?.setAttribute("maxlength", String(live.note_max));
       }
-      const known = new Set(cfg.categories);
-      for (const id of live.categories ?? []) {
-        if (known.has(id)) continue;
-        const opt = document.createElement("option");
-        opt.value = id;
-        opt.textContent = REPORT_LABELS[id] ?? id;
-        select.appendChild(opt);
-      }
+      // Repaint from the Worker's grouping when it sends one. A Worker too old to know about
+      // groups still sends the flat `categories`, so anything in that list which no group
+      // claims is swept into a trailing bucket rather than lost — the alternative is a
+      // category the server accepts and the dialog cannot offer.
+      const groups = (live.groups ?? []).map((g) => ({ label: g.label, ids: [...g.ids] }));
+      const claimed = new Set(groups.flatMap((g) => g.ids));
+      const orphans = (live.categories ?? []).filter((id) => !claimed.has(id));
+      if (orphans.length) groups.push({ label: "Other harm", ids: orphans });
+      if (groups.length) paintReportCategories(select, groups);
       if (live.evidence_supported) {
         const row = card.querySelector("#report-evidence-row") as HTMLElement | null;
         if (row) row.style.display = "block";
@@ -2614,12 +2823,77 @@ function openReportDialog(streamId: string): void {
   card.querySelector("#report-cancel")?.addEventListener("click", close);
   overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
 
+  // The gravest category, confirmed once before it can be filed.
+  //
+  // Added after a real misfire: a report went in under this category, with a frame attached,
+  // by accident — the select was one click off and there was nothing between that and a filed
+  // accusation. This category is different in kind from the others. It is the one an operator
+  // is obliged to act on fastest, and the one that is worst to be on the wrong end of.
+  //
+  // Deliberately a SECOND CLICK rather than a checkbox or a browser confirm(): it costs one
+  // click in the rare case and nothing at all in the common one, and it makes the reporter
+  // read the category back rather than acknowledge a dialog they did not read.
+  const SEVERE = "sexual-content-involving-minors";
+  let severeConfirmed = false;
+
   card.querySelector("#report-send")?.addEventListener("click", async () => {
     const sendBtn = card.querySelector("#report-send") as HTMLButtonElement;
+
+    // Nothing chosen yet. Refuse, and say where to look rather than what went wrong — the
+    // placeholder is three lines up the dialog and pointing at it beats naming an error.
+    //
+    // Not silently defaulting to "other": a report filed under a category nobody picked is a
+    // report an operator has to guess at, and guessing is the thing this whole list exists to
+    // stop. Note the Worker also maps an unknown category to "other" rather than rejecting,
+    // so a client that skips this guard still gets the report through — it just arrives
+    // vaguer, which is the right way for the two halves to disagree.
+    if (!select.value) {
+      let hint = card.querySelector("#report-need-category") as HTMLElement | null;
+      if (!hint) {
+        hint = document.createElement("div");
+        hint.id = "report-need-category";
+        hint.style.cssText = "margin:10px 0 0;color:#e8b0b0;font-size:0.85rem;";
+        hint.textContent = "Please choose a category above.";
+        select.after(hint);
+        select.addEventListener("change", () => hint?.remove(), { once: true });
+      }
+      select.focus();
+      return;
+    }
+
+    if (select.value === SEVERE && !severeConfirmed) {
+      severeConfirmed = true;
+      sendBtn.textContent = "Yes — file this report";
+      sendBtn.style.background = "#e06060";
+      sendBtn.style.color = "#ffffff";
+      const warn = document.createElement("div");
+      warn.id = "report-severe-warn";
+      warn.style.cssText =
+        "margin:14px 0 0;padding:10px 12px;border-radius:4px;background:#2a1414;" +
+        "border:1px solid #5a2626;color:#e8b0b0;font-size:0.85rem;line-height:1.45;";
+      warn.textContent =
+        "You are reporting sexual content involving a minor. This is the most serious report " +
+        "there is and an operator will act on it immediately. If you picked it by mistake, " +
+        "change the category above — the button will go back to normal.";
+      card.querySelector("#report-frame-row")?.before(warn);
+      // Choosing something else takes the confirmation back down. A warning that outlives the
+      // reason for it is one people learn to click past.
+      select.addEventListener("change", () => {
+        severeConfirmed = false;
+        card.querySelector("#report-severe-warn")?.remove();
+        sendBtn.textContent = "Send report";
+        sendBtn.style.background = "#33ddc0";
+        sendBtn.style.color = "#0a0a0a";
+      }, { once: true });
+      return;
+    }
+
     sendBtn.disabled = true;
     sendBtn.textContent = "Sending…";
 
     const shareEvidence = (card.querySelector("#report-evidence") as HTMLInputElement | null)?.checked;
+    const sendFrame =
+      !!frame && (card.querySelector("#report-frame-send") as HTMLInputElement | null)?.checked !== false;
     try {
       await fetch("/api/report", {
         method: "POST",
@@ -2632,6 +2906,11 @@ function openReportDialog(streamId: string): void {
           // branch, so the only path by which a key can leave a viewer's browser is a person
           // deliberately ticking a box.
           ...(shareEvidence ? { evidence_url: location.href } : {}),
+          // Bare base64. The server refuses anything whose bytes are not a JPEG and stamps
+          // the type itself — a client that got to name its own MIME type could put a script
+          // in an operator's browser, and this queue is read on the page holding the admin
+          // password.
+          ...(sendFrame && frame ? { frame: frame.b64 } : {}),
         }),
       });
     } catch {
@@ -2642,8 +2921,8 @@ function openReportDialog(streamId: string): void {
     card.innerHTML = `
       <h2 style="margin:0 0 10px;font-size:1.2rem;">Thank you</h2>
       <p style="margin:0 0 18px;color:#a3a3a3;line-height:1.5;font-size:0.9rem;">
-        A person will read this. There is no automatic action — reports are not a vote, and a
-        stream is never stopped by a count.
+        A person will read this${sendFrame ? ", and look at the frame you sent" : ""}. There is
+        no automatic action — reports are not a vote, and a stream is never stopped by a count.
       </p>
       <div style="display:flex;justify-content:flex-end;">
         <button id="report-done"

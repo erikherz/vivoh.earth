@@ -10,8 +10,9 @@
   clicking buttons:
 
     1. Nothing here is verified. We cannot decrypt a stream. Every row is an assertion by an
-       anonymous person who held a share link, and unless they chose to send their own link
-       there is no way to check it.
+       anonymous person who held a share link. A frame, where one was attached, is the only
+       thing on this page that shows anything — and it shows one instant that the reporter's
+       browser chose, which is not the same as evidence of what a broadcast was.
     2. Nothing acts automatically. Reports do not accumulate into a kill. A person decides,
        every time, because "enough reports" would be a weapon aimed at exactly the
        broadcasters this app exists to protect.
@@ -65,6 +66,28 @@
   .items li { padding: 8px 0; border-top: 1px solid #1f1f1f; font-size: 0.9rem; }
   .note { color: #d4d4d4; white-space: pre-wrap; word-break: break-word; }
   .actions { display: flex; gap: 8px; margin: 14px 0 0; flex-wrap: wrap; }
+  /* A reported frame. Small by default and never auto-enlarged: this queue can contain the
+     worst thing a person has seen today, and an operator scrolling it should choose when to
+     look closely rather than have it filled in for them. */
+  .frame { display: block; margin: 8px 0 0; width: 100%; max-width: 15em; border-radius: 4px;
+           border: 1px solid #2a2a2a; background: #000; cursor: zoom-in; }
+  .frame-note { color: #737373; font-size: 0.8rem; margin: 6px 0 0; }
+  /* An open statutory duty. Loud on purpose and the only red block on the page: it is the one
+     thing here with a clock running on it, and the operator is the only clock-watcher. */
+  .duty { margin: 8px 0 0; padding: 10px 12px; border-radius: 4px; background: #2a1414;
+          border: 1px solid #5a2626; color: #e8b0b0; font-size: 0.85rem; line-height: 1.45; }
+  .duty .linkbtn { color: #e8b0b0; padding-top: 8px; }
+  .duty .linkbtn:hover { color: #ffffff; }
+  /* The same fact once it is discharged. Quiet — a filed report needs recording, not chasing. */
+  .filed { margin: 8px 0 0; color: #7a9a7a; font-size: 0.8rem; }
+  .linkbtn { background: none; border: 0; padding: 4px 0 0; color: #8a8a8a; font-size: 0.78rem;
+             text-decoration: underline; cursor: pointer; display: block; }
+  .linkbtn:hover { color: #e09090; }
+  .linkbtn:disabled { opacity: 0.45; cursor: default; }
+  #lightbox { position: fixed; inset: 0; z-index: 90; display: none; align-items: center;
+              justify-content: center; background: rgba(0,0,0,0.92); padding: 24px;
+              cursor: zoom-out; }
+  #lightbox img { max-width: 100%; max-height: 100%; border-radius: 4px; }
   .banner { background: #131313; border: 1px solid #262626; border-left: 2px solid #33ddc0;
             border-radius: 6px; padding: 12px 16px; margin: 0 0 22px; font-size: 0.875rem;
             color: #a3a3a3; }
@@ -105,6 +128,9 @@
     We cannot decrypt a stream, so every report is an anonymous claim by someone who held a
     share link. A count is not evidence — a single person with a grudge and an invitation can
     file repeatedly. Kill because you judged it right, not because the number grew.
+    A frame is the one thing here that shows rather than asserts, and it is still only what a
+    reporter's browser handed us for a single instant: it can be pointed at the wrong moment,
+    and it cannot tell you what came before or after.
   </div>
 
   <h2>Open <span id="open-count" class="muted"></span></h2>
@@ -117,6 +143,8 @@
   <div id="done-list"></div>
 </main>
 
+<div id="lightbox"><img alt="Reported frame, enlarged"></div>
+
 <script>
 (function () {
   var KEY = "vivoh.adminpw";
@@ -127,11 +155,32 @@
   var SEVERE = "sexual-content-involving-minors";
   var LABELS = {
     "sexual-content-involving-minors": "Sexual content involving a minor",
+    "adult-sexual-content": "Nudity or sexual activity",
+    "adult-services": "Selling or advertising sexual services",
+    "adult-paid-performance": "Paid sexual performance or live sex chat",
+    "adult-ai-generated": "AI-generated sexual imagery",
     "violence-or-threats": "Violence or threats",
     "non-consensual-content": "Filmed without consent",
     "harassment": "Harassment",
     "other": "Something else"
   };
+
+  // ── Preservation ─────────────────────────────────────────────────────────────────────────
+  // A report under a hold cannot have its frame removed and cannot be deleted, because the
+  // frame is evidence under 18 U.S.C. 2258A(h) — one year since the REPORT Act amended it in
+  // May 2024. The Worker enforces this in SQL; the console's job is to make sure an operator
+  // is never surprised by it, and never offered a button that is going to refuse.
+  //
+  // SQLite writes and compares datetimes as "YYYY-MM-DD HH:MM:SS" in UTC, and the Worker
+  // stores preserve_until in the same shape, so a string comparison here is a chronological
+  // one. Building the same shape from Date rather than parsing theirs avoids the trap where
+  // a browser reads a space-separated datetime as local time.
+  function nowSql() {
+    return new Date().toISOString().replace("T", " ").slice(0, 19);
+  }
+  function held(r) {
+    return !!r.preserve_until && r.preserve_until > nowSql();
+  }
 
   var el = function (id) { return document.getElementById(id); };
   var esc = function (s) {
@@ -158,7 +207,50 @@
     });
   }
 
+  // ── Reported frames ────────────────────────────────────────────────────────────────────
+  // The image endpoint needs the admin bearer, and an <img src> cannot carry a header — so
+  // each frame is fetched and turned into an object URL. That is a feature rather than a
+  // workaround: it means these bytes never sit in a URL that could be pasted, bookmarked,
+  // logged by an intermediary or land in browser history.
+  var frameUrls = [];
+  function loadFrame(img, id) {
+    fetch("/api/admin/reports/frame?id=" + encodeURIComponent(id), {
+      headers: { Authorization: "Bearer " + pw }
+    }).then(function (r) {
+      if (!r.ok) throw new Error(String(r.status));
+      return r.blob();
+    }).then(function (blob) {
+      // The server sends image/jpeg and this only ever renders as an <img>. The reporter never
+      // got to name the type: the bytes were checked for a JPEG marker before they were
+      // stored, precisely so this page cannot be turned into a delivery vector for markup.
+      var u = URL.createObjectURL(blob);
+      frameUrls.push(u);
+      img.src = u;
+      img.style.display = "block";
+      img.onclick = function () {
+        var lb = el("lightbox");
+        lb.querySelector("img").src = u;
+        lb.style.display = "flex";
+      };
+    }).catch(function () {
+      // 404 means retention already expired it — the report outlives its picture on purpose.
+      var note = document.createElement("div");
+      note.className = "frame-note";
+      note.textContent = "The frame for this report is no longer held.";
+      if (img.parentNode) img.parentNode.replaceChild(note, img);
+    });
+  }
+
+  // Object URLs pin their blob in memory for the life of the document, and this page reloads
+  // its list every 30 seconds. Without this, an operator leaving the tab open accumulates
+  // every frame they have ever been shown.
+  function releaseFrames() {
+    frameUrls.forEach(function (u) { URL.revokeObjectURL(u); });
+    frameUrls = [];
+  }
+
   function signOut(msg) {
+    releaseFrames();
     sessionStorage.removeItem(KEY);
     pw = "";
     el("app").style.display = "none";
@@ -203,9 +295,111 @@
             '<span class="muted">' + esc(when(r.created_at)) + "</span> · " +
             esc(LABELS[r.category] || r.category) +
             (r.note ? '<div class="note">' + esc(r.note) + "</div>" : '<div class="muted">no description given</div>') +
+            // The duty banner, shown before the frame rather than after it. An operator who
+            // scrolls past the picture and stops has still read the obligation.
+            (r.ncmec_pending
+              ? '<div class="duty">' +
+                  "<strong>Not yet reported to NCMEC.</strong> This report gave us actual " +
+                  "knowledge under 18 U.S.C. 2258A. File with the CyberTipline as soon as " +
+                  "reasonably possible, then record it here so the preservation window runs " +
+                  "from the right date." +
+                  '<div><button class="linkbtn" data-ncmec="' + esc(r.id) + '">' +
+                  "I have filed this with NCMEC</button>" +
+                  // The way out for a misfiled report. Offered here, next to the duty, rather
+                  // than hidden: the operator deciding whether this is real is the same person
+                  // who needs the option when it is not, and burying it would mean reaching
+                  // for delete instead — which the hold refuses, leaving them stuck.
+                  '<button class="linkbtn" data-release="' + esc(r.id) + '">' +
+                  "This is not what it was reported as — release the hold</button></div>" +
+                "</div>"
+              : r.ncmec_reported_at
+                ? '<div class="filed">Reported to NCMEC ' + esc(when(r.ncmec_reported_at)) +
+                  ". Held until " + esc(String(r.preserve_until || "").slice(0, 10)) + ".</div>"
+                : r.hold_released_at
+                  // Kept visible rather than reverting to a plain row. A released hold is a
+                  // judgement somebody made about the most serious category there is, and the
+                  // queue should show that it was made and by what reasoning.
+                  ? '<div class="frame-note">Hold released ' + esc(when(r.hold_released_at)) +
+                    " — reviewed and found not to be CSAM: " + esc(r.hold_release_reason || "") + "</div>"
+                  : "") +
+            // Rendered as an empty <img> with the id in a data attribute; the bytes arrive
+            // separately over an authenticated fetch. `has_frame` comes back as SQLite's 1/0.
+            (r.has_frame
+              ? '<img class="frame" data-frame-id="' + esc(r.id) + '" alt="Frame captured when this report was filed" style="display:none;">' +
+                (held(r)
+                  // No button at all rather than a button that errors. The server refuses
+                  // either way, but offering a control that cannot work invites an operator
+                  // to keep pressing it and then to go looking for another route.
+                  ? '<div class="frame-note">Held as evidence until ' +
+                    esc(String(r.preserve_until).slice(0, 10)) + " — cannot be removed.</div>"
+                  : '<button class="linkbtn" data-drop-frame="' + esc(r.id) + '">Remove this frame</button>')
+              : '<div class="frame-note">No frame — this report is a description alone.</div>') +
             "</li>";
         }).join("") +
       "</ul>";
+
+    d.querySelectorAll("img.frame").forEach(function (img) {
+      loadFrame(img, img.getAttribute("data-frame-id"));
+    });
+
+    // Forget the picture, keep the complaint. The common case by a distance: retention does
+    // this on a 30-day clock and an operator should not have to wait, or open a SQL console,
+    // to stop holding a frame that should not be held.
+    d.querySelectorAll("[data-drop-frame]").forEach(function (btn) {
+      btn.onclick = function () {
+        if (!confirm("Remove this frame?\n\nThe report itself stays in the queue — only the picture goes.")) return;
+        btn.disabled = true;
+        api("/api/admin/reports/drop-frame", {
+          method: "POST",
+          body: JSON.stringify({ id: Number(btn.getAttribute("data-drop-frame")) })
+        }).then(load).catch(function () { btn.disabled = false; });
+      };
+    });
+
+    // Record a CyberTipline submission. This writes down a date; it does not file anything.
+    //
+    // The confirm text says so in as many words, because the failure that matters here is an
+    // operator believing the report went somewhere. A row marked filed that was never filed
+    // is worse than an unmarked one: the queue stops asking, and the duty stays open with
+    // nothing left to prompt anybody about it.
+    d.querySelectorAll("[data-ncmec]").forEach(function (btn) {
+      btn.onclick = function () {
+        if (!confirm(
+          "Record that you have filed this report with the NCMEC CyberTipline?\n\n" +
+          "This only writes down the date. It does NOT file anything — Vivoh.Earth has no " +
+          "connection to NCMEC and cannot submit on your behalf.\n\n" +
+          "Only confirm if you have actually submitted it."
+        )) return;
+        btn.disabled = true;
+        api("/api/admin/reports/ncmec", {
+          method: "POST",
+          body: JSON.stringify({ id: Number(btn.getAttribute("data-ncmec")) })
+        }).then(load).catch(function () { btn.disabled = false; });
+      };
+    });
+
+    // Release a hold on a misfiled report. prompt() rather than confirm() because the reason
+    // is stored and the server rejects a short one: this should cost a sentence of thought,
+    // which is the difference between a judgement and a reflex.
+    d.querySelectorAll("[data-release]").forEach(function (btn) {
+      btn.onclick = function () {
+        var reason = prompt(
+          "Release the evidence hold on this report?\n\n" +
+          "Only do this if you have looked and it is NOT child sexual abuse material. The " +
+          "report stays in the queue and the frame expires on the normal 30-day clock.\n\n" +
+          "Say briefly what it actually was — this is recorded:"
+        );
+        if (reason === null) return;
+        btn.disabled = true;
+        api("/api/admin/reports/release-hold", {
+          method: "POST",
+          body: JSON.stringify({ id: Number(btn.getAttribute("data-release")), reason: reason })
+        }).then(function (res) {
+          if (res && res.error) { alert(res.detail || res.error); btn.disabled = false; return; }
+          load();
+        }).catch(function () { btn.disabled = false; });
+      };
+    });
 
     if (!done) {
       var actions = document.createElement("div");
@@ -241,6 +435,42 @@
         actions.appendChild(unkill);
       }
 
+      // The heavier lever, and deliberately last. Most of the time you want the picture gone,
+      // not the record — deleting the row loses the fact that anyone ever complained, which is
+      // exactly what you want back when a pattern shows up later.
+      var del = document.createElement("button");
+      del.className = "danger";
+      del.textContent = "Delete these reports";
+      del.title = "Removes the reports themselves, frames included";
+      del.onclick = function () {
+        if (!confirm(
+          "Delete every report for " + g.stream_id + "?\n\n" +
+          "This removes the reports themselves, not just their frames — you lose the record " +
+          "that anyone complained.\n\n" +
+          "It is also NOT the same as unrecoverable: Cloudflare keeps about 30 days of D1 " +
+          "history and a deleted row stays recoverable from it by anyone with account access. " +
+          "There is no way to scrub one row from that history; it ages out.\n\n" +
+          "Reports held as evidence are skipped and will stay in the queue."
+        )) return;
+        del.disabled = true;
+        api("/api/admin/reports/delete", { method: "POST", body: JSON.stringify({ stream_id: g.stream_id }) })
+          .then(function (res) {
+            // Say what was kept back. The server skips held rows rather than failing the
+            // batch, which is the right behaviour and also the kind that goes unnoticed: an
+            // operator who asked for "all of them" and got most of them needs telling, or
+            // they will read the leftover rows as a bug and go looking for another way to
+            // remove them.
+            if (res && res.preserved) {
+              alert(
+                res.preserved + (res.preserved === 1 ? " report was" : " reports were") +
+                " kept: held as evidence under a preservation window that has not expired."
+              );
+            }
+            load();
+          })
+          .catch(function () { del.disabled = false; });
+      };
+
       var ack = document.createElement("button");
       ack.textContent = "Mark handled";
       ack.onclick = function () {
@@ -249,6 +479,7 @@
           .then(load).catch(function () { ack.disabled = false; });
       };
       actions.appendChild(ack);
+      actions.appendChild(del);
 
       d.appendChild(actions);
     }
@@ -257,6 +488,8 @@
 
   function load() {
     return Promise.all([api("/api/admin/reports"), api("/api/admin/killed")]).then(function (res) {
+      // The cards about to be discarded hold every object URL currently alive.
+      releaseFrames();
       var reports = res[0].reports || [];
       var killed = res[1].killed || [];
       var killedSet = {};
@@ -334,8 +567,21 @@
   el("refresh").onclick = function () { load(); };
   el("signout").onclick = function () { signOut(); };
 
+  el("lightbox").onclick = function () {
+    this.style.display = "none";
+    this.querySelector("img").removeAttribute("src");
+  };
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") el("lightbox").onclick.call(el("lightbox"));
+  });
+
   // A stream you can still stop is a live one, so the list going stale has a real cost.
-  setInterval(function () { if (pw) load().catch(function () {}); }, 30000);
+  // Suspended while a frame is open: refreshing revokes the object URL the lightbox is
+  // showing, so an auto-reload would blank the picture out from under whoever is studying it
+  // — at the exact moment they are deciding whether to end someone's broadcast.
+  setInterval(function () {
+    if (pw && el("lightbox").style.display !== "flex") load().catch(function () {});
+  }, 30000);
 
   if (pw) enter(pw).catch(function () { signOut(); });
 })();

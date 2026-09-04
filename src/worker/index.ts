@@ -94,6 +94,11 @@ export interface Env {
   // reports are still recorded, but the evidence-link option is hidden from viewers because
   // there would be nowhere to send it. wrangler secret.
   REPORT_WEBHOOK?: string;
+  // How many days a reported still frame survives before the cron nulls it. The report row
+  // outlives the picture on purpose: the record that a complaint was made is administrative,
+  // the frame is someone's living room. Default 30. Set to 0 to keep frames indefinitely,
+  // which is a decision worth making deliberately rather than by leaving a variable unset.
+  REPORT_FRAME_RETENTION_DAYS?: string;
   // TinyMoQ fleet endpoint: the base URL the Worker hits to get a relay for a broadcast.
   // Switching endpoints (or paths, see FLEET_MODE) is a config change, not a code change —
   // set it in wrangler.jsonc `vars`. Optional; falls back to the historical box when unset.
@@ -241,6 +246,8 @@ export default {
     if (closed || purged) console.log(`[reaper] closed=${closed} purged=${purged}`);
     const broadcasts = await reapBroadcasts(env);
     if (broadcasts) console.log(`[reaper] broadcasts closed=${broadcasts}`);
+    const frames = await expireReportFrames(env);
+    if (frames) console.log(`[reaper] report frames expired=${frames}`);
   },
 };
 
@@ -359,9 +366,21 @@ async function handleApiRoutes(
     // we will not put a content key in the database to make a checkbox work.
     if (request.method === "GET" && url.pathname === "/api/report/config") {
       return Response.json({
+        // Flat list kept for older bundles still in a phone's cache, which read `categories`
+        // and know nothing about groups. Removing it would empty their dropdown.
         categories: [...REPORT_CATEGORIES],
+        // The same set with the headings the dialog draws. Sent as structure rather than
+        // guessed at by the client so that adding a category is a Worker deploy, not a
+        // Worker deploy plus a bundle everyone has to re-download before it appears.
+        groups: REPORT_GROUPS.map((g) => ({ label: g.label, ids: [...g.ids] })),
         note_max: REPORT_NOTE_MAX,
         evidence_supported: !!env.REPORT_WEBHOOK,
+        // Unlike the evidence link, a frame needs no webhook: it goes in the row. The client
+        // reads this to size its compression, so raising the ceiling here widens what phones
+        // send without shipping a new bundle.
+        frame_max_b64: REPORT_FRAME_MAX_B64,
+        frame_retention_days:
+          parseInt(env.REPORT_FRAME_RETENTION_DAYS ?? "", 10) || REPORT_FRAME_RETENTION_DAYS_DEFAULT,
       });
     }
 
@@ -1743,6 +1762,45 @@ async function reapBroadcasts(env: Env): Promise<number> {
   return res.meta?.changes ?? 0;
 }
 
+/**
+ * Forget the picture, keep the complaint.
+ *
+ * Retention here is ON by default, which is the opposite of STATS_RETENTION_DAYS above, and
+ * for a reason worth stating: a session row is a timestamp, a reported frame is a photograph
+ * of someone's room taken from a broadcast we are otherwise unable to see. Defaults should
+ * favour whichever way round is harder to regret, and an operator who wants to keep frames
+ * indefinitely can say so with REPORT_FRAME_RETENTION_DAYS=0.
+ *
+ * The row survives. Nulling the column leaves the report, its category and its timestamp in
+ * the queue, so the administrative record of a complaint outlives its contents — which is
+ * also what makes this safe to run on a short clock.
+ *
+ * PRESERVED ROWS ARE EXEMPT. A report carrying a `preserve_until` in the future is evidence
+ * under a statutory hold and this cron must not touch it. Before migration 0017 it did: a
+ * CSAM report and its frame were treated exactly like a complaint about somebody swearing,
+ * and were deleted on day 30 with no human involved and nothing recorded. That is the failure
+ * mode this clause exists to prevent, and it is checked in SQL rather than in TypeScript so
+ * that no future caller can reach the same UPDATE by another route and skip it.
+ */
+async function expireReportFrames(env: Env): Promise<number> {
+  const raw = env.REPORT_FRAME_RETENTION_DAYS ?? "";
+  // An explicit 0 means "never expire". An unset or unparseable value means the default, not
+  // "keep forever": a typo in a dashboard should not quietly turn retention off.
+  const parsed = parseInt(raw, 10);
+  const days = raw.trim() === "0" ? 0 : (Number.isFinite(parsed) && parsed > 0 ? parsed : REPORT_FRAME_RETENTION_DAYS_DEFAULT);
+  if (days === 0) return 0;
+
+  const res = await env.DB
+    .prepare(
+      `UPDATE reports SET frame = NULL
+        WHERE frame IS NOT NULL
+          AND created_at < datetime('now', '-${days} days')
+          AND ${REPORT_NOT_PRESERVED}`
+    )
+    .run();
+  return res.meta?.changes ?? 0;
+}
+
 async function handleStatsRoutes(
   request: Request,
   env: Env,
@@ -2294,18 +2352,136 @@ async function sha256b64url(s: string): Promise<string> {
 // cannot decrypt a stream, every abuse signal must come from someone who holds a key, which
 // means a viewer. Without this endpoint we learn about a problem only from outside complaints.
 
-const REPORT_CATEGORIES = new Set([
-  "sexual-content-involving-minors",
-  "violence-or-threats",
-  "non-consensual-content",
-  "harassment",
-  "other",
-]);
+/**
+ * What a viewer can report, grouped the way the dialog presents it.
+ *
+ * TWO KINDS OF THING LIVE IN THIS LIST and they are not equivalent. One category carries a
+ * federal reporting duty and a preservation clock — see REPORT_CSAM_CATEGORY below and
+ * migration 0017. The rest are policy: we decide what to do about them, and on what timescale.
+ *
+ * The four `adult-*` categories are the OBSERVABLE FORM of Stripe's Prohibited Businesses
+ * bullets. Stripe writes that list for merchant underwriting, so it names business types —
+ * "adult video stores", "gentleman's clubs" — which nobody holding a share link can report,
+ * because they are looking at a broadcast rather than at a company. The mapping lives here, in
+ * one place, rather than pasted into anything a user reads: Stripe revises that list without
+ * notice, and a copy of it in our UI would be a stale statement of somebody else's rule.
+ *
+ * Mapping, against the list as read on 3 Sep 2026:
+ *
+ *   adult-sexual-content   <- "Pornography and other mature audience content (including
+ *                              literature, imagery, and other media) designed for the purpose
+ *                              of sexual gratification"
+ *   adult-services         <- "Adult services, including prostitution, escorts, sexual
+ *                              massages, fetish services, mail-order brides"
+ *   adult-paid-performance <- the rest of that same bullet — "pay-per-view ... adult live-chat
+ *                              features" — plus "Gentleman's clubs, topless bars, and strip
+ *                              clubs", all of which reach a viewer as a paid performance
+ *   adult-ai-generated     <- "Any artificial-intelligence generated content that meets the
+ *                              above criteria"
+ *
+ * "Adult video stores" is deliberately unrepresented: it has no live-broadcast form, and a
+ * stored catalogue is not a thing this product can host.
+ *
+ * VALUES ARE PERMANENT. `sexual-content-involving-minors` keeps its original spelling even
+ * though the grouping around it changed, because rows written before this list existed still
+ * carry it — and a rename would orphan precisely the records that must not be orphaned.
+ */
+const REPORT_GROUPS: ReadonlyArray<{ label: string; ids: readonly string[] }> = [
+  { label: "Most serious", ids: ["sexual-content-involving-minors"] },
+  {
+    label: "Sexual content",
+    ids: ["adult-sexual-content", "adult-services", "adult-paid-performance", "adult-ai-generated"],
+  },
+  {
+    label: "Other harm",
+    ids: ["violence-or-threats", "non-consensual-content", "harassment", "other"],
+  },
+];
+
+const REPORT_CATEGORIES = new Set(REPORT_GROUPS.flatMap((g) => [...g.ids]));
+
+/**
+ * The one category that differs in kind rather than in degree.
+ *
+ * A report filed under this heading gives us actual knowledge for the purposes of 18 U.S.C.
+ * 2258A — which is the whole reason a report path exists on an encrypted platform. We do not
+ * monitor, and 2258A(f) says plainly that no provider is required to, so a viewer pressing
+ * this button is the only way knowledge ever arrives here. From that moment the frame attached
+ * to it is evidence, and nothing automated may throw it away.
+ */
+const REPORT_CSAM_CATEGORY = "sexual-content-involving-minors";
+
+/**
+ * How long a preserved report is held, in days.
+ *
+ * 18 U.S.C. 2258A(h) required 90 days until the REPORT Act (signed 7 May 2024) struck that and
+ * inserted "1 year". 366 rather than 365 so a leap year cannot leave us a day short — it costs
+ * nothing and removes a class of argument nobody wants to have.
+ */
+const REPORT_PRESERVE_DAYS = 366;
+
+/**
+ * SQL predicate: this row is NOT under a preservation hold.
+ *
+ * ONE shared string rather than three hand-written copies, because it has to guard the three
+ * separate ways a frame can be destroyed — the retention cron, the operator's "remove this
+ * frame" button, and the heavier "delete this report" lever. Three independently-maintained
+ * WHERE clauses would drift, and the way anyone would find out which one had drifted is by
+ * discovering that evidence was gone.
+ *
+ * Referenced by expireReportFrames() above, which is defined earlier in the file. That is safe
+ * because it is read inside a function body at request time, long after module init.
+ *
+ * The stored value and datetime('now') share SQLite's "YYYY-MM-DD HH:MM:SS" shape, so the
+ * string comparison is also the chronological one.
+ */
+const REPORT_NOT_PRESERVED = "(preserve_until IS NULL OR preserve_until <= datetime('now'))";
+
 const REPORT_NOTE_MAX = 500;
 /** One hostile invitee must not be able to manufacture a pile of reports about one stream. */
 const REPORT_PER_STREAM_PER_HOUR = 10;
 /** Backstop against someone filling the table with reports about ids that never existed. */
 const REPORT_GLOBAL_PER_HOUR = 300;
+
+/**
+ * Ceiling on an attached frame, in base64 characters (~3/4 of that in bytes).
+ *
+ * Sized against the global cap rather than against what looks like a reasonable picture:
+ * 300 reports an hour at 96 KB each is about 28 MB an hour of database growth in the worst
+ * case, which retention then claws back. The client aims well under this — 512px on the long
+ * edge with a quality ladder — so hitting the ceiling means something is wrong, not that
+ * someone had a detailed frame.
+ */
+const REPORT_FRAME_MAX_B64 = 96_000;
+
+/** How long a frame outlives the report it came with, when nothing overrides it. */
+const REPORT_FRAME_RETENTION_DAYS_DEFAULT = 30;
+
+/**
+ * Accept a viewer-attached frame, or nothing at all.
+ *
+ * Strict on purpose, and strict about the RIGHT thing. The danger here is not a malformed
+ * image — it is that this value ends up in an `<img src>` on the one page that holds the
+ * admin password. So the client is never allowed to say what the bytes are: it sends bare
+ * base64, we check the decoded prefix is a real JPEG SOI marker, and the console hardcodes
+ * image/jpeg on the way out. A `data:image/svg+xml` — which executes script — cannot survive
+ * that, because it does not start with FF D8 FF whatever its label claims.
+ *
+ * Returns null for anything it does not like. A bad frame silently drops the frame and keeps
+ * the report: someone reporting child abuse must not have their report rejected because their
+ * browser produced an image we could not parse.
+ */
+function sanitiseReportFrame(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  // Tolerate a data URL prefix from a caller who built one by hand, but keep only the payload.
+  const b64 = value.startsWith("data:") ? value.slice(value.indexOf(",") + 1) : value;
+  if (b64.length < 64 || b64.length > REPORT_FRAME_MAX_B64) return null;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return null;
+  // base64 of FF D8 FF — the JPEG start-of-image marker. Every JPEG begins "/9j/"; no SVG,
+  // HTML, PNG or script payload does.
+  if (!b64.startsWith("/9j/")) return null;
+  return b64;
+}
 
 async function handleReport(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const body = (await request.json().catch(() => null)) as {
@@ -2313,6 +2489,7 @@ async function handleReport(request: Request, env: Env, ctx: ExecutionContext): 
     category?: string;
     note?: string;
     evidence_url?: string;
+    frame?: string;
   } | null;
 
   const streamId = body?.stream_id?.trim();
@@ -2338,9 +2515,33 @@ async function handleReport(request: Request, env: Env, ctx: ExecutionContext): 
     return Response.json({ ok: true, recorded: false }, { status: 202 });
   }
 
+  // A still from the reporter's own player, captured the moment they pressed the button. This
+  // is the first plaintext broadcast content this database has ever held — see migration 0016
+  // for why that trade is worth making, and for the four things that bound it. It is stored
+  // only on the path where the report is actually recorded: a rate-limited pile-on returns
+  // above this line, so flooding the endpoint cannot flood the table with pictures either.
+  const frame = sanitiseReportFrame(body?.frame);
+
+  // The preservation clock starts HERE, at intake, for the one category that carries a duty.
+  //
+  // Set at intake rather than when an operator files to NCMEC, even though 2258A(h) measures
+  // its year from the submission. The statute's clock cannot start until somebody files, and
+  // between arrival and filing sits a queue that a human reads at human speed — during which
+  // the ordinary 30-day reaper would happily delete the evidence. So this is a floor, not the
+  // statutory window: it keeps the frame alive while it waits, and recording a submission
+  // re-bases it to a full year from the date that actually counts.
+  //
+  // Written as a literal datetime rather than a rule the reaper evaluates, so that changing
+  // REPORT_PRESERVE_DAYS later cannot retroactively shorten a window already promised on a
+  // report we have taken in.
+  const preserveUntil =
+    category === REPORT_CSAM_CATEGORY
+      ? new Date(Date.now() + REPORT_PRESERVE_DAYS * 86_400_000).toISOString().replace("T", " ").slice(0, 19)
+      : null;
+
   await env.DB
-    .prepare("INSERT INTO reports (stream_id, category, note) VALUES (?, ?, ?)")
-    .bind(streamId, category, note)
+    .prepare("INSERT INTO reports (stream_id, category, note, frame, preserve_until) VALUES (?, ?, ?, ?, ?)")
+    .bind(streamId, category, note, frame, preserveUntil)
     .run();
 
   // The evidence link — the viewer's own share link, fragment and all — is the ONE thing that
@@ -2359,13 +2560,30 @@ async function handleReport(request: Request, env: Env, ctx: ExecutionContext): 
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          text: `vivoh.earth report: ${streamId} — ${category}${note ? `\n${note}` : ""}${
+          // The severe category leads with what it is and what it obliges, because this text
+          // is the only part of the payload a phone notification will show. An operator
+          // glancing at a lock screen must be able to tell this apart from a harassment
+          // report without opening anything.
+          text: `${
+            category === REPORT_CSAM_CATEGORY
+              ? `⚠ VIVOH.EARTH — CSAM REPORT: ${streamId}\n` +
+                "Actual knowledge under 18 U.S.C. 2258A. Report to the NCMEC CyberTipline as " +
+                "soon as reasonably possible, then record the submission in /reports. The frame " +
+                "is preserved and cannot be deleted until the window expires."
+              : `vivoh.earth report: ${streamId} — ${category}`
+          }${note ? `\n${note}` : ""}${
             evidenceUrl ? `\nviewer supplied a link: ${evidenceUrl}` : "\n(no link supplied — cannot verify)"
-          }`,
+          }${frame ? "\na frame from the moment of the report is attached — see /reports" : "\n(no frame attached)"}`,
           stream_id: streamId,
           category,
+          severe: category === REPORT_CSAM_CATEGORY,
+          preserve_until: preserveUntil,
           note,
           evidence_url: evidenceUrl ?? null,
+          // A data URL, assembled here rather than stored as one: the type is ours to assert,
+          // never the reporter's to declare. Receivers that only read `text` ignore it; the
+          // console renders the same bytes straight from the row.
+          frame: frame ? `data:image/jpeg;base64,${frame}` : null,
           kill: `POST /api/admin/kill {"stream_id":"${streamId}"}`,
         }),
       }).catch((e) => console.error("report webhook failed:", e))
@@ -2566,16 +2784,144 @@ async function handleAdminRoutes(
   //
   // The rows carry no evidence link and never will. Where one was offered, it went to
   // REPORT_WEBHOOK at the moment of the report and was not written down.
+  //
+  // A frame, where one was attached, IS in the row — but it is not in this response. Two
+  // hundred rows carrying a picture each would be tens of megabytes over D1's per-query
+  // response ceiling, so the list answers only WHETHER there is one and the console fetches
+  // the bytes it decides to show.
+  //
+  // SORT ORDER CARRIES THE DUTY. A report under a preservation hold that has not yet been
+  // filed to NCMEC sorts above everything, ahead even of unhandled ordinary reports, because
+  // it is the only row in this table with a statutory clock running on it. Everything below
+  // it can wait until tomorrow; that one cannot, and a queue that buries it under thirty
+  // harassment complaints is a queue that will eventually bury it past the point of mattering.
   if (method === "GET" && path === "/api/admin/reports") {
     const rows = await env.DB
       .prepare(`
-        SELECT id, stream_id, category, note, created_at, handled_at
+        SELECT id, stream_id, category, note, created_at, handled_at,
+               preserve_until, ncmec_reported_at, hold_released_at, hold_release_reason,
+               frame IS NOT NULL AS has_frame,
+               (preserve_until IS NOT NULL AND ncmec_reported_at IS NULL) AS ncmec_pending
         FROM reports
-        ORDER BY handled_at IS NOT NULL, created_at DESC
+        ORDER BY ncmec_pending DESC, handled_at IS NOT NULL, created_at DESC
         LIMIT 200
       `)
       .all();
     return Response.json({ reports: rows.results });
+  }
+
+  // POST /api/admin/reports/ncmec - record that a CyberTipline submission was made.
+  //
+  // RECORDS, does not send. Filing to NCMEC needs credentials this Worker does not hold and a
+  // judgement it has no business making; an endpoint that filed by itself would be a machine
+  // making an accusation. What this does is capture the date the statutory year actually runs
+  // from, so the queue can show what has been filed and what has not, and so preservation is
+  // measured from the event 2258A(h) measures it from rather than from our conservative
+  // intake floor.
+  //
+  // Re-basing EXTENDS but never shortens: taking the later of the existing window and a fresh
+  // year means recording a filing can only ever make us hold evidence for longer.
+  if (method === "POST" && path === "/api/admin/reports/ncmec") {
+    const body = await request.json().catch(() => null) as { id?: number } | null;
+    if (!Number.isInteger(body?.id)) return Response.json({ error: "id required" }, { status: 400 });
+    const fresh = new Date(Date.now() + REPORT_PRESERVE_DAYS * 86_400_000)
+      .toISOString().replace("T", " ").slice(0, 19);
+    const res = await env.DB
+      .prepare(
+        `UPDATE reports
+            SET ncmec_reported_at = COALESCE(ncmec_reported_at, datetime('now')),
+                preserve_until = MAX(COALESCE(preserve_until, ''), ?)
+          WHERE id = ?`
+      )
+      .bind(fresh, body!.id)
+      .run();
+    if (!(res.meta?.changes ?? 0)) return Response.json({ error: "no such report" }, { status: 404 });
+    const row = await env.DB
+      .prepare("SELECT ncmec_reported_at, preserve_until FROM reports WHERE id = ?")
+      .bind(body!.id)
+      .first<{ ncmec_reported_at: string; preserve_until: string }>();
+    return Response.json({ success: true, ...row });
+  }
+
+  // POST /api/admin/reports/release-hold - this one is not what it was filed as.
+  //
+  // The counterweight to preservation, and it has to exist. Filing a report costs a viewer
+  // nothing but a share link, and the severe category sits one click from the ordinary ones,
+  // so a hold with no release lets any hostile invitee pin a still of somebody's living room
+  // in this database forever under the worst accusation available. The broadcaster would have
+  // no recourse and the operator no way to clean up after a misfire.
+  //
+  // The duty attaches to APPARENT child sexual abuse material. An operator who has looked and
+  // found something that plainly is not that never had a duty, and so has nothing to preserve.
+  //
+  // Three things make this different from the delete button. A reason is REQUIRED and stored,
+  // so the release is auditable rather than a shrug. The hold is dropped but the row is kept,
+  // frame and all, so releasing is not a covert delete — the ordinary 30-day reaper takes the
+  // picture on its own schedule and the record of the complaint survives. And it refuses once
+  // a CyberTipline submission is recorded, because at that point a real filing exists and no
+  // judgement made here can call it back.
+  if (method === "POST" && path === "/api/admin/reports/release-hold") {
+    const body = await request.json().catch(() => null) as { id?: number; reason?: string } | null;
+    if (!Number.isInteger(body?.id)) return Response.json({ error: "id required" }, { status: 400 });
+    const reason = (body?.reason ?? "").trim().slice(0, REPORT_NOTE_MAX);
+    if (reason.length < 8) {
+      return Response.json(
+        { error: "reason required", detail: "Say why this is not what it was reported as." },
+        { status: 400 }
+      );
+    }
+    const row = await env.DB
+      .prepare("SELECT preserve_until, ncmec_reported_at FROM reports WHERE id = ?")
+      .bind(body!.id)
+      .first<{ preserve_until: string | null; ncmec_reported_at: string | null }>();
+    if (!row) return Response.json({ error: "no such report" }, { status: 404 });
+    if (row.ncmec_reported_at) {
+      return Response.json(
+        {
+          error: "already filed",
+          detail:
+            "This was reported to NCMEC on " + row.ncmec_reported_at + ". The preservation " +
+            "window runs from that filing and cannot be released here.",
+        },
+        { status: 409 }
+      );
+    }
+    if (!row.preserve_until) return Response.json({ success: true, released: 0 });
+    await env.DB
+      .prepare(
+        `UPDATE reports
+            SET preserve_until = NULL, hold_released_at = datetime('now'), hold_release_reason = ?
+          WHERE id = ?`
+      )
+      .bind(reason, body!.id)
+      .run();
+    return Response.json({ success: true, released: 1 });
+  }
+
+  // GET /api/admin/reports/frame?id= - one reported still, as an image.
+  //
+  // Served as image/jpeg with a type this side asserts, never one the reporter supplied; the
+  // bytes were already checked for a JPEG marker on the way in (see sanitiseReportFrame).
+  // Content-Disposition: inline with nosniff, so a browser that disagrees with us about what
+  // these bytes are still refuses to go looking for something executable in them.
+  if (method === "GET" && path === "/api/admin/reports/frame") {
+    const id = parseInt(new URL(request.url).searchParams.get("id") ?? "", 10);
+    if (!Number.isInteger(id)) return Response.json({ error: "id required" }, { status: 400 });
+    const row = await env.DB
+      .prepare("SELECT frame FROM reports WHERE id = ?")
+      .bind(id)
+      .first<{ frame: string | null }>();
+    if (!row?.frame) return new Response("No frame", { status: 404 });
+    const bytes = Uint8Array.from(atob(row.frame), (c) => c.charCodeAt(0));
+    return new Response(bytes, {
+      headers: {
+        "Content-Type": "image/jpeg",
+        "Content-Disposition": "inline",
+        "X-Content-Type-Options": "nosniff",
+        // Never a shared cache: this is broadcast content behind an operator password.
+        "Cache-Control": "private, no-store",
+      },
+    });
   }
 
   // POST /api/admin/reports/ack - Mark reports seen so the queue stops re-presenting them.
@@ -2597,6 +2943,130 @@ async function handleAdminRoutes(
       .bind(...ids)
       .run();
     return Response.json({ success: true, acked: ids.length });
+  }
+
+  // POST /api/admin/reports/drop-frame - forget the picture, keep the complaint.
+  //
+  // Retention does this on a 30-day clock; this is the same act on demand, and it is the one
+  // an operator reaches for most. A frame that should not be held — the wrong stream, a
+  // misfiled report, somebody's living room attached to an accusation that turned out to be
+  // nothing — should not require waiting a month or opening a SQL console.
+  //
+  // Separate from deleting the report BECAUSE they are different acts. The row is an
+  // administrative record of a complaint; the frame is content. Nulling one column keeps the
+  // queue honest about what was reported while removing what nobody needs to keep looking at.
+  //
+  // PRESERVED ROWS REFUSE. An operator clearing a queue at speed must not be able to delete
+  // evidence under a statutory hold by clicking the same button they click all day, so the
+  // predicate is in the WHERE clause and the response says how many rows declined. Reporting
+  // the refusal matters as much as making it: a silent no-op looks exactly like success, and
+  // the operator would carry on believing the frame was gone.
+  if (method === "POST" && path === "/api/admin/reports/drop-frame") {
+    const body = await request.json().catch(() => null) as { id?: number; stream_id?: string } | null;
+    if (body?.stream_id) {
+      const res = await env.DB
+        .prepare(`UPDATE reports SET frame = NULL
+                   WHERE stream_id = ? AND frame IS NOT NULL AND ${REPORT_NOT_PRESERVED}`)
+        .bind(body.stream_id)
+        .run();
+      const held = await env.DB
+        .prepare(`SELECT COUNT(*) AS n FROM reports
+                   WHERE stream_id = ? AND frame IS NOT NULL AND NOT ${REPORT_NOT_PRESERVED}`)
+        .bind(body.stream_id)
+        .first<{ n: number }>();
+      return Response.json({ success: true, dropped: res.meta?.changes ?? 0, preserved: held?.n ?? 0 });
+    }
+    if (!Number.isInteger(body?.id)) return Response.json({ error: "id or stream_id required" }, { status: 400 });
+    const res = await env.DB
+      .prepare(`UPDATE reports SET frame = NULL WHERE id = ? AND ${REPORT_NOT_PRESERVED}`)
+      .bind(body!.id)
+      .run();
+    const dropped = res.meta?.changes ?? 0;
+    if (!dropped) {
+      // Nothing changed for one of two reasons and the operator needs to know which: either
+      // there was no such row, or there was and it is under a hold. Answering "success, 0"
+      // for both would mean a preserved frame reads as an already-clean one.
+      const row = await env.DB
+        .prepare("SELECT preserve_until FROM reports WHERE id = ?")
+        .bind(body!.id)
+        .first<{ preserve_until: string | null }>();
+      if (row?.preserve_until) {
+        return Response.json(
+          {
+            error: "preserved",
+            detail:
+              "This report is held as evidence and its frame cannot be removed until the " +
+              "preservation window ends.",
+            preserve_until: row.preserve_until,
+          },
+          { status: 409 }
+        );
+      }
+    }
+    return Response.json({ success: true, dropped });
+  }
+
+  // POST /api/admin/reports/delete - remove the report itself, frame and all.
+  //
+  // The heavier lever, and deliberately the second one offered. Most of the time an operator
+  // wants the picture gone, not the record — deleting the row loses the fact that anyone ever
+  // complained, which is the thing you want when a pattern emerges later.
+  //
+  // WHAT THIS DOES NOT DO, and the console says so out loud: Cloudflare keeps roughly thirty
+  // days of D1 Time Travel history, and a deleted row stays recoverable from it by anyone with
+  // account access. There is no API to scrub one row from that history; it ages out. Deleted
+  // here is not the same as unrecoverable, and an operator acting on someone's behalf needs to
+  // know which of the two they just did.
+  //
+  // PRESERVED ROWS REFUSE, for the same reason drop-frame refuses and more so: this lever
+  // destroys the record of the complaint as well as its contents, which is exactly what a
+  // preservation duty forbids. Deleting a whole stream's reports skips the held ones and says
+  // how many it skipped, rather than failing the batch — an operator clearing up after a
+  // resolved incident should not be blocked, only prevented from taking the one row that is
+  // evidence along with the rest.
+  if (method === "POST" && path === "/api/admin/reports/delete") {
+    const body = await request.json().catch(() => null) as { id?: number; stream_id?: string } | null;
+    if (body?.stream_id) {
+      const res = await env.DB
+        .prepare(`DELETE FROM reports WHERE stream_id = ? AND ${REPORT_NOT_PRESERVED}`)
+        .bind(body.stream_id)
+        .run();
+      const held = await env.DB
+        .prepare(`SELECT COUNT(*) AS n FROM reports WHERE stream_id = ? AND NOT ${REPORT_NOT_PRESERVED}`)
+        .bind(body.stream_id)
+        .first<{ n: number }>();
+      return Response.json({
+        success: true,
+        deleted: res.meta?.changes ?? 0,
+        preserved: held?.n ?? 0,
+        time_travel_retains: true,
+      });
+    }
+    if (!Number.isInteger(body?.id)) return Response.json({ error: "id or stream_id required" }, { status: 400 });
+    const res = await env.DB
+      .prepare(`DELETE FROM reports WHERE id = ? AND ${REPORT_NOT_PRESERVED}`)
+      .bind(body!.id)
+      .run();
+    const deleted = res.meta?.changes ?? 0;
+    if (!deleted) {
+      const row = await env.DB
+        .prepare("SELECT preserve_until FROM reports WHERE id = ?")
+        .bind(body!.id)
+        .first<{ preserve_until: string | null }>();
+      if (row?.preserve_until) {
+        return Response.json(
+          {
+            error: "preserved",
+            detail:
+              "This report is held as evidence and cannot be deleted until the preservation " +
+              "window ends.",
+            preserve_until: row.preserve_until,
+          },
+          { status: 409 }
+        );
+      }
+    }
+    return Response.json({ success: true, deleted, time_travel_retains: true });
   }
 
   // GET /api/admin/stats/streams - Audience overview, one row per stream id.

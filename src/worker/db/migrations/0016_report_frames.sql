@@ -1,0 +1,32 @@
+-- A still frame attached to an abuse report.
+--
+-- Read migration 0012 first. It argues that the reports table holds no way to decrypt any
+-- broadcast, and that is still true after this column exists: a JPEG is not a key, it opens
+-- nothing, and it says nothing about any moment but the one it was taken in.
+--
+-- What IS new, and should be said plainly rather than discovered later: this is the first
+-- column in this database that holds plaintext broadcast content. Everything else we keep is
+-- metadata — ids, times, counts, salts. A reported frame is a picture of what someone was
+-- actually watching. The reason it is worth it is that until now a report was an unverifiable
+-- assertion: an operator could stop a stream on a stranger's word, or not, with no way to
+-- tell which was right. A frame is the first thing that makes the answer checkable, and it
+-- costs the broadcaster far less than the alternative already in the design — the evidence
+-- link, which hands over the key to the entire live broadcast.
+--
+-- Four properties keep the cost bounded:
+--
+--   1. The reporter chooses. The frame is captured from their own player, shown to them
+--      before it is sent, and removable with one click. Nothing is taken silently.
+--   2. It is one frame. Not a clip, not a recording, and not something we can ask for again.
+--   3. The client never supplies a MIME type. This column holds BARE base64 whose bytes are
+--      checked to begin with a JPEG SOI marker; the operator console forces image/jpeg when
+--      it renders. Storing a client-chosen type is how a report queue becomes an XSS vector
+--      aimed at the one page that holds the admin password.
+--   4. It expires. REPORT_FRAME_RETENTION_DAYS (default 30) nulls this column on the cron
+--      while leaving the report row intact — the record of the complaint outlives the
+--      content of it, which is the right way round.
+--
+-- Size is capped in the Worker (REPORT_FRAME_MAX_B64), not here. SQLite would happily take
+-- two megabytes per row, and the global report cap means a large allowance is also a cheap
+-- way to fill the database.
+ALTER TABLE reports ADD COLUMN frame TEXT;
