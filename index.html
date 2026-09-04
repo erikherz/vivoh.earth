@@ -1102,18 +1102,6 @@
         .publish-btn:active {
             transform: translateY(0);
         }
-        /* Selected device = dim (already chosen); available = bright (click me) */
-        .publish-btn.device-selected {
-            filter: grayscale(50%) brightness(0.7);
-            opacity: 1;
-        }
-        .publish-btn.device-available {
-            filter: brightness(1.1);
-            opacity: 1;
-        }
-        .publish-btn.device-available:hover {
-            box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
-        }
         /* Combinable capture toggles: lit when ON, dim when OFF */
         .publish-btn.toggle-btn { filter: grayscale(45%) brightness(0.78); opacity: 1; }
         .publish-btn.toggle-btn:hover { filter: none; }
@@ -1160,9 +1148,39 @@
                 padding: 0.45rem 0.6rem;
             }
         }
-        /* Three clusters, not six decisions: sources | what's drawn on the picture | the room.
-           A gap is the whole mechanism — no headings, no boxes, nothing to read. */
-        .publish-btn.group-start { margin-left: 0.6rem; }
+        /* The row used to be spaced as three clusters — sources | what's drawn on the picture
+           | the room — with an extra margin in front of each group. That was a reasonable way
+           to organise SIX to eight decisions. The More menu left three: Camera · Audio · More,
+           and grouping three things into three groups says nothing that their being three
+           separate buttons did not already say. What is left of it is one uniform gap, which
+           is the only spacing a row this short can be read as deliberate. */
+
+        /* The More menu.
+
+           Camera and Audio are all anyone needs to go live, so the rest live in here. The row
+           is Camera · Audio · More until something advanced is switched on, at which point it
+           is promoted OUT of the panel and sits in the row, lit — see placeAdvanced() in
+           main.ts. That promotion is what makes hiding these safe: nothing that is running can
+           be out of sight, which was the objection when this was first proposed and rejected.
+
+           The panel is a plain block under the bar rather than a floating popover. It opens
+           into the gap above the stream card, so it pushes nothing around and never covers
+           the video the broadcaster is watching to check their framing. */
+        .publish-more-panel {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            margin-top: 0.6rem;
+        }
+        .publish-more-panel.hidden { display: none; }
+        /* Unlike the toggles, More is not a state — it is a door. It gets the neutral
+           treatment so an open menu never reads as a fourth thing that is switched on. */
+        .publish-btn.more-btn { filter: grayscale(45%) brightness(0.78); }
+        .publish-btn.more-btn:hover,
+        .publish-btn.more-btn.more-open { filter: none; }
+        .publish-btn.more-btn.more-open { border-color: var(--border-active); }
         /* Screen capture (getDisplayMedia) is unavailable on mobile browsers — hide the
            screen toggle on touch devices (iOS / Android). */
         @media (hover: none) and (pointer: coarse) {
@@ -1191,37 +1209,44 @@
            If a seventh button is ever added here, this is the rule that has to give first,
            and scripts/e2e/control-bar-fits.mjs will say so before a phone does. */
         @media (max-width: 430px) {
-            /* Tight WITHIN a group, air BETWEEN groups — 2.4px against 8px, which is a clear
-               enough ratio to read as three clusters. Spending the row's remaining slack on
-               the separation rather than on uniform spacing is what lets the grouping survive
-               on a phone, where the labels cannot. */
-            .publish-controls { gap: 0.15rem; }
-            .publish-btn.group-start { margin-left: 0.35rem; }
+            /* The gap used to be squeezed to 2.4px here so the group margins could be 5.6px —
+               a ratio chosen to keep the clustering legible on a phone, where the labels are
+               already gone. With the groups gone there is nothing to spend that squeeze on,
+               and every seam is the same width again.
+
+               4.8px rather than the base 8px, because a phone still has to hold the widest the
+               row ever gets: every advanced control promoted, plus More. At 8px that lands its
+               widest line 1px inside a 375px screen and 4px inside a 402px one, and neither is
+               a margin — one wider glyph or a different system font puts it off the edge. This
+               is a smaller gap, not an uneven one: every seam moves together. */
+            .publish-controls { gap: 0.3rem; }
             .publish-status { font-size: 1rem; }
             /* The one place the nowrap rule gives.
 
-               Flip appears only on a phone and only while the camera is live, and it is one
-               control more than this row can hold: measured at 358px inside 326px on a 390px
-               iPhone, so four of the five common widths would clip it off the right edge.
-               Something has to give, and a control silently pushed off screen is worse than a
-               second line — the same trade Wallflower made when its own row outgrew a phone.
+               Promotion can rebuild the whole old row — every advanced control on, plus More —
+               and that measures 352px inside 326px on a 390px iPhone. Something has to give,
+               and the candidates were: shrink the targets to 36px, or take a second line.
 
-               Keyed to .has-flip so it applies ONLY while that control is present. The resting
-               row every broadcaster sees before touching anything is still one line, and
-               scripts/e2e/control-bar-fits.mjs fails if that ever stops being true. */
-            .publish-controls.has-flip { flex-wrap: wrap; row-gap: 0.25rem; }
+               Wrapping wins here, and the original reasoning survives it. "A live control row
+               that reflows mid-broadcast is worse than a tighter one" was about a row that
+               moves on its own — on a viewport change, or as state arrives from elsewhere.
+               This one can only ever reflow on the tap that promoted a control, which is the
+               broadcaster's own deliberate act and reads as a consequence of it. Paying for
+               that with a 36px target on every button, including the two that most people
+               use, would be charging everyone for the rare case.
+
+               Scoped to .has-promoted so the resting row keeps nowrap exactly as before. */
+            .publish-controls.has-promoted { flex-wrap: wrap; row-gap: 0.3rem; }
         }
         /* iPhone SE and friends. 44px fits here to the pixel, with nothing spare — one wider
            glyph or a different system font and the row is off the screen again. 40px buys
            back ~36px of margin and is still a comfortable target. */
         @media (max-width: 375px) {
-            .publish-controls { gap: 0.2rem; }
             /* The padding is what sets the width here, not min-width: an 18px icon inside
                0.75rem of horizontal padding plus the border already measures 44px, so
                lowering min-width alone changes nothing. Trim the padding and let min-width
                catch the box at 40. */
             .publish-btn { min-width: 40px; min-height: 40px; padding: 0.4rem; }
-            .publish-btn.group-start { margin-left: 0.25rem; }
         }
         /* PiP composite preview (screen + draggable camera inset) */
         .pip-canvas {

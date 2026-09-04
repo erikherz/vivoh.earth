@@ -1941,15 +1941,15 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M6 11a1 1 0 1 1 2 0 4 4 0 0 0 8 0 1 1 0 1 1 2 0 6 6 0 0 1-5 5.92V20h2a1 1 0 1 1 0 2H9a1 1 0 1 1 0-2h2v-3.08A6 6 0 0 1 6 11z"/></svg>',
       screen:
         '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"><path d="M3 4h18a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-7v2h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/></svg>',
-      // An eye between two big arrows: one pointing right above it, one pointing left below.
-      // It began as arrows curling AROUND the eye, and that failed for a reason worth keeping:
-      // a ring at 18px has to be thin to stay a ring, and a thin curve is the first thing to
-      // disappear. Straight arrows can be as heavy as the glyph allows, so the part carrying
-      // the meaning is the part with the most ink.
+      // An eye between two big arrows: one pointing right above it, one pointing left
+      // below. It began as arrows curling AROUND the eye, and that failed for a reason
+      // worth keeping: a ring at 18px has to be thin to stay a ring, and a thin curve is
+      // the first thing to disappear. Straight arrows can be as heavy as the glyph allows,
+      // so the part carrying the meaning is the part with the most ink.
       //
-      // The eye is a filled lens with the pupil knocked out (fill-rule: evenodd) rather than
-      // an outline, for the same reason — an outlined eye reads as a smudge beside arrows
-      // this solid.
+      // The eye is a filled lens with the pupil knocked out (fill-rule: evenodd) rather
+      // than an outline, for the same reason — an outlined eye reads as a smudge beside
+      // arrows this solid.
       flip:
         '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true"><path d="M2 3.1h12.2V1L22 4.2 14.2 7.4V5.3H2z"/><path d="M22 20.9H9.8V23L2 19.8 9.8 16.6V18.7H22z"/><path fill-rule="evenodd" d="M6.6 12Q12 7 17.4 12Q12 17 6.6 12ZM12 13.8a1.8 1.8 0 1 0 0-3.6 1.8 1.8 0 0 0 0 3.6z"/></svg>',
     } as const;
@@ -1984,9 +1984,97 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     makeToggle("audio", ICONS.audio, "Audio (microphone; also mixes in tab/system audio when screen sharing)", "Audio");
     makeToggle("screen", ICONS.screen, "Screen", "Screen");
 
+    // --- "More": everything that is not a camera or a microphone ------------------------
+    //
+    // Seven controls read as seven decisions to make before you can start. Camera and Audio
+    // are the only two anyone needs to go live; the rest are things you might add once you
+    // are already broadcasting.
+    //
+    // This reverses a call made on 2026-08-16 NOT to hide these behind a menu, so the reason
+    // for that call has to survive the reversal. It was: a menu makes the least-known features
+    // hardest to find, and — the part with real consequences — it can hide a control that is
+    // currently ON, so a broadcaster would not see that the location burn-in is running and
+    // being drawn into their picture.
+    //
+    // THE RULE THAT KEEPS THAT TRUE: an advanced control that is ON is never inside the menu.
+    // It is promoted into the bar and stays there, lit, until it is switched off. The row
+    // therefore shows exactly what is active plus a way to add more, and "hidden" only ever
+    // means "off". Switching it off is what puts it away again.
+    const morePanel = document.createElement("div");
+    morePanel.className = "publish-more-panel hidden";
+    morePanel.id = "publish-more-panel";
+
+    const moreBtn = document.createElement("button");
+    moreBtn.type = "button";
+    moreBtn.className = "publish-btn more-btn";
+    moreBtn.id = "more-btn";
+    moreBtn.setAttribute("aria-expanded", "false");
+    moreBtn.setAttribute("aria-controls", "publish-more-panel");
+    moreBtn.title = "More — screen sharing, chat, and what gets drawn on the picture";
+    moreBtn.innerHTML = faced(
+      '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true">' +
+      '<circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>' +
+      "</svg>",
+      "More"
+    );
+    moreBtn.addEventListener("click", () => {
+      const open = !morePanel.classList.toggle("hidden");
+      moreBtn.setAttribute("aria-expanded", String(open));
+      moreBtn.classList.toggle("more-open", open);
+    });
+
+    const advancedBtns: HTMLButtonElement[] = [];
+    const placeAdvanced = (): void => {
+      for (const b of advancedBtns) {
+        // Two classes mean "on" here: the capture and burn-in toggles use .toggle-on, the
+        // Extras editor uses .active. Read both rather than normalising them, which would
+        // mean touching five handlers in order to change one layout rule.
+        const on = b.classList.contains("toggle-on") || b.classList.contains("active");
+        const parent = on ? bar : morePanel;
+        if (b.parentElement === parent) continue;
+        if (on) bar.insertBefore(b, moreBtn);
+        else morePanel.appendChild(b);
+      }
+      // Tells the stylesheet the row is carrying promoted controls and may need a second line
+      // on a phone. See .publish-controls.has-promoted — measured, not guessed: with every
+      // advanced control on, the row wants 352px inside 326px on a 390px iPhone.
+      bar.classList.toggle(
+        "has-promoted",
+        advancedBtns.some((b) => b.parentElement === bar)
+      );
+    };
+    /**
+     * Hand a finished button over to the menu.
+     *
+     * Placement follows a MutationObserver on the class attribute rather than calls added to
+     * each button's own handler. Several of these turn themselves on and off from places a
+     * click never reaches — the geo stamp clears itself when permission is refused, chat
+     * lights up when saved settings arrive after the bar is built, Extras toggles from inside
+     * the editor — and every one of those has to move the button too. Watching the state that
+     * is already the source of truth catches all of them; wiring the handlers would have
+     * caught the two I happened to think of.
+     */
+    const advanced = (b: HTMLButtonElement): void => {
+      advancedBtns.push(b);
+      new MutationObserver(placeAdvanced).observe(b, {
+        attributes: true,
+        attributeFilter: ["class"],
+      });
+      placeAdvanced();
+    };
+
+    // More goes in BEFORE any advanced button is registered: promotion inserts before it, so
+    // it has to already be in the bar or the first promoted control has nothing to sit against.
+    bar.appendChild(moreBtn);
+
+    // Screen is advanced, but makeToggle has already appended it to the bar.
+    if (toggleButtons.screen) advanced(toggleButtons.screen);
+
     // --- Flip: front camera <-> back camera ---------------------------------------------
     //
-    // An ACTION, not a toggle: it carries no on/off state and never lights up. Pressing it
+    // Lives INSIDE the More panel, and the promotion rule that governs everything else there
+    // does not apply to it. That rule exists so a control which is switched ON can never be
+    // out of sight; Flip is an action, not a toggle, so it has no "on" to hide. Pressing it
     // changes the picture immediately and visibly, which is its own feedback.
     //
     // PHONE ONLY, via .cap-mobile. A desktop with two webcams has two cameras pointing
@@ -1994,19 +2082,24 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // no facingMode to tell them apart anyway.
     //
     // Shown whenever the camera is live. Nothing else is consulted, and in particular NOT the
-    // number of cameras enumerateDevices reports: iOS Safari reports ONE videoinput for a
-    // phone with three cameras, exposing front and back through the facingMode constraint
-    // instead of as separate devices. Gating on that count hid the control on every iPhone
-    // when Wallflower tried it, and the cost of not gating is only that a single-camera phone
-    // gets a button which re-acquires the same camera.
+    // number of cameras enumerateDevices reports.
     //
-    // It sits beside Camera in the row. Wallflower keeps this one inside its More menu, which
-    // this codebase does not have — that disclosure landed there after the two forked, and
-    // porting a menu is not porting a camera control.
+    // That gate was here and it was wrong for the only platform this feature exists for: iOS
+    // Safari reports ONE videoinput for a phone with three cameras, exposing front and back
+    // through the facingMode constraint instead of as separate devices. Which is what
+    // facingMode is for. Gating on the count hid the control on every iPhone.
     //
-    // The label never renders on the devices this appears on (.btn-label is display:none
-    // below 601px), so the icon carries the whole meaning and aria-label carries it for
-    // anyone not looking at the icon.
+    // It went unnoticed for a day because .publish-btn's display beat the [hidden] attribute,
+    // so the button was on screen no matter what this decided — the CSS fix is what made the
+    // wrong gate start biting. Two mistakes, each hiding the other.
+    //
+    // The cost of dropping it: a phone with a single camera gets a button that re-acquires
+    // the same camera. There is no way to tell that phone apart on iOS, and a rare no-op
+    // beats hiding the control on every iPhone there is.
+    //
+    // The label never renders here — .btn-label is display:none below 601px, which is every
+    // device this button appears on — so the icon carries the whole meaning and aria-label
+    // carries it for anyone not looking at the icon.
     const flipBtn = document.createElement("button");
     flipBtn.type = "button";
     flipBtn.className = "publish-btn toggle-btn cap-mobile";
@@ -2041,16 +2134,14 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
           flipBtn.disabled = false;
         });
     });
-    toggleButtons.camera?.insertAdjacentElement("afterend", flipBtn);
+    morePanel.appendChild(flipBtn);
 
     onCameraChanged = () => {
       const live = comp?.cameraFacing() ?? null;
       flipBtn.hidden = !live;
-      // Unlocks a second line on a phone, and only while Flip is actually in the row. See
-      // .publish-controls.has-flip in index.html for the measurement behind it.
-      bar.classList.toggle("has-flip", !!live);
       if (live) labelFlip(live);
     };
+
 
     // --- Location + time burn-in ---
     //
@@ -2066,12 +2157,9 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // our own edge, rendered to canvas, encrypted with the rest of the frame. We don't store
     // them, and the only people who see them are the ones already holding the link and the
     // passcode. See src/media/geo-stamp.ts for why the clock is the server's, not the laptop's.
-    // Group two starts here: things drawn on top of, or below, the picture. group-start puts a
-    // little air in front of it, so the row reads as three small clusters instead of six
-    // separate decisions.
     const stampBtn = document.createElement("button");
     stampBtn.type = "button";
-    stampBtn.className = "publish-btn toggle-btn group-start";
+    stampBtn.className = "publish-btn toggle-btn";
     stampBtn.id = "stamp-btn";
     stampBtn.title = "Burn in location and time — asks your browser for your location, then draws it and a UTC clock into the picture for everyone watching";
     // A map pin with an info "i" knocked out of it (evenodd), so one glyph says both
@@ -2124,7 +2212,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       }
     };
     stampBtn.addEventListener("click", () => void toggleStamp());
-    bar.appendChild(stampBtn);
+    advanced(stampBtn);
 
     // --- Handle watermark ---
     //
@@ -2176,7 +2264,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       comp?.setWatermark(watermark);
       handleBtn.classList.add("toggle-on");
     });
-    bar.appendChild(handleBtn);
+    advanced(handleBtn);
 
     // --- Live chat ---
     //
@@ -2191,7 +2279,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // that opens for everyone watching.
     const chatBtnEl = document.createElement("button");
     chatBtnEl.type = "button";
-    chatBtnEl.className = "publish-btn toggle-btn group-start";
+    chatBtnEl.className = "publish-btn toggle-btn";
     chatBtnEl.id = "chat-btn";
     chatBtnEl.title = "Live chat — opens a chat panel for you and everyone watching";
     chatBtnEl.innerHTML = faced(
@@ -2203,7 +2291,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     chatBtnEl.addEventListener("click", () => setChatEnabled(!chatEnabled));
     chatBtn = chatBtnEl;
     chatBtn.classList.toggle("toggle-on", chatEnabled);   // settings may have landed first
-    bar.appendChild(chatBtnEl);
+    advanced(chatBtnEl);
 
     // No Stop button. It set all three capture flags false and called applyState(), which is
     // the same "nothing active" branch that turning off your last input already reaches — so
@@ -2216,9 +2304,12 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // to be worked out.
     syncButtons();
 
-    // Place the control bar directly after the <moq-publish> element, and the notice under it.
+    // Place the control bar directly after the <moq-publish> element, and the More panel
+    // directly after the bar — it opens downward, into the space above the stream card,
+    // rather than floating over the video the broadcaster is trying to watch.
     publisher.insertAdjacentElement("afterend", bar);
-    bar.insertAdjacentElement("afterend", notice);
+    bar.insertAdjacentElement("afterend", morePanel);
+    morePanel.insertAdjacentElement("afterend", notice);
 
     // --- Status indicator (display only; go-live logging is handled by goLive) ---
     const refreshStatus = () => {
@@ -2275,7 +2366,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // adding something alongside the stream: a product promo, a poll widget, a couple of
     // links. "Extras", plural, because the plural reads as a category of optional additions
     // where the singular reads as an adjective missing its noun.
-    bar.insertBefore(overlayBtn, chatBtnEl);
+    advanced(overlayBtn);
 
     const overlayContainer = document.createElement("div");
     overlayContainer.className = "html-overlay-container";

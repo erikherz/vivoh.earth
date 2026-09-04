@@ -4,12 +4,6 @@
 //
 // It is `flex-wrap: nowrap` on purpose — a row of live controls that reflows to a second line
 // mid-broadcast is worse than a slightly smaller one — so nothing catches an overflow for us.
-//
-// TWO LAYOUTS since Flip landed (2026-08-30). Flip only exists on a phone and only while the
-// camera is live, and it does not fit: the row wants 358px inside 326px on a 390px iPhone. So
-// .publish-controls.has-flip is allowed a second line and that layout is measured separately.
-// The RESTING row — what a broadcaster sees before touching anything — must still be one line,
-// and this file fails if that stops being true.
 // It just pushes off the side of the screen, which is how this was found: on an iPhone in
 // portrait, after the location, handle and chat buttons had grown the row to eight controls.
 //
@@ -45,34 +39,59 @@ const ICON = '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18
 
 // Same order, classes and labels main.ts appends. cap-screen is present but hidden by CSS on
 // touch devices, so it is included here rather than omitted — that hiding is part of what is
-// tested. The group-start classes matter too: each one adds a margin the row has to afford.
+// tested. The group-start classes are gone as of 2026-08-30: the row is spaced evenly now, so
+// there are no per-button margins left for this file to afford.
+//
+// Extras is deliberately ABSENT rather than present-and-hidden. Its button is still built by
+// main.ts, but index.html now hides it outright, so it takes no room in the row and the
+// broadcaster cannot reach it — which is exactly what "not a control" means for this file's
+// purposes. Including it here would leave a label counted for a button nobody can see, which
+// is how this test caught the change in the first place. Link took its place in the row.
 const faced = (glyph, label) => `<span class="btn-glyph">${glyph}</span><span class="btn-label">${label}</span>`;
-const BAR = `
+// TWO bars now, because the row has two sizes since the More menu landed (2026-08-28).
+//
+// At rest it is Camera · Audio · More. But an advanced control that is switched ON is promoted
+// OUT of the menu and back into the row — that promotion is the rule that makes hiding these
+// safe at all, since it means nothing which is running is ever out of sight.
+//
+// So the widest the bar now gets is EVERY advanced control on, PLUS More: one button more than
+// the old row, not fewer. Measuring only the resting state would report a comfortable pass and
+// miss the only layout that can still break, which is the opposite of this file's job.
+const REST = `
 <div class="publish-controls">
   <div class="publish-status" data-status-text="Live">🟢</div>
   <button class="publish-btn toggle-btn">${faced(ICON, "Camera")}</button>
   <button class="publish-btn toggle-btn">${faced(ICON, "Audio")}</button>
-  <button class="publish-btn toggle-btn cap-screen">${faced(ICON, "Screen")}</button>
-  <button class="publish-btn toggle-btn group-start" id="stamp-btn">${faced(ICON, "Location")}</button>
-  <button class="publish-btn toggle-btn glyph-btn" id="handle-btn">${faced("@", "Handle")}</button>
-  <button class="publish-btn html-overlay-btn">${faced("&lt;/&gt;", "Extras")}</button>
-  <button class="publish-btn toggle-btn group-start" id="chat-btn">${faced(ICON, "Chat")}</button>
+  <button class="publish-btn more-btn" id="more-btn">${faced(ICON, "More")}</button>
 </div>`;
 
-// The same bar with Flip in it, which is what a phone shows the moment the camera is on.
-// .has-flip is what main.ts adds alongside the button, and it is what unlocks the second line.
-const BAR_FLIP = BAR
-  .replace('class="publish-controls"', 'class="publish-controls has-flip"')
-  .replace(
-    `<button class="publish-btn toggle-btn">${faced(ICON, "Audio")}</button>`,
-    `<button class="publish-btn toggle-btn cap-mobile" id="flip-camera-btn">${faced(ICON, "Back")}</button>` +
-      `<button class="publish-btn toggle-btn">${faced(ICON, "Audio")}</button>`
-  );
+// Promotion inserts before More, in registration order — this is the real resulting DOM.
+//
+// Flip is deliberately absent. It is not a row control at all: it lives inside the More panel
+// and is never promoted out of it, because promotion exists to keep controls that are ON in
+// sight and an action has no ON. The panel is laid out with flex-wrap, so it cannot overflow
+// the way this row can.
+// `has-promoted` is set by placeAdvanced() whenever anything has been promoted, and it is what
+// unlocks the second line on a phone. Omitting it here modelled a bar main.ts never emits, and
+// the test duly reported a 26px overflow that cannot happen.
+const PROMOTED = `
+<div class="publish-controls has-promoted">
+  <div class="publish-status" data-status-text="Live">🟢</div>
+  <button class="publish-btn toggle-btn">${faced(ICON, "Camera")}</button>
+  <button class="publish-btn toggle-btn">${faced(ICON, "Audio")}</button>
+  <button class="publish-btn toggle-btn cap-screen">${faced(ICON, "Screen")}</button>
+  <button class="publish-btn toggle-btn" id="stamp-btn">${faced(ICON, "Location")}</button>
+  <button class="publish-btn toggle-btn glyph-btn" id="handle-btn">${faced("@", "Handle")}</button>
+  <button class="publish-btn toggle-btn" id="link-btn">${faced(ICON, "Link")}</button>
+  <button class="publish-btn toggle-btn" id="chat-btn">${faced(ICON, "Chat")}</button>
+  <button class="publish-btn more-btn" id="more-btn">${faced(ICON, "More")}</button>
+</div>`;
 
-// `wrap: true` says a second line is ALLOWED for this layout, not that one is expected.
+// `wrap: true` says a second line is ALLOWED for this layout, not that one is expected. The
+// resting row must still be one line — that is the guarantee for the layout everybody sees.
 const LAYOUTS = [
-  ["resting", BAR, { wrap: false }],
-  ["camera on, Flip present", BAR_FLIP, { wrap: true }],
+  ["resting", REST, { wrap: false }],
+  ["everything promoted", PROMOTED, { wrap: true }],
 ];
 
 // Portrait widths of phones people actually hold. The narrowest and the widest bracket the
@@ -101,7 +120,7 @@ try {
   const page = await browser.newPage();
   console.log("\nbroadcaster control bar, portrait\n");
 
-  for (const [layoutName, LAYOUT, opt] of LAYOUTS) {
+  for (const [layoutName, BAR, opt] of LAYOUTS) {
   console.log(`  — ${layoutName} —`);
   for (const [name, width] of DEVICES) {
     // isMobile + hasTouch so `(hover: none) and (pointer: coarse)` matches and the screen
@@ -111,7 +130,7 @@ try {
     // width media query silently reports the desktop answer.
     await page.setContent(
       `<meta name="viewport" content="width=device-width, initial-scale=1">` +
-      `<style>${styles}</style><div class="container">${LAYOUT}</div>`,
+      `<style>${styles}</style><div class="container">${BAR}</div>`,
       { waitUntil: "load" }
     );
 
@@ -123,8 +142,9 @@ try {
       // measures a rectangle spanning two rows and reports nonsense.
       //
       // Group by vertical CENTRE, not by top. The status dot is shorter than the buttons and
-      // is centred against them, so its top differs by several pixels — grouping on top would
-      // put it on a line of its own and report every layout as wrapped.
+      // is centred against them, so its top differs by several pixels — grouping on top put it
+      // on a line of its own and reported every layout, including the 4-control resting row
+      // with 180px to spare, as wrapped.
       const lines = [];
       for (const c of shown) {
         const r = c.getBoundingClientRect();
@@ -148,7 +168,8 @@ try {
       };
     });
 
-    // A second line is a failure unless this layout is allowed one.
+    // A second line is a failure unless this layout is allowed one. The resting row — what
+    // every broadcaster sees before touching anything — must still be a single line.
     const wrapped = m.rows > 1;
     const fits = m.row <= m.available && !m.scrolls && (opt.wrap || !wrapped);
     check(
@@ -171,6 +192,8 @@ try {
   // here (no coarse pointer), so this is the widest the bar ever gets.
   console.log("\nwith labels, pointer devices\n");
 
+  for (const [layoutName, BAR] of LAYOUTS) {
+  console.log(`  — ${layoutName} —`);
   for (const [name, width] of [["small laptop", 1024], ["desktop", 1440], ["narrow window", 700]]) {
     await page.setViewport({ width, height: 900, deviceScaleFactor: 2 });
     await page.setContent(
@@ -202,6 +225,7 @@ try {
         (!fits ? "  — THE ROW OVERFLOWS" : `  (${m.available - m.row}px spare)`) +
         (allNamed ? "" : `  — unlabelled control: ${m.names.join(",")}`)
     );
+  }
   }
 } finally {
   await browser.close();
