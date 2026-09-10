@@ -256,3 +256,33 @@ export function installWtProbe(anticipated = 0): void {
   g.WebTransport = ProbedWebTransport as unknown as WtCtor;
   wtProbe.installed = true;
 }
+
+// SELF-INSTALL AT IMPORT TIME. This is the fix for `sess=0`.
+//
+// installWtProbe() is called from init(), which runs on DOMContentLoaded. That was assumed to be
+// "before anything connects", and on desktop Chrome it is — sess=1 there. On Erik's iPhone it is
+// not: the panel reported sess=0 across three separate builds while media plainly flowed, so
+// every session was being constructed outside the window the probe was watching, and every
+// counter fed by it (including maxDatagramSize) was reporting the probe's own absence.
+//
+// Module evaluation happens strictly before DOMContentLoaded and before any of this app's
+// connect calls, so installing here closes that window regardless of how the platform schedules
+// things. The ?wtmax= experiment still needs the explicit call from init() to pass its value,
+// and installWtProbe() is idempotent, so the later call is harmless.
+//
+// Deliberately unconditional, and deliberately not behind ?diag=1: the watch page rebuilds the
+// player on wtProbe.uni (see STREAM_BUDGET), so an uninstalled probe is not merely a blind
+// diagnostic — it silently disables the iOS stall mitigation too. That has been true this whole
+// time on any device where the constructor swap missed.
+//
+// ?wtmax= is read HERE rather than left to init()'s call, because installWtProbe is idempotent:
+// once this runs, the later call returns early and would drop the value on the floor. A test
+// knob that is accepted and silently ignored is the failure mode carryTestParams() in main.ts
+// exists to warn about — the experiment reports "no change" and the hypothesis looks disproved
+// when it was never applied.
+try {
+  const wtmax = Number(new URLSearchParams(location.search).get("wtmax") ?? 0);
+  installWtProbe(Number.isFinite(wtmax) && wtmax > 0 ? wtmax : 0);
+} catch {
+  // Never let instrumentation be the reason the page fails to load.
+}

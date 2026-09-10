@@ -3851,6 +3851,11 @@ async function initWatchView(streamId: string, user: User | null) {
                 .connection?.established?.peek?.()?.version
             ) ?? "?"
           }  build ${__VE_BUILD__}\n` +
+          // probe= says whether the instrument is even attached, so a zero below can be read as
+          // "no datagrams" rather than "no measurement". Three screenshots were spent on that
+          // ambiguity; the panel now states it outright.
+          `probe   installed=${wtProbe.installed ? "y" : "n"} sess=${wtProbe.constructed}` +
+          `${wtProbe.err ? ` err=${wtProbe.err.slice(0, 40)}` : ""}\n` +
           `dgram   max=${wtProbe.maxDatagramSize ?? "?"}  in=${wtProbe.datagrams}` +
           // Both sides in the performance.now() clock. Mixing it with `nowS` (seconds since the
           // panel started) printed "-1s ago", which on a diagnostic someone reads while trying
