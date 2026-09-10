@@ -281,8 +281,16 @@ export function installWtProbe(anticipated = 0): void {
 // exists to warn about — the experiment reports "no change" and the hypothesis looks disproved
 // when it was never applied.
 try {
-  const wtmax = Number(new URLSearchParams(location.search).get("wtmax") ?? 0);
+  const q = new URLSearchParams(location.search);
+  const wtmax = Number(q.get("wtmax") ?? 0);
   installWtProbe(Number.isFinite(wtmax) && wtmax > 0 ? wtmax : 0);
+  // ?wtonly=1 — disable @moq's WebSocket fallback for this page load, so a session either runs
+  // over WebTransport or fails outright. Set here, at import time, because connect() reads it
+  // and the first connection can precede DOMContentLoaded. See vite.config.ts for why.
+  if (q.get("wtonly") === "1") {
+    (globalThis as unknown as { __VIVOH_WT_ONLY__?: boolean }).__VIVOH_WT_ONLY__ = true;
+    console.log("[wtonly] WebSocket fallback DISABLED for this load — WebTransport or nothing");
+  }
 } catch {
   // Never let instrumentation be the reason the page fails to load.
 }

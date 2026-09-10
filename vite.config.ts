@@ -24,7 +24,26 @@ function moqWebTransportOnly(): Plugin {
       // Match @moq/net's connection/connect.js across all (possibly nested) copies.
       if (id.includes("@moq") && code.includes("connectWebSocket") && code.includes(WS_GATE)) {
         patched++;
-        return { code: code.replace(WS_GATE, "props?.websocket?.enabled === true"), map: null };
+        // RUNTIME gate rather than a build-time removal. Erik's iPhone runs its whole session
+        // over WebSocket — the fallback wins the race even with QUIC's 500ms head start — and
+        // qmux has no datagram surface, so audio published as datagrams never arrives there
+        // while video keeps playing over groups.
+        //
+        // ?wtonly=1 disables the fallback for one page load, which separates the two causes that
+        // need different fixes: if the session then connects over WebTransport, QUIC works and
+        // the race is merely losing (bias it). If it fails to connect at all, QUIC is blocked on
+        // that network and datagrams can never reach that viewer, making dual-publish the only
+        // route.
+        //
+        // Left as opt-in: the WebSocket fallback is deliberately on here for iPhone and older
+        // Safari, and removing it wholesale would strand exactly the viewers it exists for.
+        return {
+          code: code.replace(
+            WS_GATE,
+            "(globalThis.__VIVOH_WT_ONLY__ ? false : props?.websocket?.enabled !== false)"
+          ),
+          map: null,
+        };
       }
       return null;
     },
@@ -388,7 +407,10 @@ export default defineConfig({
   // endpoint. moq.pro does, so leaving it off keeps the WebSocket fallback working for
   // iPhone and older Safari. Encryption does not conflict with it — the seams encrypt the
   // frame payload beneath MoQ's framing, so whatever carries the session moves opaque bytes.
-  plugins: [mediaCryptoPatch()],
+  // moqWebTransportOnly() is back in the list, but it no longer removes the WebSocket fallback —
+  // it converts the gate into a RUNTIME one so ?wtonly=1 can disable the fallback for a single
+  // page load. Default behaviour is unchanged: without the flag the race runs exactly as before.
+  plugins: [moqWebTransportOnly(), mediaCryptoPatch()],
   // A build stamp in the diag panel, because "is the phone on the new bundle?" has now cost
   // several round trips of remote testing. The asset filename is content-hashed, but nobody
   // reading a panel on a phone can see it, and two builds whose panels look alike are
