@@ -3839,6 +3839,18 @@ async function initWatchView(streamId: string, user: User | null) {
           // datagrams under ?adg=1 and nothing falls back to groups, so a platform that carries
           // no datagrams plays video perfectly and is silent forever. "max=0" or "max=?" is the
           // whole answer; anything else means look further down the panel.
+          // The negotiated moq-lite version, which decides whether datagrams are even reachable.
+          // connect.js picks the SETUP path when no WebTransport subprotocol is negotiated, and
+          // that path offers only [DRAFT_02, DRAFT_01, DRAFT_14] — none of which carry datagrams.
+          // So a client whose browser ignores the `protocols` option lands on lite-01/02,
+          // hasDatagrams() is false, nothing ever touches `.datagrams`, and the probe reports
+          // max=? with no error. Printing the version turns that silence into an answer.
+          `moq     ${
+            (
+              (live as unknown as { connection?: { established?: { peek?: () => { version?: string } | undefined } } })
+                .connection?.established?.peek?.()?.version
+            ) ?? "?"
+          }  build ${__VE_BUILD__}\n` +
           `dgram   max=${wtProbe.maxDatagramSize ?? "?"}  in=${wtProbe.datagrams}` +
           // Both sides in the performance.now() clock. Mixing it with `nowS` (seconds since the
           // panel started) printed "-1s ago", which on a diagnostic someone reads while trying

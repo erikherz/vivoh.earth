@@ -389,6 +389,13 @@ export default defineConfig({
   // iPhone and older Safari. Encryption does not conflict with it — the seams encrypt the
   // frame payload beneath MoQ's framing, so whatever carries the session moves opaque bytes.
   plugins: [mediaCryptoPatch()],
+  // A build stamp in the diag panel, because "is the phone on the new bundle?" has now cost
+  // several round trips of remote testing. The asset filename is content-hashed, but nobody
+  // reading a panel on a phone can see it, and two builds whose panels look alike are
+  // indistinguishable from a stale cache. This makes the answer visible on the device.
+  define: {
+    __VE_BUILD__: JSON.stringify(new Date().toISOString().slice(5, 16).replace("T", " ")),
+  },
   // The `buffer: "buffer/"` alias that used to live here existed only for pkarr's DHT record
   // encoder. Nothing in the browser bundle touches node builtins now.
   build: {
