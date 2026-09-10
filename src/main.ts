@@ -3763,12 +3763,18 @@ async function initWatchView(streamId: string, user: User | null) {
       //
       // Evaluated per tick, not once: this used to be a `const` computed before any session
       // existed, which with an evidence-based check would have read "not webtransport" forever.
-      const TRANSPORT = () =>
-        needsPolyfill
-          ? "TRANSPORT=no-webtransport-api"
-          : wtProbe.constructed > 0
-            ? `TRANSPORT=webtransport (${wtProbe.constructed} sess)`
-            : "TRANSPORT=NOT-webtransport (websocket fallback won)";
+      const TRANSPORT = () => {
+        if (needsPolyfill) return "TRANSPORT=no-webtransport-api";
+        if (wtProbe.constructed > 0) return `TRANSPORT=webtransport (${wtProbe.constructed} sess)`;
+        // Third state, and it is not the same claim as the second. Under ?wtonly=1 the WebSocket
+        // fallback is disabled, so "the fallback won" is impossible — saying it anyway would be
+        // the same kind of confident-but-wrong label that sent this whole investigation down
+        // three wrong paths.
+        if ((globalThis as unknown as { __VIVOH_WT_ONLY__?: boolean }).__VIVOH_WT_ONLY__) {
+          return "TRANSPORT=none (wtonly: no WebTransport session established)";
+        }
+        return "TRANSPORT=NOT-webtransport (websocket fallback won)";
+      };
 
       const tick = () => {
         const el = live as unknown as {
