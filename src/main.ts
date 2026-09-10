@@ -4152,12 +4152,38 @@ async function initWatchView(streamId: string, user: User | null) {
           // first"). Datagram audio removes the streams and nothing about the bytes, so this is
           // the number that says whether Safari was fixed or merely fails later. 16 MiB is
           // 16777216; the percentage is there so a stall can be read against it at a glance.
-          `bytes   ${
-            wtProbe.bytesIn === null
-              ? `? ${wtProbe.statsErr ? `(${wtProbe.statsErr.slice(0, 44)})` : "(not sampled yet)"}`
-              : `${wtProbe.bytesIn} = ${(wtProbe.bytesIn / 1048576).toFixed(1)} MiB ` +
-                `(${((100 * wtProbe.bytesIn) / 16777216).toFixed(0)}% of 16 MiB)`
-          }\n` +
+          // The QUIC counter is NOT trustworthy everywhere: Safari implements getStats() and
+          // returns bytesReceived 0 forever, which this panel used to render as a confident
+          // "0 = 0.0 MiB (0% of 16 MiB)" while nineteen megabytes of video were visibly
+          // arriving. A zero that the panel's own next two lines contradict is exactly the kind
+          // of number that sends an investigation somewhere useless.
+          //
+          // So cross-check it, and fall back to a FLOOR rather than to nothing. Decoded audio
+          // and video bytes are application-level and therefore always less than what the
+          // session carried, which makes their sum a lower bound on it — and a lower bound is
+          // all the 16 MiB question needs: once app bytes pass 16 MiB with media still flowing,
+          // the MAX_DATA ceiling theory is dead on this device regardless of what getStats says.
+          (() => {
+            const CEILING = 16777216;
+            const app = Math.max(0, bytes) + Math.max(0, vbytes);
+            const pct = (n: number) => `${((100 * n) / CEILING).toFixed(0)}% of 16 MiB`;
+            const quicUsable = wtProbe.bytesIn !== null && (wtProbe.bytesIn > 0 || app === 0);
+            if (quicUsable) {
+              const n = wtProbe.bytesIn as number;
+              return `bytes   quic ${(n / 1048576).toFixed(1)} MiB (${pct(n)})\n`;
+            }
+            const why =
+              wtProbe.bytesIn === null
+                ? wtProbe.statsErr
+                  ? wtProbe.statsErr.slice(0, 40)
+                  : "not sampled yet"
+                : "getStats reports 0 while media arrives";
+            return (
+              `bytes   quic ? (${why})\n` +
+              `        app >= ${(app / 1048576).toFixed(1)} MiB (${pct(app)})` +
+              `${app > CEILING ? "  PAST 16 MiB, still flowing" : ""}\n`
+            );
+          })() +
           // Repeat the warning where it will actually be seen: on a phone there is no console,
           // and the panel is the only surface.
           (new URLSearchParams(location.search).get("adg") === "1"
