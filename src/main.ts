@@ -1767,6 +1767,79 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
 
     const videoSource = settable(publisher.capture?.in?.source, "publisher.capture.in.source");
     const audioSource = settable(publisher.audio?.in?.source, "publisher.audio.in.source");
+
+    // --- DUAL-PUBLISH AUDIO (#138) -----------------------------------------------------------
+    //
+    // Audio is published TWICE, as two renditions of the same source:
+    //
+    //   "audio"     one group per frame  -> reaches every viewer, including WebSocket
+    //   "audio/dg"  one QUIC datagram    -> reaches WebTransport viewers, and opens no streams
+    //
+    // WHY BOTH. Datagrams escape the stream ceiling that kills iOS at ~7000 incoming streams,
+    // but they cannot traverse qmux/WebSocket at all and NOTHING falls back — not our publisher,
+    // not the relay ("qmux/WebSocket/TCP/UDS report size 0. No group fallback: otherwise off"),
+    // not the protocol ("There is no stream fallback"). Publishing only datagrams therefore does
+    // not degrade a WebSocket viewer's audio, it removes it. Measured, on this build: group
+    // audio over WebSocket decodes 1031 frames; datagram audio over WebSocket decodes 0.
+    //
+    // @moq 0.3.5 forces ALL Safari onto WebSocket via a UA ban, so that is not an edge case —
+    // it is every iPhone and every Mac Safari.
+    //
+    // COST is the broadcaster's uplink only: ~64-128 kbps for the second copy. Each viewer still
+    // subscribes to exactly one, and the encoders are demand-gated, so a rendition nobody wants
+    // encodes nothing.
+    //
+    // ORDER MATTERS. The element registers "audio" in its own constructor, so it is first in the
+    // catalog's rendition record. When a viewer sets no target, @moq/watch auto-picks by
+    // container kind and takes the first match — which is therefore the GROUP rendition, the one
+    // that works everywhere. The accidental case is the safe case.
+    //
+    // The transport is carried by the track NAME rather than a catalog field, because rendition
+    // objects are `z.strip`: an unknown key like `transport: "datagram"` is silently dropped at
+    // validation. A root-level section would survive (the root is `z.loose`), but a name needs
+    // no schema at all and both ends of this are ours.
+    // ON by default: the datagram rendition is purely additive and the group rendition still
+    // reaches everyone, so there is no viewer this can strand. `?adg=0` turns the second
+    // rendition off for a broadcaster who would rather not spend the extra uplink, or to A/B it.
+    const dualPublishAudio = new URLSearchParams(location.search).get("adg") !== "0";
+    const DG_TRACK = "audio/dg";
+    let dgEncoder: { close(): void } | null = null;
+    if (dualPublishAudio) {
+      // Deliberately NOT a top-level import and NOT awaited here. A static import would pull
+      // @moq/publish into the module graph ahead of ./wt-probe, and the probe has to install
+      // before anything constructs a WebTransport — that ordering was today's sess=0 bug. The
+      // enclosing function is also not async. Registering the rendition a tick late is harmless:
+      // the catalog is reactive, and "audio" registering first is exactly the order we want.
+      void import("@moq/publish")
+        .then((mod) => {
+          const P = mod as unknown as {
+            Audio: { Encoder: new (name: string, props: unknown) => { close(): void } };
+          };
+          dgEncoder = new P.Audio.Encoder(DG_TRACK, {
+            broadcast: publisher.broadcast,
+            enabled: publisher.audio?.in?.enabled,
+            source: publisher.audio?.in?.source,
+          });
+          // The send seam keys on this name (see vite.config.ts). Set here rather than hardcoded
+          // in the patch so there is one source of truth — and leaving it unset is how the whole
+          // datagram path stays off.
+          (globalThis as unknown as { __VIVOH_DG_TRACK__?: string }).__VIVOH_DG_TRACK__ = DG_TRACK;
+          console.log(`[dual-audio] publishing "audio" (groups) + "${DG_TRACK}" (datagrams)`);
+        })
+        .catch((e) => {
+          // A failed second rendition must never take the first one down: every viewer still
+          // gets audio over groups, which is the pre-#138 behaviour.
+          console.warn("[dual-audio] datagram rendition unavailable; groups only:", e);
+          dgEncoder = null;
+        });
+    }
+    window.addEventListener("pagehide", () => {
+      try {
+        dgEncoder?.close();
+      } catch {
+        /* already gone */
+      }
+    });
     const bcast = {
       video: { source: videoSource as { set(t: MediaStreamTrack | undefined): void } },
       audio: {
@@ -3497,6 +3570,64 @@ async function initWatchView(streamId: string, user: User | null) {
       if (viewerCdn) startOriginLinkProbe(routeInfo.relay, streamId);
     }
     console.log(`[watch-timing] url set, connecting @ ${ms()}`);
+
+    // --- DUAL-PUBLISH AUDIO: pick the rendition this transport can actually receive (#138) ---
+    //
+    // The broadcaster publishes audio twice: "audio" as one group per frame, and "audio/dg" as
+    // one QUIC datagram per frame. Datagrams open no streams — the whole point, since ~50 audio
+    // streams/s is what kills iOS at the ~7000-stream ceiling — but they cannot traverse
+    // qmux/WebSocket, and nothing anywhere falls back to groups.
+    //
+    // So this choice is not an optimisation, it is the difference between audio and silence.
+    // Measured on this build: datagram audio over WebSocket decodes ZERO frames while video keeps
+    // playing. @moq 0.3.5 forces every Safari onto WebSocket, so that is the common case.
+    //
+    // DEFAULT TO GROUPS AND UPGRADE, never the reverse. Doing nothing already lands on "audio":
+    // it is registered first, so @moq/watch's auto-pick takes it. We switch only once the
+    // transport has PROVEN it can carry datagrams. A wrong guess this way costs one rendition
+    // switch; a wrong guess the other way costs the viewer their audio entirely.
+    // `.in.target`, not `.target`. @moq/watch's Source keeps its inputs behind `in` and its
+    // outputs behind `out` — the same convention as the publisher's capture.in.source. The
+    // shipped build does NOT match audio/source.d.ts, which declares `target` as a direct
+    // property; trusting the typings cost a full deploy-and-measure cycle where every viewer
+    // silently stayed on the group rendition.
+    const audioSel = (watcher as unknown as {
+      audio?: { source?: { in?: { target?: { set(v: { name?: string } | undefined): void } } } };
+    }).audio?.source?.in?.target;
+    if (!audioSel || typeof audioSel.set !== "function") {
+      // LOUD, not silent. The first version of this block just skipped when the shape was wrong,
+      // so dual-publish looked like it was working while every viewer took the group rendition
+      // and no datagram was ever received. A selector that cannot be found is a feature that is
+      // off, and it should say so.
+      console.warn(
+        "[dual-audio] cannot reach the audio rendition selector (watcher.audio.source.in.target) — " +
+          "every viewer will fall back to the group rendition, so datagram audio is effectively OFF."
+      );
+    } else {
+      const DG_TRACK = "audio/dg";
+      let chose = false;
+      const pick = () => {
+        if (chose) return;
+        // Both conditions are needed. constructed>0 says a WebTransport session exists at all (a
+        // WebSocket session never constructs one); maxDatagramSize>0 says it will carry them.
+        if (wtProbe.constructed > 0 && (wtProbe.maxDatagramSize ?? 0) > 0) {
+          chose = true;
+          audioSel.set({ name: DG_TRACK });
+          console.log(`[dual-audio] transport carries datagrams — selecting "${DG_TRACK}"`);
+        }
+      };
+      pick();
+      // Poll briefly rather than deciding once: the transport is constructed early but not
+      // necessarily before this line, and switching before the first audio arrives avoids a gap.
+      const sel = window.setInterval(pick, 250);
+      window.setTimeout(() => {
+        window.clearInterval(sel);
+        if (!chose) {
+          console.log('[dual-audio] no datagram-capable transport — staying on "audio" (groups)');
+        }
+      }, 8000);
+      window.addEventListener("pagehide", () => window.clearInterval(sel));
+    }
 
     // ── Viewer token renewal: REMOVED ───────────────────────────────────────────────────
     //

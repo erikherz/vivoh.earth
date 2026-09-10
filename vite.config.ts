@@ -238,8 +238,8 @@ function mediaCryptoPatch(): Plugin {
   const AUDIO_REPLACE = `    writeFrame(frame) {
         const __mc = globalThis.__VIVOH_MEDIA_CRYPTO__;
         const __enc = !!(__mc && __mc.shouldEncrypt(this.name));
-        const __isAudio = String(this.name || "").indexOf("audio") === 0;
-        if (__isAudio && globalThis.__VIVOH_AUDIO_DATAGRAM__ === true && typeof this.appendDatagram === "function") {
+        const __dgName = globalThis.__VIVOH_DG_TRACK__;
+        if (__dgName && this.name === __dgName && typeof this.appendDatagram === "function") {
             if (__enc) { __mc.writeDatagram(this, frame); }
             else { try { this.appendDatagram(frame.timestamp, frame.payload); } catch (e) { console.warn("[adg] datagram dropped", e); } }
             return;
