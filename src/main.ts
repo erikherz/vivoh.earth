@@ -77,6 +77,13 @@ interface MoqPublishElement extends HTMLElement {
   muted: boolean;
   connection: { status: MoqSignal<ConnStatus> };
   state: { source: MoqSignal<PublishSource> };
+  // Where a caller injects its own MediaStreamTracks, as of @moq/publish 0.4.7. `in` is typed
+  // Readonlys<> upstream (Getters), but readonlys() is the identity function at runtime, so the
+  // signals are settable — see the `settable()` guard at the injection site, which checks that
+  // rather than assuming it. Declared loosely here because the real types are not exported in a
+  // shape this file can name without pulling the whole package in.
+  capture?: { in?: { source?: unknown } };
+  audio?: { in?: { source?: unknown }; codec?: unknown };
 }
 
 interface MoqWatchElement extends HTMLElement {
@@ -1645,7 +1652,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
 
     // --- Combinable capture toggles: 📹 Camera (video) + 🎤 Audio + 🖥️ Screen ---
     // Camera and/or Screen video is composited onto a single <canvas> and published as one
-    // stable track (announce=true + source=undefined so the element's own capture stands
+    // stable track (announce="always" + source=undefined so the element's own capture stands
     // down); audio is mixed (mic for camera, system/tab audio for screen) into one stable
     // track. Toggling sources changes only the compositor inputs, never the published
     // tracks, so viewers never see a reset. Audio-only uses the element's native source.
@@ -1727,12 +1734,44 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     newIdBtn?.addEventListener("click", () => void rotateIdentity());
 
     // Low-level seam: a video/audio Source is just a MediaStreamTrack signal.
-    const bcast = publisher.broadcast as unknown as {
-      video: { source: { set(t: MediaStreamTrack | undefined): void } };
+    //
+    // WHERE THIS LIVES NOW. Through @moq/publish 0.2.x these hung off `publisher.broadcast` as
+    // `.video.source` / `.audio.source`. In 0.4.7 `broadcast` became a registry whose `video()`
+    // and `audio()` are METHODS that mint renditions, and the raw-track signals moved onto the
+    // ELEMENT: video feeds a shared `Video.Capture` (one capture, many renditions), audio still
+    // goes straight into its encoder.
+    //
+    // The old path did not throw a helpful error — `publisher.broadcast.video` is now a function,
+    // so `.source` was undefined and the failure surfaced as
+    // "Cannot read properties of undefined (reading 'set')" inside the capture handler, which
+    // reads like a camera problem rather than an API change.
+    //
+    // `in` is typed `Readonlys<...>`, i.e. Getters. That is a STATIC narrowing only — @moq/signals
+    // documents `readonlys()` as "the identity function at runtime" — so the underlying Signal is
+    // still settable and this is the intended injection point for a caller supplying its own
+    // track. We composite our own canvas, so we always supply it.
+    //
+    // Because that relies on a type lie being safe, assert it rather than trust it: if upstream
+    // ever makes these real read-only Computeds, this throws at wiring time instead of silently
+    // dropping every frame into a signal nobody set.
+    const settable = (v: unknown, where: string): { set(t: unknown): void } => {
+      if (!v || typeof (v as { set?: unknown }).set !== "function") {
+        throw new Error(
+          `[publish] ${where} is not a settable signal any more — @moq/publish moved or froze it. ` +
+            `The compositor track has nowhere to go, so publishing would look live and send nothing.`
+        );
+      }
+      return v as { set(t: unknown): void };
+    };
+
+    const videoSource = settable(publisher.capture?.in?.source, "publisher.capture.in.source");
+    const audioSource = settable(publisher.audio?.in?.source, "publisher.audio.in.source");
+    const bcast = {
+      video: { source: videoSource as { set(t: MediaStreamTrack | undefined): void } },
       audio: {
-        source: { set(t: MediaStreamTrack | undefined): void };
-        codec: { set(c: unknown): void };
-      };
+        source: audioSource as { set(t: MediaStreamTrack | undefined): void },
+        codec: settable(publisher.audio?.codec, "publisher.audio.codec"),
+      },
     };
 
     // --- Opus frame duration: ?aframe=<ms> on the BROADCAST url ------------------------------
@@ -1875,7 +1914,17 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
             comp.setSystemAudioEnabled(audio && screen);
             await comp.setMicEnabled(audio);
 
-            publisher.announce = true;
+            // "always", not `true`. This was a boolean through @moq/publish 0.2.x and became an
+            // enum ("always" | "source" | "never") in 0.4.x. The setter takes whatever it is
+            // given, and the gate is `announce === "always" || (announce === "source" && track)`
+            // — so `true` matches neither, the broadcast is never enabled, and `broadcast.net`
+            // stays undefined. Nothing throws. The encoders still resolve their codecs and fill
+            // in the catalog, so the publisher looks completely healthy while publishing zero
+            // frames; the only outward symptom is that every viewer waits forever.
+            //
+            // "always" rather than "source" because we composite our own canvas and hand the
+            // element a track directly, so its own capture never runs.
+            publisher.announce = "always";
             publisher.source = undefined;
             publisher.invisible = !hasVideo; // audio-only -> no camera light / no video track
             publisher.muted = false; // the mixed audio track is always published (silent when audio off) to keep it stable
@@ -2498,7 +2547,7 @@ function stopForKill(role: "viewer" | "broadcaster"): void {
   if (publisher) {
     publisher.removeAttribute("url");
     try {
-      publisher.announce = false;
+      publisher.announce = "never"; // was `false`; see the enum note at the go-live site
       publisher.source = null;
     } catch {
       // Older element builds expose these differently; removing the URL above is what stops

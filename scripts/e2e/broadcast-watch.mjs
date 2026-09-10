@@ -156,23 +156,26 @@ try {
   if (!/#k=/.test(shareUrl)) throw new Error(`share link carries no #k= secret: ${shareUrl}`);
   STEP(`share link carries a key (${shareUrl.split("#")[0]}#k=…)`);
 
-  // The passcode is mandatory now, so every share link signals one and every viewer is
-  // prompted. Read it off the broadcaster's own page, the way a recipient would be told it.
+  // THERE IS NO PASSCODE ON THIS DEPLOYMENT, and the link must say so by omission.
   //
-  // This test silently stopped proving anything the day the passcode became mandatory: the
-  // viewer sat on the prompt until the 60s timeout and reported "never decoded", which reads
-  // exactly like a broken relay. Assert the link signals p=1 rather than merely coping with
-  // it, so the next change to that contract fails loudly here instead of looking like an
-  // outage.
-  if (!/[#&]p=1/.test(shareUrl)) throw new Error(`share link does not signal a passcode: ${shareUrl}`);
-  await bc.waitForFunction(
-    () => (document.getElementById("passcode-value")?.textContent || "").length === 8,
-    { timeout: 30000 }
-  );
-  const passcode = await bc.evaluate(
-    () => document.getElementById("passcode-value")?.textContent || ""
-  );
-  STEP(`passcode ${passcode}`);
+  // What stood here asserted the opposite — that every share link carries `p=1` and every
+  // viewer is prompted — because it was ported from Wallflower, where that was true. It stopped
+  // being true here when the passcode was removed from key derivation and the UI entirely; see
+  // src/main.ts, "there is no passcode here, so the link carries the content key and nothing
+  // else". The assertion outlived the thing it described and failed the whole gate on a
+  // difference that is deliberate.
+  //
+  // Asserted positively rather than just deleted: `#k=` present, `p=1` absent. If a passcode is
+  // ever reintroduced, this fails loudly right here instead of the viewer silently hanging on a
+  // prompt that the rest of the test has no idea how to answer.
+  if (!/[#&]k=/.test(shareUrl)) throw new Error(`share link carries no content key: ${shareUrl}`);
+  if (/[#&]p=1/.test(shareUrl)) {
+    throw new Error(
+      `share link signals a passcode, but this deployment has none. If that is intentional, ` +
+        `this test needs the passcode-entry steps back: ${shareUrl}`
+    );
+  }
+  STEP("share link carries a key and signals no passcode, as this deployment intends");
 
   // Give the relay a beat to accept the first group before a viewer subscribes.
   await new Promise((r) => setTimeout(r, 5000));
@@ -188,12 +191,8 @@ try {
   STEP(`opening the share link as a viewer`);
   await vw.goto(shareUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-  // Hand over the second half of the secret. Without this the viewer never subscribes at all,
-  // and every check below would be measuring a passcode prompt.
-  await vw.waitForSelector("#passcode-entry", { timeout: 30000 });
-  await vw.type("#passcode-entry", passcode);
-  await vw.click("#passcode-go");
-  STEP("passcode entered");
+  // No passcode step: the `#k=` fragment in the link is the whole secret here, and the viewer
+  // subscribes as soon as the page reads it. The prompt this used to fill in does not exist.
 
   // 640 rather than >0: a blank <canvas> reports 300x150 and would pass a naive check.
   await vw.waitForFunction(
