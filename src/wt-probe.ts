@@ -51,6 +51,21 @@ interface WtProbe {
   lastDatagramAt: number;
   /** Set if opening the incoming datagram reader threw: the field exists, the feature does not. */
   datagramErr: string | null;
+  // --- bytes (task #59, open since August) --------------------------------------------------
+  //
+  // Upstream states the Safari ceiling as "roughly 7,600 streams or 16 MiB on one session,
+  // WHICHEVER COMES FIRST". Datagram audio removes ~99% of the streams and does nothing about
+  // the bytes, so the two halves now predict very different outcomes: ~4 hours if it is streams,
+  // ~84 seconds at 200 KB/s of video if it is bytes. Every measurement so far has counted
+  // streams and never bytes, which is exactly why this has stayed unresolved.
+  //
+  // Read from the transport's own getStats() rather than by tapping each incoming stream. That
+  // is deliberate: wrapping the media streams to count them is how a probe earlier today
+  // starved @moq and killed the connection it was measuring. This is read-only and cannot.
+  /** bytesReceived from getStats(), or null where the platform has no getStats. */
+  bytesIn: number | null;
+  /** Set if getStats() is unavailable or threw — so "null" is never read as "zero". */
+  statsErr: string | null;
 }
 
 export const wtProbe: WtProbe = {
@@ -66,6 +81,8 @@ export const wtProbe: WtProbe = {
   datagrams: 0,
   lastDatagramAt: 0,
   datagramErr: null,
+  bytesIn: null,
+  statsErr: null,
 };
 
 type WtCtor = new (url: string, options?: unknown) => WebTransport;
@@ -198,6 +215,40 @@ export function installWtProbe(anticipated = 0): void {
           : options;
       super(url, opts);
       wtProbe.constructed++;
+
+      // Poll bytesReceived. Read-only and out of the media path by design — the alternative,
+      // tapping each incoming stream to sum its chunks, is what killed a probe earlier today.
+      // Stops as soon as the session closes so a dead tab is not polling forever.
+      try {
+        const self = this as unknown as { getStats?: () => Promise<Record<string, unknown>> };
+        if (typeof self.getStats !== "function") {
+          wtProbe.statsErr = "getStats() unavailable on this platform";
+        } else {
+          let alive = true;
+          void this.closed.catch(() => {}).finally(() => {
+            alive = false;
+          });
+          const poll = async () => {
+            if (!alive) return;
+            try {
+              const s = await self.getStats!();
+              // Chrome exposes bytesReceived; other engines may name it differently, so fall
+              // back rather than silently reporting null on a platform that does have a number.
+              const n = (s?.bytesReceived ?? s?.bytesRead ?? null) as number | null;
+              if (typeof n === "number") wtProbe.bytesIn = n;
+              else wtProbe.statsErr = `getStats() had no byte field (keys: ${Object.keys(s ?? {}).slice(0, 6).join(",")})`;
+            } catch (e) {
+              wtProbe.statsErr = String(e).slice(0, 80);
+              alive = false; // one clean failure is enough; do not spam a broken API
+            }
+            if (alive) setTimeout(poll, 1000);
+          };
+          void poll();
+        }
+      } catch (e) {
+        wtProbe.statsErr = String(e).slice(0, 80);
+      }
+
       this.closed.then(
         (info) => {
           wtProbe.closedAt = performance.now();

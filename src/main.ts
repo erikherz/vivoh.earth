@@ -3885,6 +3885,16 @@ async function initWatchView(streamId: string, user: User | null) {
           // ambiguity; the panel now states it outright.
           `probe   installed=${wtProbe.installed ? "y" : "n"} sess=${wtProbe.constructed}` +
           `${wtProbe.err ? ` err=${wtProbe.err.slice(0, 40)}` : ""}\n` +
+          // The 16 MiB half of upstream's ceiling ("7,600 streams or 16 MiB, whichever comes
+          // first"). Datagram audio removes the streams and nothing about the bytes, so this is
+          // the number that says whether Safari was fixed or merely fails later. 16 MiB is
+          // 16777216; the percentage is there so a stall can be read against it at a glance.
+          `bytes   ${
+            wtProbe.bytesIn === null
+              ? `? ${wtProbe.statsErr ? `(${wtProbe.statsErr.slice(0, 44)})` : "(not sampled yet)"}`
+              : `${wtProbe.bytesIn} = ${(wtProbe.bytesIn / 1048576).toFixed(1)} MiB ` +
+                `(${((100 * wtProbe.bytesIn) / 16777216).toFixed(0)}% of 16 MiB)`
+          }\n` +
           `dgram   max=${wtProbe.maxDatagramSize ?? "?"}  in=${wtProbe.datagrams}` +
           // Both sides in the performance.now() clock. Mixing it with `nowS` (seconds since the
           // panel started) printed "-1s ago", which on a diagnostic someone reads while trying
