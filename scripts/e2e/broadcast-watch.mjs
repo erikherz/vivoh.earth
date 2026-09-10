@@ -188,6 +188,31 @@ try {
     if (m.type() === "error") errors.push(`watch console: ${m.text()}`);
   });
 
+  // THE VIEWER HAS TO BE SIGNED IN TOO. require_auth defaults ON here and fails closed, so an
+  // anonymous viewer returns at showWatchLoginRequired() before it ever resolves a route. The
+  // symptom is indistinguishable from a broken relay: no route call, no subscribe, no console
+  // output past the page banner, and a 60s timeout on "never decoded". This test was ported
+  // from Wallflower, where watching needs no account, and the viewer half has not been runnable
+  // here since require_auth became the default.
+  //
+  // Still a separate browser context with its own cookie jar, so the viewer proves it can reach
+  // the stream on its own credentials rather than riding on the broadcaster's page state.
+  await vw.goto(ORIGIN, { waitUntil: "domcontentloaded", timeout: 60000 });
+  const vwSignIn = await vw
+    .evaluate(async (secret) => {
+      const r = await fetch("/api/auth/e2e", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${secret}` },
+        credentials: "include",
+      });
+      return { status: r.status, body: (await r.text()).slice(0, 200) };
+    }, SECRET)
+    .catch((e) => ({ status: 0, body: String(e) }));
+  if (vwSignIn.status !== 200) {
+    throw new Error(`viewer e2e sign-in failed (${vwSignIn.status}): ${vwSignIn.body}`);
+  }
+  STEP("viewer signed in through the e2e door");
+
   STEP(`opening the share link as a viewer`);
   await vw.goto(shareUrl, { waitUntil: "networkidle2", timeout: 60000 });
 

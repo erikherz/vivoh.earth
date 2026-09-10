@@ -11,9 +11,21 @@
 
 import puppeteer from "puppeteer";
 
-const ORIGIN = process.argv[2] || "https://wallflower.tv";
-const PK = process.env.WF_PUBLISH_KEY || "";
-const BROADCAST_URL = `${ORIGIN}/broadcast${PK ? `?pk=${encodeURIComponent(PK)}` : ""}`;
+// BOTH viewers must be SIGNED IN, and that is load-bearing for what this test proves.
+//
+// require_auth defaults ON here and fails closed, so a signed-out viewer renders nothing —
+// which is exactly the observation this test treats as success. An anonymous deprived viewer
+// would make it pass every single time, including on a build that ships media in the clear.
+// The whole point is that the ONLY thing the second viewer lacks is the key, so it has to
+// carry every other credential a real viewer has.
+const ORIGIN = process.argv[2] || "https://vivoh.earth";
+const SECRET = process.env.VE_E2E_SECRET || "";
+if (!SECRET) {
+  console.error("VE_E2E_SECRET is not set. Refusing to run: without a signed-in deprived viewer");
+  console.error("this test passes whether or not the media is encrypted.");
+  process.exit(1);
+}
+const BROADCAST_URL = `${ORIGIN}/broadcast`;
 const browser = await puppeteer.launch({
   headless: "new",
   args: [
@@ -39,9 +51,24 @@ const litCount = () => {
   return lit;
 };
 
+// Mint a session on this page's own origin before it navigates anywhere that needs one.
+const signIn = async (page) => {
+  await page.goto(ORIGIN, { waitUntil: "domcontentloaded", timeout: 60000 });
+  const r = await page.evaluate(async (secret) => {
+    const res = await fetch("/api/auth/e2e", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${secret}` },
+      credentials: "include",
+    });
+    return { status: res.status, body: (await res.text()).slice(0, 200) };
+  }, SECRET);
+  if (r.status !== 200) throw new Error(`e2e sign-in failed (${r.status}): ${r.body}`);
+};
+
 const watch = async (url, label) => {
   const ctx = await browser.createBrowserContext();
   const page = await ctx.newPage();
+  await signIn(page); // see the note at the top: an anonymous viewer fakes a pass
   await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
   await new Promise((r) => setTimeout(r, 14000));
   const lit = await page.evaluate(litCount);
@@ -51,6 +78,7 @@ const watch = async (url, label) => {
 
 try {
   const bc = await browser.newPage();
+  await signIn(bc); // OAuth is the only other publisher door, and a headless browser cannot use it
   await bc.goto(BROADCAST_URL, { waitUntil: "networkidle2", timeout: 60000 });
   await bc.waitForSelector('button.publish-btn[title="Camera"]', { timeout: 30000 });
   await bc.click('button.publish-btn[title="Camera"]');
@@ -76,8 +104,8 @@ try {
   } else {
     console.log(
       `\nPASS: ${litWith} lit pixels with the fragment, ${litWithout} without.\n` +
-      `The link is the sole capability. Wallflower's Worker and database hold nothing that\n` +
-      `would decrypt this stream, because the secret never reaches them.`
+      `The link is the sole capability. This deployment's Worker and database hold nothing\n` +
+      `that would decrypt this stream, because the secret never reaches them.`
     );
   }
 } catch (e) {
