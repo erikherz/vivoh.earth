@@ -1798,17 +1798,21 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // objects are `z.strip`: an unknown key like `transport: "datagram"` is silently dropped at
     // validation. A root-level section would survive (the root is `z.loose`), but a name needs
     // no schema at all and both ends of this are ours.
-    // OFF by default. It was on, and it broke audio for EVERY viewer — including viewers that
-    // selected the ordinary group rendition, which is why "additive" was wrong. Publishing a
-    // second audio rendition is evidently not free: with two of them in the catalog the viewer
-    // decodes and syncs frames but never creates an AudioContext (`actx none`), so nothing
-    // reaches the speakers on Chrome or iOS.
+    // ON by default; `?adg=0` publishes the group rendition alone.
     //
-    // The e2e matrix passed this, because it counts AudioDecoder outputs and decode/sync/emit are
-    // three stages of which it measured one. Until it asserts an AudioContext in `running`,
-    // dual-publish stays behind ?adg=1 and the default is the single-rendition path that has
-    // worked all day.
-    const dualPublishAudio = new URLSearchParams(location.search).get("adg") === "1";
+    // This was turned off once on the belief that a second audio rendition stopped viewers from
+    // ever creating an AudioContext. That was wrong twice over: `actx none` came from a diag
+    // panel reading a <moq-watch> shape the element no longer had, and the broadcasts it was
+    // read from were publishing 3-byte Opus silence because a capture toggle had been dropped.
+    // Re-measured with a probe that reports what reaches the speakers, all four transport cells
+    // are audible — including a WebSocket viewer while a WebTransport viewer is on datagrams.
+    //
+    // It has to be the default, because it is what makes Safari work. There is no group
+    // fallback at any layer, so without a second rendition datagram audio is a straight trade
+    // of iOS against every viewer whose transport is WebSocket. The cost is the broadcaster's
+    // uplink only (~64-128 kbps): each viewer pulls exactly one rendition and the encoders are
+    // demand-gated.
+    const dualPublishAudio = new URLSearchParams(location.search).get("adg") !== "0";
     const DG_TRACK = "audio/dg";
     let dgEncoder: { close(): void } | null = null;
     if (dualPublishAudio) {
@@ -3663,19 +3667,15 @@ async function initWatchView(streamId: string, user: User | null) {
       );
     } else {
       const DG_TRACK = "audio/dg";
-      // OPT-IN AGAIN, DEFAULT OFF. Shipping this on by default produced silence on Chrome AND
-      // iOS: the datagram rendition subscribes cleanly (subscribe ok, dgram in climbing, decrypt
-      // ok, sync[audio] reporting late frames) yet `actx` reads NONE — no AudioContext is ever
-      // created, so nothing reaches the speakers.
+      // AUTOMATIC, on evidence rather than a flag. `?dgaudio=0` pins this viewer to groups.
       //
-      // The e2e matrix passed it, because it counts AudioDecoder outputs. Decoded frames are not
-      // audible sound: decode, sync and emit are separate stages and only the first was ever
-      // measured. Until the matrix asserts an AudioContext in the `running` state, this stays
-      // behind ?dgaudio=1 on the VIEWER link.
-      const viewerWantsDatagramAudio =
-        new URLSearchParams(location.search).get("dgaudio") === "1";
-      if (!viewerWantsDatagramAudio) {
-        console.log('[dual-audio] datagram rendition available; staying on "audio" (?dgaudio=1 to try it)');
+      // The decision below is already the safe one in both directions: it starts on the group
+      // rendition (registered first, so @moq/watch's auto-pick takes it) and upgrades ONLY once
+      // this session has proven it carries datagrams. A flag on top of that bought nothing
+      // except a viewer who had to know to add it — and every real Safari viewer, the ones this
+      // exists for, arrives by tapping a shared link.
+      if (new URLSearchParams(location.search).get("dgaudio") === "0") {
+        console.log('[dual-audio] dgaudio=0 — pinned to the group rendition');
         return;
       }
       let chose = false;

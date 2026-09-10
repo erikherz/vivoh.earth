@@ -11,7 +11,7 @@
 // fallback"). Without a second rendition, datagram audio is a straight trade of iOS against
 // every viewer whose transport is WebSocket.
 //
-//                       control (groups only)            dual-publish (?adg=1)
+//                       control (?adg=0, groups only)    dual-publish (the default)
 //   WebTransport        audible, no datagrams            AUDIBLE VIA DATAGRAMS, low stream rate
 //   WebSocket           audible, no datagrams            audible via groups, no datagrams
 //
@@ -91,8 +91,10 @@ const run = async ({ dual, viewerWsOnly }) => {
   const bc = await browser.newPage();
   await bc.evaluateOnNewDocument(ENCODER_TAP);
   await signIn(bc);
-  // ?adg=1 turns the datagram rendition ON; the default is the single group rendition.
-  await bc.goto(`${ORIGIN}/broadcast${dual ? "?adg=1" : ""}`, { waitUntil: "networkidle2", timeout: 60000 });
+  // Dual-publish is the DEFAULT now; ?adg=0 is what strips the datagram rendition, so the
+  // control arm is the flagged one. Keep that straight or the two arms silently swap and the
+  // matrix reports the opposite of what it measured.
+  await bc.goto(`${ORIGIN}/broadcast${dual ? "" : "?adg=0"}`, { waitUntil: "networkidle2", timeout: 60000 });
 
   // Retried: the control bar is built in JS and occasionally loses a race with networkidle2.
   // A flake here silently drops a cell, and a three-cell matrix reads exactly like a four-cell one.
@@ -117,9 +119,10 @@ const run = async ({ dual, viewerWsOnly }) => {
   await bc.waitForFunction(() => /[?&]stream=[a-z0-9]{5}/.test(location.href), { polling: 500, timeout: 30000 });
   const share = await bc.evaluate(() => document.getElementById("copy-btn")?.getAttribute("data-share-url") ?? "");
   const [base, frag] = share.split("#");
-  // ?dgaudio=1 is what makes a viewer PREFER the datagram rendition; without it the auto-pick
-  // takes the group rendition, which is the safe accidental case but tests nothing.
-  const url = `${base}?diag=1${dual ? "&dgaudio=1" : ""}${viewerWsOnly ? "&wsonly=1" : ""}#${frag}`;
+  // No rendition flag: the viewer now upgrades to datagrams on its own once the session has
+  // proven it carries them. That IS the behaviour under test — a flag here would test a code
+  // path no real viewer takes, since real viewers arrive by tapping a shared link.
+  const url = `${base}?diag=1${viewerWsOnly ? "&wsonly=1" : ""}#${frag}`;
 
   const vctx = await browser.createBrowserContext();
   const vw = await vctx.newPage();
@@ -235,7 +238,7 @@ try {
   }
 
   // 2. The control must NOT use datagrams, or "datagrams were used" below means nothing.
-  if (got.ctrlWT?.dgramIn > 0) fail("control (no ?adg=1) received datagrams — the flag is not what enables the second rendition");
+  if (got.ctrlWT?.dgramIn > 0) fail("control (?adg=0) received datagrams — the flag did not strip the second rendition");
 
   // 3. A datagram-capable viewer must actually be ON datagrams under dual-publish.
   if (!(got.dualWT?.dgramIn > 0)) fail("dual-publish + WebTransport received NO datagrams — the viewer stayed on the group rendition");

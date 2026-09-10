@@ -350,14 +350,32 @@ try {
     (globalThis as unknown as { __VIVOH_WS_ONLY__?: boolean }).__VIVOH_WS_ONLY__ = true;
     console.log("[wsonly] WebTransport leg DISABLED for this load — reproducing the phone's transport");
   }
-  // ?wtsafari=1 — ignore @moq/net's blanket UA ban on Safari and let it attempt WebTransport.
-  // Upstream disabled it because one QUIC stream per audio frame hits WebKit's ceiling in about
-  // two minutes; audio over datagrams removes ~99% of those streams, so the premise no longer
-  // holds for us. Opt-in, because it is an override of a deliberate upstream decision and the
-  // 16 MiB half of that ceiling is still unmeasured.
-  if (q.get("wtsafari") === "1") {
+  // Safari and WebTransport: ON by default here, `?wtsafari=0` to restore upstream's ban.
+  //
+  // @moq/net 0.3.5 refuses WebTransport for every Safari (a `safari` range no version can
+  // satisfy), citing OUR bug report. The premise is sound and specific: one QUIC stream per
+  // audio frame is ~50 streams/s, and WebKit stops delivering at roughly 7,600 streams on a
+  // session, which is about two minutes. That is the right default for a publisher sending
+  // audio as groups.
+  //
+  // It is the wrong default for THIS deployment, because audio here goes over datagrams, which
+  // consume no stream ids at all. Measured: 50.5 streams/s down to 0.5, and on a real iPhone
+  // 13,000+ datagrams with good audio and video past four minutes and ~52 MB, through the ~140s
+  // original failure and past the ~84s the 16 MiB theory predicted.
+  //
+  // The cost of the ban is not degraded audio, it is no path to datagrams at all: a WebSocket
+  // session reports maxDatagramSize 0, so every Safari viewer is pinned to the group rendition
+  // and lands back under the very ceiling the ban exists to avoid. Bypassing it is what makes
+  // Safari a first-class viewer instead of one on a permanent fallback.
+  //
+  // The escape hatch stays, and it is a real one: if a WebKit release breaks WebTransport again,
+  // `?wtsafari=0` puts that viewer back on WebSocket without a deploy.
+  const wtSafari = q.get("wtsafari");
+  if (wtSafari !== "0") {
     (globalThis as unknown as { __VIVOH_WT_SAFARI__?: boolean }).__VIVOH_WT_SAFARI__ = true;
-    console.log("[wtsafari] upstream's Safari WebTransport ban BYPASSED for this load");
+    if (wtSafari === "1") console.log("[wtsafari] Safari WebTransport ban bypassed (explicit)");
+  } else {
+    console.log("[wtsafari] wtsafari=0 — honouring upstream's Safari WebTransport ban for this load");
   }
 } catch {
   // Never let instrumentation be the reason the page fails to load.
