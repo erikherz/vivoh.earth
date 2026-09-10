@@ -1798,10 +1798,17 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     // objects are `z.strip`: an unknown key like `transport: "datagram"` is silently dropped at
     // validation. A root-level section would survive (the root is `z.loose`), but a name needs
     // no schema at all and both ends of this are ours.
-    // ON by default: the datagram rendition is purely additive and the group rendition still
-    // reaches everyone, so there is no viewer this can strand. `?adg=0` turns the second
-    // rendition off for a broadcaster who would rather not spend the extra uplink, or to A/B it.
-    const dualPublishAudio = new URLSearchParams(location.search).get("adg") !== "0";
+    // OFF by default. It was on, and it broke audio for EVERY viewer — including viewers that
+    // selected the ordinary group rendition, which is why "additive" was wrong. Publishing a
+    // second audio rendition is evidently not free: with two of them in the catalog the viewer
+    // decodes and syncs frames but never creates an AudioContext (`actx none`), so nothing
+    // reaches the speakers on Chrome or iOS.
+    //
+    // The e2e matrix passed this, because it counts AudioDecoder outputs and decode/sync/emit are
+    // three stages of which it measured one. Until it asserts an AudioContext in `running`,
+    // dual-publish stays behind ?adg=1 and the default is the single-rendition path that has
+    // worked all day.
+    const dualPublishAudio = new URLSearchParams(location.search).get("adg") === "1";
     const DG_TRACK = "audio/dg";
     let dgEncoder: { close(): void } | null = null;
     if (dualPublishAudio) {
@@ -1966,10 +1973,18 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
 
     // Serialize because getDisplayMedia/getUserMedia show permission prompts.
     let applying = false;
-    const applyState = async () => {
-      if (applying) return;
-      applying = true;
-      try {
+    // Set when a capture toggle arrives while a pass is already running. See applyState below.
+    let restage = false;
+
+    /**
+     * ONE reconcile pass: read `capture` and make the world match it.
+     *
+     * The snapshot below is taken once and then survives several awaits — getUserMedia can take
+     * a second or more — so a pass applies the state as it was when the pass STARTED. That is
+     * only safe because applyState re-runs this whenever the state moved underneath it.
+     */
+    const applyOnce = async () => {
+      {
         const { camera, audio, screen } = capture;
         anyActive = camera || audio || screen;
         const hasVideo = camera || screen;
@@ -2077,6 +2092,49 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         publisher.announce = "source";
         publisher.source = null;
         endBroadcast();
+      }
+    };
+
+    /**
+     * Serialize passes, and NEVER drop one.
+     *
+     * The prompts are why there is a lock at all: two overlapping passes would race two
+     * permission dialogs. But the lock used to `return` when busy, which threw the request
+     * away — and each pass snapshots `capture` before its awaits. Click Camera and then Audio
+     * before the camera's getUserMedia resolves, and the audio request simply vanished: the
+     * in-flight pass had already read `audio: false` and went on to call setMicEnabled(false),
+     * and nothing ever ran again.
+     *
+     * The broadcaster then went live with the microphone button LIT and the mixed track
+     * publishing digital silence — 3-byte Opus frames, which every viewer decodes happily and
+     * nobody hears. Measured on production: 868 encoder chunks, min 3 bytes, max 3 bytes,
+     * against a capture source peaking at 0.99. Nothing anywhere reported an error.
+     *
+     * So coalesce instead of dropping: a request arriving mid-pass sets `restage` and the loop
+     * runs another pass with a fresh snapshot. Repeated toggles collapse into one extra pass
+     * rather than a queue. The cap is a backstop against a callback that re-arms every pass —
+     * bounded, and it says so rather than spinning in silence.
+     */
+    const MAX_RESTAGE_PASSES = 8;
+    const applyState = async () => {
+      if (applying) {
+        restage = true;
+        return;
+      }
+      applying = true;
+      try {
+        let passes = 0;
+        do {
+          restage = false;
+          await applyOnce();
+          if (++passes >= MAX_RESTAGE_PASSES && restage) {
+            console.warn(
+              `[media] capture state still changing after ${passes} reconcile passes; stopping here. ` +
+                `The control bar and the actual capture may now disagree.`
+            );
+            break;
+          }
+        } while (restage);
       } finally {
         applying = false;
       }
@@ -3605,6 +3663,21 @@ async function initWatchView(streamId: string, user: User | null) {
       );
     } else {
       const DG_TRACK = "audio/dg";
+      // OPT-IN AGAIN, DEFAULT OFF. Shipping this on by default produced silence on Chrome AND
+      // iOS: the datagram rendition subscribes cleanly (subscribe ok, dgram in climbing, decrypt
+      // ok, sync[audio] reporting late frames) yet `actx` reads NONE — no AudioContext is ever
+      // created, so nothing reaches the speakers.
+      //
+      // The e2e matrix passed it, because it counts AudioDecoder outputs. Decoded frames are not
+      // audible sound: decode, sync and emit are separate stages and only the first was ever
+      // measured. Until the matrix asserts an AudioContext in the `running` state, this stays
+      // behind ?dgaudio=1 on the VIEWER link.
+      const viewerWantsDatagramAudio =
+        new URLSearchParams(location.search).get("dgaudio") === "1";
+      if (!viewerWantsDatagramAudio) {
+        console.log('[dual-audio] datagram rendition available; staying on "audio" (?dgaudio=1 to try it)');
+        return;
+      }
       let chose = false;
       const pick = () => {
         if (chose) return;
@@ -3690,6 +3763,54 @@ async function initWatchView(streamId: string, user: User | null) {
      * produces a black player instead of a fresh one.
      */
     /**
+     * Read a <moq-watch> internal across two INCOMPATIBLE element shapes.
+     *
+     * @moq/watch 0.1.5 hung its components off `el.backend` and exposed their signals directly.
+     * 0.5.4 hangs the components off the element itself and puts every output behind `out`. The
+     * upgrade changed both, and nothing threw: every `el.backend.audio.<signal>` read simply
+     * evaluated to undefined. Three separate features degraded in total silence —
+     *
+     *   - isReceiving(): the audio-only watchdog lost its only non-video evidence, so an
+     *     audio-only broadcast was judged dead and rebuilt forever;
+     *   - audioCtxNow(): the "restore audio" button could never find a suspended context, so
+     *     it was never offered — on iOS, exactly where it exists to help;
+     *   - the diag panel: `actx`, `audio B`, `video B`, `vts`, `conn` and `bcast` all read as
+     *     absent, and `actx none` was then taken as EVIDENCE that a feature had killed the
+     *     emitter. It had not; the reader had.
+     *
+     * So accept either shape, and make an unknown one visible (see `shape` in the diag panel)
+     * instead of quietly reporting nothing.
+     */
+    const watchPart = (el: unknown, kind: "audio" | "video"): unknown => {
+      const e = el as Record<string, unknown> | null | undefined;
+      const backend = e?.backend as Record<string, unknown> | undefined;
+      return e?.[kind] ?? backend?.[kind];
+    };
+
+    /** A component's signal, whichever side of the `out` split it lives on. */
+    const partSignal = (component: unknown, name: string): unknown => {
+      const c = component as Record<string, unknown> | null | undefined;
+      const out = c?.out as Record<string, unknown> | undefined;
+      return out?.[name] ?? c?.[name];
+    };
+
+    const peekSignal = <T,>(signal: unknown): T | undefined =>
+      (signal as { peek?: () => T | undefined } | undefined)?.peek?.();
+
+    /** Shorthand: peek a named signal off the element's audio/video component. */
+    const watchPeek = <T,>(el: unknown, kind: "audio" | "video", name: string): T | undefined =>
+      peekSignal<T>(partSignal(watchPart(el, kind), name));
+
+    /** Which element shape this build actually found, for the diag panel to state outright. */
+    const watchShape = (el: unknown): string => {
+      const e = el as Record<string, unknown> | null | undefined;
+      if (!e) return "no element";
+      if (e.audio) return partSignal(e.audio, "context") ? "0.5.x" : "0.5.x?";
+      if (e.backend) return "0.1.x";
+      return "UNKNOWN — every internal read below is blind";
+    };
+
+    /**
      * Is this element actually receiving media?
      *
      * Painting alone is the wrong test, and it is why the watchdog could never recover an
@@ -3700,9 +3821,7 @@ async function initWatchView(streamId: string, user: User | null) {
      */
     const isReceiving = (el: Element): boolean => {
       if (isPainting(el)) return true;
-      const bytes = (el as unknown as {
-        backend?: { audio?: { stats?: { peek?: () => { bytesReceived?: number } | undefined } } };
-      })?.backend?.audio?.stats?.peek?.()?.bytesReceived;
+      const bytes = watchPeek<{ bytesReceived?: number }>(el, "audio", "stats")?.bytesReceived;
       return typeof bytes === "number" && bytes > 0;
     };
 
@@ -3783,9 +3902,7 @@ async function initWatchView(streamId: string, user: User | null) {
      * It reports the transition it achieved, so a failure is legible rather than mysterious.
      */
     const audioCtxNow = (): AudioContext | undefined =>
-      (live as unknown as {
-        backend?: { audio?: { context?: { peek?: () => AudioContext | undefined } } };
-      })?.backend?.audio?.context?.peek?.();
+      watchPeek<AudioContext>(live, "audio", "context");
 
     let restoreBtn: HTMLButtonElement | null = null;
 
@@ -3922,35 +4039,29 @@ async function initWatchView(streamId: string, user: User | null) {
 
       const tick = () => {
         const el = live as unknown as {
-          backend?: {
-            audio?: {
-              context?: { peek?: () => AudioContext | undefined };
-              stats?: { peek?: () => { bytesReceived?: number } | undefined };
-              buffered?: { peek?: () => unknown };
-            };
-            video?: {
-              stats?: { peek?: () => { bytesReceived?: number } | undefined };
-              stalled?: { peek?: () => boolean };
-              timestamp?: { peek?: () => number };
-            };
-          };
           connection?: { established?: { peek?: () => unknown }; url?: { peek?: () => URL | undefined } };
-          broadcast?: { status?: { peek?: () => string }; active?: { peek?: () => unknown } };
+          broadcast?: {
+            out?: { status?: { peek?: () => string }; active?: { peek?: () => unknown } };
+            status?: { peek?: () => string };
+            active?: { peek?: () => unknown };
+          };
         };
-        const a = el?.backend?.audio;
-        const v = el?.backend?.video;
-        const ctx = a?.context?.peek?.();
-        const bytes = a?.stats?.peek?.()?.bytesReceived ?? -1;
+        // Every read below goes through watchPart/partSignal: this panel was reading a shape
+        // the element stopped having at the @moq upgrade, and printed a confident "none" for
+        // an AudioContext that existed the whole time. `shape` says which shape was found.
+        const shape = watchShape(el);
+        const ctx = watchPeek<AudioContext>(el, "audio", "context");
+        const bytes = watchPeek<{ bytesReceived?: number }>(el, "audio", "stats")?.bytesReceived ?? -1;
         // VIDEO bytes separately from audio. If both stop together the connection died; if
         // only one stops it is that track's pipeline, which is a completely different fault.
-        const vbytes = v?.stats?.peek?.()?.bytesReceived ?? -1;
-        const vstalled = v?.stalled?.peek?.() ?? null;
-        const vts = v?.timestamp?.peek?.() ?? null;
+        const vbytes = watchPeek<{ bytesReceived?: number }>(el, "video", "stats")?.bytesReceived ?? -1;
+        const vstalled = watchPeek<boolean>(el, "video", "stalled") ?? null;
+        const vts = watchPeek<number>(el, "video", "timestamp") ?? null;
         // Is the CONNECTION still up? A live socket with no bytes means the relay stopped
         // sending; a dead one means the transport dropped and nothing re-established it.
-        const conn = el?.connection?.established?.peek?.() ? "up" : "DOWN";
-        const bstatus = el?.broadcast?.status?.peek?.() ?? "?";
-        const bactive = el?.broadcast?.active?.peek?.() ? "yes" : "no";
+        const conn = peekSignal(partSignal(el?.connection, "established")) ? "up" : "DOWN";
+        const bstatus = peekSignal<string>(partSignal(el?.broadcast, "status")) ?? "?";
+        const bactive = peekSignal(partSignal(el?.broadcast, "active")) ? "yes" : "no";
         const { successes, failures } = decryptStats();
         const canvas = live.querySelector("canvas") as HTMLCanvasElement | null;
 
@@ -4058,7 +4169,9 @@ async function initWatchView(streamId: string, user: User | null) {
           `decrypt ok ${successes} fail ${failures}  (moved ${(nowS - lastDecMove).toFixed(0)}s ago)\n` +
           `vts     ${vts === null ? "?" : Math.round(vts as number)}\n` +
           `canvas  ${canvas ? `${canvas.width}x${canvas.height}` : "none"}\n` +
-          `actx    ${ctx ? `${ctx.state} t=${ctx.currentTime.toFixed(1)}` : "none"}  muted=${live.muted}\n` +
+          // `shape` sits next to actx deliberately: "actx none" is only meaningful if the panel
+          // could see into the element at all, and for one whole day it could not.
+          `actx    ${ctx ? `${ctx.state} t=${ctx.currentTime.toFixed(1)}` : "none"}  muted=${live.muted}  shape=${shape}\n` +
           `page    ${document.visibilityState}` +
           (mem ? `  heap ${(mem.usedJSHeapSize / 1048576).toFixed(0)}MB` : "");
       };
