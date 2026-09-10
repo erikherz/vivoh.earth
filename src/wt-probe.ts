@@ -291,6 +291,14 @@ try {
     (globalThis as unknown as { __VIVOH_WT_ONLY__?: boolean }).__VIVOH_WT_ONLY__ = true;
     console.log("[wtonly] WebSocket fallback DISABLED for this load — WebTransport or nothing");
   }
+  // ?wsonly=1 — the mirror: never attempt the QUIC leg, so the session runs over qmux/WebSocket
+  // while the WebTransport API is still present. That is the state Erik's iPhone is in, and it
+  // could not be reproduced on a desktop before this, which is why every question about it cost
+  // a remote round trip and a broadcast restart.
+  if (q.get("wsonly") === "1") {
+    (globalThis as unknown as { __VIVOH_WS_ONLY__?: boolean }).__VIVOH_WS_ONLY__ = true;
+    console.log("[wsonly] WebTransport leg DISABLED for this load — reproducing the phone's transport");
+  }
 } catch {
   // Never let instrumentation be the reason the page fails to load.
 }

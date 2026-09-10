@@ -16,7 +16,23 @@ import { defineConfig, type Plugin } from "vite";
 // (old Safari, Firefox) — but those can't talk to tinymoq anyway (WT-only relay).
 function moqWebTransportOnly(): Plugin {
   const WS_GATE = "props?.websocket?.enabled !== false";
+  // The mirror of the WS gate. Erik's iPhone runs every session over WebSocket while still
+  // HAVING the WebTransport API — it loses (or never completes) the race — and that combination
+  // could not be reproduced locally, which is why this investigation cost eight remote round
+  // trips at one broadcast restart each.
+  //
+  // ?wsonly=1 forces the same state on any machine: WebTransport is left present, so the app
+  // takes the same branches it does on the phone, but connect() never attempts the QUIC leg and
+  // the qmux/WebSocket path wins by default. That is a faithful reproduction, unlike deleting
+  // globalThis.WebTransport, which would instead route through VE's own polyfill — a different
+  // code path from the one the phone actually uses.
+  // 0.3.5 factored this into isWebTransportSupported(); it used to be an inline
+  // `globalThis.WebTransport && !isFirefox`. Guessing the old shape is what the buildEnd warning
+  // caught — and had that warning not existed, ?wsonly=1 would have accepted the flag, quietly
+  // run over WebTransport anyway, and "reproduced" the phone by proving the opposite.
+  const WT_GATE = "isWebTransportSupported() ?";
   let patched = 0;
+  let wtPatched = 0;
   return {
     name: "moq-webtransport-only",
     enforce: "pre",
@@ -37,25 +53,34 @@ function moqWebTransportOnly(): Plugin {
         //
         // Left as opt-in: the WebSocket fallback is deliberately on here for iPhone and older
         // Safari, and removing it wholesale would strand exactly the viewers it exists for.
-        return {
-          code: code.replace(
-            WS_GATE,
-            "(globalThis.__VIVOH_WT_ONLY__ ? false : props?.websocket?.enabled !== false)"
-          ),
-          map: null,
-        };
+        let out = code.replace(
+          WS_GATE,
+          "(globalThis.__VIVOH_WT_ONLY__ ? false : props?.websocket?.enabled !== false)"
+        );
+        if (out.includes(WT_GATE)) {
+          wtPatched++;
+          out = out.replace(
+            WT_GATE,
+            "(!globalThis.__VIVOH_WS_ONLY__ && isWebTransportSupported()) ?"
+          );
+        }
+        return { code: out, map: null };
       }
       return null;
     },
     buildEnd() {
       if (patched === 0) {
         this.warn(
-          "moq-webtransport-only: did not patch any @moq/net connect.js — the WS gate string may have changed upstream; WebSocket race may still be active."
+          "moq-transport-gates: did not patch the WS gate in any @moq/net connect.js — the string may have changed upstream; ?wtonly=1 will silently do nothing."
         );
-      } else {
-        // eslint-disable-next-line no-console
-        console.log(`moq-webtransport-only: patched ${patched} @moq/net connect module(s) to WebTransport-only`);
       }
+      if (wtPatched === 0) {
+        this.warn(
+          "moq-transport-gates: did not patch the WT gate — ?wsonly=1 will silently do nothing, which means a WebSocket reproduction would quietly run over WebTransport and 'prove' the wrong thing."
+        );
+      }
+      // eslint-disable-next-line no-console
+      console.log(`moq-transport-gates: ws-gate=${patched} wt-gate=${wtPatched} (runtime ?wtonly=1 / ?wsonly=1)`);
     },
   };
 }
