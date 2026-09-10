@@ -128,6 +128,26 @@ const run = async (browser, label, adg) => {
   if (!shareUrl) throw new Error("no share link on the broadcaster page");
   const vctx = await page.browser().createBrowserContext();
   const viewer = await vctx.newPage();
+  // Count audio the VIEWER actually decoded. Publisher-side counters prove bytes left the
+  // browser; only this proves they arrived, decrypted, and turned back into sound. Without it
+  // an ?adg=1 run that delivers nothing looks identical to one that delivers everything,
+  // because the picture keeps moving either way — video never left the group path.
+  await viewer.evaluateOnNewDocument(() => {
+    window.__audioOut = 0;
+    const Native = window.AudioDecoder;
+    if (!Native) return;
+    window.AudioDecoder = class extends Native {
+      constructor(init) {
+        super({
+          ...init,
+          output: (frame) => {
+            window.__audioOut++;
+            init.output(frame);
+          },
+        });
+      }
+    };
+  });
   await viewer.goto(ORIGIN, { waitUntil: "domcontentloaded", timeout: 60000 });
   await viewer.evaluate(async (secret) => {
     await fetch("/api/auth/e2e", {
@@ -174,12 +194,14 @@ const run = async (browser, label, adg) => {
   const t0 = Date.now();
   await new Promise((r) => setTimeout(r, RUN_MS));
   const after = await page.evaluate(() => ({ ...window.__wtStats }));
+  const audioDecoded = await viewer.evaluate(() => window.__audioOut ?? -1);
   const secs = (Date.now() - t0) / 1000;
 
   const d = {
     label,
     stream: id,
     seconds: Math.round(secs),
+    viewerAudioFramesDecoded: audioDecoded,
     uni: after.uni - before.uni,
     uniPerSec: +((after.uni - before.uni) / secs).toFixed(1),
     datagrams: after.datagrams - before.datagrams,
@@ -224,6 +246,19 @@ try {
   } else if (dgram.datagrams === 0) {
     console.error(`\nFAIL: ?adg=1 sent ZERO datagrams. Audio did not move; check the [adg] logs above.`);
     failed = true;
+  } else if (control.viewerAudioFramesDecoded <= 0) {
+    console.error(
+      `\nINCONCLUSIVE: the control viewer decoded no audio either (${control.viewerAudioFramesDecoded}),` +
+        ` so "datagram audio decodes" cannot be distinguished from "audio never worked here".`
+    );
+    failed = true;
+  } else if (dgram.viewerAudioFramesDecoded <= 0) {
+    console.error(
+      `\nFAIL: ?adg=1 moved audio onto datagrams and the viewer decoded NONE of it` +
+        ` (control decoded ${control.viewerAudioFramesDecoded}). The send half works and the` +
+        ` receive half does not — which is silence for every viewer, with no group fallback.`
+    );
+    failed = true;
   } else if (dgram.uniPerSec > control.uniPerSec * 0.5) {
     console.error(
       `\nFAIL: ?adg=1 still opens ${dgram.uniPerSec} streams/s against a ${control.uniPerSec}/s control.` +
@@ -235,6 +270,11 @@ try {
     console.log(
       `\nPASS: stream rate fell ${drop}% (${control.uniPerSec} -> ${dgram.uniPerSec} per second)` +
         ` while ${dgram.datagrams} datagrams (${dgram.datagramBytes} bytes) went out instead.`
+    );
+    console.log(
+      `The viewer decoded ${dgram.viewerAudioFramesDecoded} audio frames over datagrams` +
+        ` (${control.viewerAudioFramesDecoded} over groups in the control), so the round trip` +
+        ` closes: encrypted in the browser, carried as datagrams, decrypted and decoded.`
     );
     const ceiling = 7000;
     const before = control.uniPerSec > 0 ? Math.round(ceiling / control.uniPerSec) : 0;

@@ -209,6 +209,87 @@ function mediaCryptoPatch(): Plugin {
         }
     }`;
 
+  // --- seam 4: RECEIVE audio datagrams (consumer.js #run) ---
+  //
+  // The other half of audio-over-datagrams. @moq/net's Track.Subscriber has recvDatagram(), but
+  // nothing in @moq/hang or @moq/watch ever calls it, so a datagram published by seam 2 would
+  // arrive at the relay, cross it, reach the browser, and be dropped on the floor.
+  //
+  // WHY IT LOOKS LIKE THIS. A datagram is definitionally "a single-frame group": lite-05 gives
+  // it the same sequence namespace as groups, and the payload is exactly what one frame of a
+  // one-frame group would carry. So rather than synthesise entries into #groups and re-implement
+  // this file's reset / rewind / latency-skip / PTS-contiguity machinery (and get some of it
+  // subtly wrong, which shows up as stutter rather than as an error), we adapt the datagram into
+  // the shape #run already consumes and change exactly one line: where a group comes from.
+  //
+  // Everything downstream is then untouched and free: ordering by sequence, the stale/reset
+  // classification, the latency budget — and seam 3, which sits inside #runGroup and therefore
+  // DECRYPTS datagram payloads with no extra code. That is the main reason to adapt rather than
+  // duplicate: the encryption path stays single.
+  //
+  // The two pending promises are held across iterations on purpose. A naive
+  // `Promise.race([recvGroup(), recvDatagram()])` per loop would discard the loser's pending
+  // read every time, silently dropping whichever arrived second.
+  //
+  // Always on, and safe to be: on a publisher that sends no datagrams the datagram promise
+  // simply never settles, and on a transport without them recvDatagram is absent or throws,
+  // which the guard treats as "groups only" for the life of the subscription.
+  const RX_FIND = `    async #run() {
+        // Start fetching groups in the background
+        for (;;) {
+            const consumer = await this.#track.recvGroup();
+            if (!consumer)
+                break;`;
+  const RX_REPLACE = `    async #run() {
+        // Start fetching groups in the background
+        const __wrapDatagram = (dg) => {
+            let __taken = false;
+            return {
+                sequence: dg.sequence,
+                readFrame: async () => {
+                    if (__taken) return undefined;
+                    __taken = true;
+                    // #runGroup reads the presentation time out of the decoded sample, not from
+                    // here, so this timestamp is carried only for shape.
+                    return { payload: dg.payload, timestamp: dg.timestamp };
+                },
+                close: () => {},
+            };
+        };
+        const __nextSource = async () => {
+            for (;;) {
+                if (!this.__dgPendingGroup) {
+                    this.__dgPendingGroup = this.#track.recvGroup().then((v) => ({ k: "g", v }));
+                }
+                let __wantDg = this.__dgOff !== true && typeof this.#track.recvDatagram === "function";
+                if (__wantDg && !this.__dgPendingDatagram) {
+                    try {
+                        this.__dgPendingDatagram = this.#track.recvDatagram().then((v) => ({ k: "d", v }));
+                    } catch (e) {
+                        this.__dgOff = true;
+                        __wantDg = false;
+                    }
+                }
+                const __r = await Promise.race(
+                    __wantDg && this.__dgPendingDatagram
+                        ? [this.__dgPendingGroup, this.__dgPendingDatagram]
+                        : [this.__dgPendingGroup]
+                );
+                if (__r.k === "g") {
+                    this.__dgPendingGroup = undefined;
+                    return __r.v;
+                }
+                this.__dgPendingDatagram = undefined;
+                // The datagram side finishing does NOT end the track: groups may still arrive.
+                if (!__r.v) { this.__dgOff = true; continue; }
+                return __wrapDatagram(__r.v);
+            }
+        };
+        for (;;) {
+            const consumer = await __nextSource();
+            if (!consumer)
+                break;`;
+
   // --- seam 3: decrypt both (consumer.js, before Format.decode) ---
   // Re-derived for @moq/hang 0.4.3: the read side now yields a frame OBJECT, so the decode site
   // reads `next.payload` where it used to take `next` whole. We decrypt the payload only —
@@ -219,6 +300,7 @@ function mediaCryptoPatch(): Plugin {
   let video = 0;
   let audio = 0;
   let decrypt = 0;
+  let datagramRx = 0;
   return {
     name: "vivoh-media-crypto-patch",
     enforce: "pre",
@@ -256,9 +338,20 @@ function mediaCryptoPatch(): Plugin {
         audio++;
         return { code: code.replace(AUDIO_FIND, AUDIO_REPLACE), map: null };
       }
-      if (id.includes("/container/consumer.js") && code.includes(DECRYPT_FIND)) {
-        decrypt++;
-        return { code: code.replace(DECRYPT_FIND, DECRYPT_REPLACE), map: null };
+      // Both consumer.js seams in one pass. They live in the same file, and returning after the
+      // first would leave the second unapplied while still reporting a clean build — the exact
+      // shape of failure this plugin exists to prevent.
+      if (id.includes("/container/consumer.js")) {
+        let out = code;
+        if (out.includes(DECRYPT_FIND)) {
+          decrypt++;
+          out = out.replace(DECRYPT_FIND, DECRYPT_REPLACE);
+        }
+        if (out.includes(RX_FIND)) {
+          datagramRx++;
+          out = out.replace(RX_FIND, RX_REPLACE);
+        }
+        return out === code ? null : { code: out, map: null };
       }
       return null;
     },
@@ -267,6 +360,10 @@ function mediaCryptoPatch(): Plugin {
       if (video < 1) missing.push("video-encrypt (legacy.js Producer.encode)");
       if (audio < 1) missing.push("audio-encrypt (track.js Track.writeFrame)");
       if (decrypt < 1) missing.push("decrypt (consumer.js Format.decode)");
+      // Not a crypto seam, but it fails the build for the same reason the others do: with the
+      // send side live, an unpatched receive side means a viewer on a datagram broadcast gets
+      // silence, and there is no group fallback anywhere to cover it.
+      if (datagramRx < 1) missing.push("datagram-rx (consumer.js #run recvGroup)");
       if (missing.length > 0) {
         throw new Error(
           `vivoh-media-crypto-patch: failed to patch ${missing.join(", ")} — the @moq source strings ` +
@@ -276,7 +373,7 @@ function mediaCryptoPatch(): Plugin {
       }
       // eslint-disable-next-line no-console
       console.log(
-        `vivoh-media-crypto-patch: patched video=${video} audio=${audio} decrypt=${decrypt} media-crypto seam(s)`
+        `vivoh-media-crypto-patch: patched video=${video} audio=${audio} decrypt=${decrypt} datagram-rx=${datagramRx} seam(s)`
       );
     },
   };

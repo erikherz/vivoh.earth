@@ -25,7 +25,11 @@ if (!SECRET) {
   console.error("this test passes whether or not the media is encrypted.");
   process.exit(1);
 }
-const BROADCAST_URL = `${ORIGIN}/broadcast`;
+// `--adg` runs the same proof with audio on QUIC datagrams instead of groups. Worth its own run:
+// the datagram path has its own encrypt call (writeDatagram) and reaches decryption by a
+// different route, so "the group path is encrypted" says nothing about it.
+const ADG = process.argv.includes("--adg");
+const BROADCAST_URL = `${ORIGIN}/broadcast${ADG ? "?adg=1" : ""}`;
 const browser = await puppeteer.launch({
   headless: "new",
   args: [
@@ -82,6 +86,13 @@ try {
   await bc.goto(BROADCAST_URL, { waitUntil: "networkidle2", timeout: 60000 });
   await bc.waitForSelector('button.publish-btn[title="Camera"]', { timeout: 30000 });
   await bc.click('button.publish-btn[title="Camera"]');
+  // Under --adg the subject is AUDIO, so it has to be on or the run proves nothing about the
+  // datagram path. The toggle's title is its full help text, hence the prefix match.
+  if (ADG) {
+    const a = await bc.$('button.publish-btn[title^="Audio"]');
+    if (!a) throw new Error("--adg run needs the Audio toggle, which was not found");
+    await a.click();
+  }
   await bc.waitForFunction(() => /[?&]stream=[a-z0-9]{5}/.test(location.href), { timeout: 30000 });
   const shareUrl = await bc.evaluate(
     () => document.getElementById("copy-btn")?.getAttribute("data-share-url") ?? ""
