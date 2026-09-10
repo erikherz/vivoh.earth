@@ -3835,6 +3835,19 @@ async function initWatchView(streamId: string, user: User | null) {
           `up ${nowS.toFixed(0)}s   ${stalledFor >= 3 ? `STALLED ${stalledFor}s` : "flowing"}\n` +
           `conn    ${conn}  bcast=${bstatus}/${bactive}  ${TRANSPORT}\n` +
           quicLine +
+          // The line that says whether audio can arrive at all on this device. Audio rides QUIC
+          // datagrams under ?adg=1 and nothing falls back to groups, so a platform that carries
+          // no datagrams plays video perfectly and is silent forever. "max=0" or "max=?" is the
+          // whole answer; anything else means look further down the panel.
+          `dgram   max=${wtProbe.maxDatagramSize ?? "?"}  in=${wtProbe.datagrams}` +
+          // Both sides in the performance.now() clock. Mixing it with `nowS` (seconds since the
+          // panel started) printed "-1s ago", which on a diagnostic someone reads while trying
+          // to decide whether audio is arriving is worse than printing nothing.
+          (wtProbe.datagrams > 0
+            ? `  (${((performance.now() - wtProbe.lastDatagramAt) / 1000).toFixed(0)}s ago)`
+            : "") +
+          (wtProbe.datagramErr ? `  ERR ${wtProbe.datagramErr.slice(0, 60)}` : "") +
+          `\n` +
           `audio B ${bytes}  (moved ${(nowS - lastAudioMove).toFixed(0)}s ago)\n` +
           `video B ${vbytes}  (moved ${(nowS - lastVideoMove).toFixed(0)}s ago)  stalled=${vstalled}\n` +
           `decrypt ok ${successes} fail ${failures}  (moved ${(nowS - lastDecMove).toFixed(0)}s ago)\n` +

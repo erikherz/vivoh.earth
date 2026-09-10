@@ -37,6 +37,20 @@ interface WtProbe {
   err: string | null;
   /** anticipatedConcurrentIncomingUnidirectionalStreams injected into the constructor, 0 = none */
   anticipated: number;
+  // --- datagrams -----------------------------------------------------------------------
+  //
+  // Audio moved onto QUIC datagrams to escape the stream ceiling, which only helps if the
+  // VIEWER's transport can actually carry them. A platform can implement WebTransport streams
+  // and not usefully implement datagrams, and that failure is invisible from the sofa: video
+  // keeps playing on the group path while audio never arrives at all, because nothing falls
+  // back. These three fields are here to tell those apart in one glance on a real phone.
+  /** What the transport says it can carry. null = never read; 0 = cannot carry datagrams. */
+  maxDatagramSize: number | null;
+  /** Incoming datagrams counted. Stays 0 on a transport that carries none. */
+  datagrams: number;
+  lastDatagramAt: number;
+  /** Set if opening the incoming datagram reader threw: the field exists, the feature does not. */
+  datagramErr: string | null;
 }
 
 export const wtProbe: WtProbe = {
@@ -48,6 +62,10 @@ export const wtProbe: WtProbe = {
   closedHow: null,
   err: null,
   anticipated: 0,
+  maxDatagramSize: null,
+  datagrams: 0,
+  lastDatagramAt: 0,
+  datagramErr: null,
 };
 
 type WtCtor = new (url: string, options?: unknown) => WebTransport;
@@ -75,6 +93,7 @@ export function installWtProbe(anticipated = 0): void {
 
   class ProbedWebTransport extends (Orig as WtCtor) {
     private _uni?: ReadableStream;
+    private _dg?: WebTransportDatagramDuplexStream;
 
     constructor(url: string, options?: unknown) {
       // Ask for a larger initial unidirectional stream budget.
@@ -148,6 +167,47 @@ export function installWtProbe(anticipated = 0): void {
         this._uni = src;
       }
       return this._uni;
+    }
+
+    // Same pull-driven wrapper for datagrams, because audio now rides them and a viewer whose
+    // platform cannot carry them gets silence with nothing to fall back to. Reading
+    // maxDatagramSize here — once, off the real transport — is the single fact that separates
+    // "the platform will not carry datagrams" from every other reason audio might be missing.
+    get datagrams(): WebTransportDatagramDuplexStream {
+      const src = super.datagrams;
+      if (this._dg) return this._dg;
+      try {
+        wtProbe.maxDatagramSize =
+          typeof src?.maxDatagramSize === "number" ? src.maxDatagramSize : null;
+        const reader = src.readable.getReader();
+        const counted = new ReadableStream({
+          async pull(ctrl) {
+            const { done, value } = await reader.read();
+            if (done) {
+              ctrl.close();
+              return;
+            }
+            wtProbe.datagrams++;
+            wtProbe.lastDatagramAt = performance.now();
+            ctrl.enqueue(value);
+          },
+          cancel(reason) {
+            return reader.cancel(reason);
+          },
+        });
+        // Swap only `readable`; everything else (writable, maxDatagramSize, the age knobs) has
+        // to keep working, and the library reads several of them.
+        this._dg = new Proxy(src, {
+          get: (t, k) => (k === "readable" ? counted : Reflect.get(t, k)),
+        }) as WebTransportDatagramDuplexStream;
+      } catch (e) {
+        // A platform can expose `datagrams` and still fail here. That is exactly the case worth
+        // reporting, so record it — but hand back the untouched object, because a diagnostic
+        // must never be the reason datagrams stop working.
+        wtProbe.datagramErr = String(e);
+        this._dg = src;
+      }
+      return this._dg;
     }
   }
 
