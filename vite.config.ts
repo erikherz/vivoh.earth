@@ -59,9 +59,22 @@ function moqWebTransportOnly(): Plugin {
         );
         if (out.includes(WT_GATE)) {
           wtPatched++;
+          // __VIVOH_WT_SAFARI__ bypasses upstream's UA ban. @moq/net 0.3.5 refuses WebTransport
+          // for ALL Safari via `browser.satisfies({ safari: "<0" })` — a version range nothing
+          // can match — citing webkit.org/show_bug.cgi?id=319818 and moq-dev/moq#2388, which is
+          // OUR bug report: "roughly 7,600 of them or 16 MiB on one session, whichever comes
+          // first". So Safari never lost a race here; it was never entered into one.
+          //
+          // The ban is a UA match, not a feature test, so it also catches macOS/Windows Safari,
+          // and it MISSES iOS Chrome (Bowser reads CriOS as "chrome") which is WebKit underneath
+          // and has the same defect.
+          //
+          // Re-enabling is worth testing precisely because the ban's premise is the stream
+          // ceiling, and datagram audio removes ~99% of the streams. When bypassed we still
+          // require the API to exist — this overrides upstream's judgement, not physics.
           out = out.replace(
             WT_GATE,
-            "(!globalThis.__VIVOH_WS_ONLY__ && isWebTransportSupported()) ?"
+            "(!globalThis.__VIVOH_WS_ONLY__ && (globalThis.__VIVOH_WT_SAFARI__ ? typeof globalThis.WebTransport !== \"undefined\" : isWebTransportSupported())) ?"
           );
         }
         return { code: out, map: null };

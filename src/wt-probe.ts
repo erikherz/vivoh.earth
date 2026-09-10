@@ -299,6 +299,15 @@ try {
     (globalThis as unknown as { __VIVOH_WS_ONLY__?: boolean }).__VIVOH_WS_ONLY__ = true;
     console.log("[wsonly] WebTransport leg DISABLED for this load — reproducing the phone's transport");
   }
+  // ?wtsafari=1 — ignore @moq/net's blanket UA ban on Safari and let it attempt WebTransport.
+  // Upstream disabled it because one QUIC stream per audio frame hits WebKit's ceiling in about
+  // two minutes; audio over datagrams removes ~99% of those streams, so the premise no longer
+  // holds for us. Opt-in, because it is an override of a deliberate upstream decision and the
+  // 16 MiB half of that ceiling is still unmeasured.
+  if (q.get("wtsafari") === "1") {
+    (globalThis as unknown as { __VIVOH_WT_SAFARI__?: boolean }).__VIVOH_WT_SAFARI__ = true;
+    console.log("[wtsafari] upstream's Safari WebTransport ban BYPASSED for this load");
+  }
 } catch {
   // Never let instrumentation be the reason the page fails to load.
 }
