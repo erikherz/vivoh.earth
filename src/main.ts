@@ -3251,6 +3251,19 @@ async function initWatchView(streamId: string, user: User | null) {
 
   console.log(`MoQplay Watch - Stream: ${streamId}`);
 
+  // ?adg=1 is a PUBLISHER flag and does nothing here. Say so loudly, because it is the natural
+  // place to put it — the viewer link is where every other diagnostic flag goes — and a flag
+  // that is silently inert makes the experiment report "datagrams did not help" when datagrams
+  // were never switched on. That has now cost two full test cycles, each one a broadcast
+  // restart and a screenshot round trip.
+  if (new URLSearchParams(location.search).get("adg") === "1") {
+    console.warn(
+      "[adg] IGNORED HERE. ?adg=1 selects the publisher's audio transport and must go on the " +
+        "BROADCAST url (/broadcast?adg=1) before going live. A broadcast already publishing " +
+        "audio as groups cannot be switched over by a viewer parameter; restart it with the flag."
+    );
+  }
+
   // Link secret, populated once the encryption block below runs. Declared here because the
   // chat panel is created earlier in this function and derives its key lazily from whatever
   // these hold at the moment a message is sent or received.
@@ -3895,6 +3908,11 @@ async function initWatchView(streamId: string, user: User | null) {
               : `${wtProbe.bytesIn} = ${(wtProbe.bytesIn / 1048576).toFixed(1)} MiB ` +
                 `(${((100 * wtProbe.bytesIn) / 16777216).toFixed(0)}% of 16 MiB)`
           }\n` +
+          // Repeat the warning where it will actually be seen: on a phone there is no console,
+          // and the panel is the only surface.
+          (new URLSearchParams(location.search).get("adg") === "1"
+            ? `adg     IGNORED HERE — ?adg=1 belongs on /broadcast, not the viewer link\n`
+            : "") +
           `dgram   max=${wtProbe.maxDatagramSize ?? "?"}  in=${wtProbe.datagrams}` +
           // Both sides in the performance.now() clock. Mixing it with `nowS` (seconds since the
           // panel started) printed "-1s ago", which on a diagnostic someone reads while trying
