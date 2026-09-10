@@ -188,6 +188,11 @@ interface GroupLike {
   close(): void;
 }
 
+/** The subset of @moq/net's Track.Producer the datagram path needs. */
+interface TrackLike {
+  appendDatagram(timestamp: unknown, payload: Uint8Array): number;
+}
+
 // Installed onto globalThis for the build-time library patch to call.
 interface MediaCryptoHooks {
   shouldEncrypt(trackName?: string): boolean;
@@ -197,6 +202,8 @@ interface MediaCryptoHooks {
   closeGroup(group: GroupLike): void; // chained close so pending writes flush first
   // audio path: one group per frame (Track.writeFrame), closed immediately
   writeAndClose(group: GroupLike, frame: MoqFrame): void;
+  // audio path over QUIC datagrams (lite-05): no group, no stream, no retransmit
+  writeDatagram(track: TrackLike, frame: MoqFrame): void;
   beforeDecode(payload: Uint8Array): Promise<Uint8Array>;
 }
 
@@ -262,6 +269,26 @@ function install(): void {
           } catch {
             /* already closed */
           }
+        }
+      });
+    },
+    writeDatagram(track, frame) {
+      requireFrame(frame, "writeDatagram");
+      // Same re-key rule as writeAndClose: audio has no keyframe dependency, so a new key can
+      // take effect on any frame. Datagrams make that MORE true, not less — a lost one is a
+      // 20ms gap the decoder conceals, where a lost video frame corrupts until the next keyframe.
+      if (!sawVideoGroup) promotePendingKey();
+      // Chained on the TRACK rather than a group, because there is no group here. That still
+      // serialises encryption, which matters: appendDatagram assigns the next sequence at call
+      // time, so unordered completion would hand out sequence numbers that disagree with the
+      // timestamps inside the payloads.
+      chain(track, async () => {
+        try {
+          const enc = await encryptFrame(frame.payload);
+          track.appendDatagram(frame.timestamp, enc);
+        } catch {
+          // Best-effort by definition. A datagram that cannot be encrypted is DROPPED, never
+          // sent in the clear — the one outcome this whole module exists to prevent.
         }
       });
     },

@@ -862,11 +862,12 @@ const broadcastUrl = (streamId: string, suffix = ""): string =>
  *   aframe — Opus frame duration in ms (the QUIC stream-rate experiment)
  *   diag   — on-device diagnostics panel
  *   agroup — audio frames per group (the QUIC stream-batching experiment)
+ *   adg    — audio over QUIC datagrams instead of groups
  */
 function carryTestParams(search: string): string {
   const from = new URLSearchParams(search);
   const out = new URLSearchParams();
-  for (const key of ["geo", "aframe", "diag", "agroup"]) {
+  for (const key of ["geo", "aframe", "diag", "agroup", "adg"]) {
     const v = from.get(key);
     if (v !== null) out.set(key, v);
   }
@@ -1773,6 +1774,48 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         codec: settable(publisher.audio?.codec, "publisher.audio.codec"),
       },
     };
+
+    // --- Audio over QUIC datagrams: ?adg=1 on the BROADCAST url ------------------------------
+    //
+    // The actual fix for the iOS stall, as opposed to the rebuild-before-the-ceiling mitigation
+    // that only postpones it. A datagram consumes no stream id and is exempt from connection
+    // flow control (RFC 9221), so it sidesteps both candidate mechanisms — the ~7000 stream
+    // ceiling and the 16 MiB MAX_DATA wall — rather than racing them.
+    //
+    // OPT-IN, and it must stay opt-in until the receive half ships. There is no group fallback
+    // anywhere: not in our publisher, not in the relay ("qmux/WebSocket/TCP/UDS report size 0.
+    // No group fallback: otherwise off"), and not in the protocol ("There is no stream
+    // fallback"). Turning this on for a viewer that cannot take datagrams does not degrade
+    // their audio, it removes it, with no error on either side.
+    //
+    // GATED ON THE TRANSPORT, not just the flag. WebSocket sessions report maxDatagramSize 0,
+    // and this deployment deliberately keeps the WebSocket fallback alive for iPhone and older
+    // Safari — so a publisher can very reasonably be on a transport that carries no datagrams
+    // at all. Asking for ?adg=1 there would publish audio into a void. We check, and we say so.
+    const wantDatagramAudio = new URLSearchParams(location.search).get("adg") === "1";
+    (globalThis as unknown as { __VIVOH_AUDIO_DATAGRAM__?: boolean }).__VIVOH_AUDIO_DATAGRAM__ = false;
+    if (wantDatagramAudio) {
+      // `connection.established` resolves once the session is up; only then is the transport
+      // knowable. Re-checked on every reconnect because a WebSocket fallback can win a later
+      // race even if WebTransport won the first one.
+      const armDatagrams = () => {
+        const est = (publisher.connection as unknown as { established?: { peek?: () => unknown } })
+          ?.established?.peek?.() as { maxDatagramSize?: number; version?: string } | undefined;
+        const size = typeof est?.maxDatagramSize === "number" ? est.maxDatagramSize : undefined;
+        // Unknown (the field is not exposed) is treated as "yes, try": the alternative is never
+        // arming, which makes ?adg=1 silently do nothing and look like the feature is broken.
+        // The e2e below measures actual datagram arrivals, so a wrong guess here is caught.
+        const ok = size === undefined ? true : size > 0;
+        (globalThis as unknown as { __VIVOH_AUDIO_DATAGRAM__?: boolean }).__VIVOH_AUDIO_DATAGRAM__ = ok;
+        console.log(
+          `[adg] audio over datagrams ${ok ? "ARMED" : "REFUSED"}` +
+            ` (maxDatagramSize=${size ?? "unknown"}, version=${est?.version ?? "unknown"})` +
+            (ok ? "" : " — this transport carries no datagrams; staying on groups")
+        );
+      };
+      armDatagrams();
+      window.setTimeout(armDatagrams, 2000); // after the WebTransport/WebSocket race settles
+    }
 
     // --- Opus frame duration: ?aframe=<ms> on the BROADCAST url ------------------------------
     //

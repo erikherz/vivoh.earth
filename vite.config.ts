@@ -159,9 +159,34 @@ function mediaCryptoPatch(): Plugin {
   //
   // Gated on the audio track by name — writeFrame is generic and nothing else should batch.
   // globalThis.__VIVOH_AUDIO_GROUP__ <= 1 restores upstream behaviour byte for byte.
+  // AND where AUDIO-OVER-DATAGRAMS lives, for the same reason: this is the one place a frame
+  // becomes a group and a group becomes a QUIC stream, so it is the one place to stop doing
+  // that. Upstream has no datagram media path at all — @moq/net carries appendDatagram and
+  // recvDatagram, but @moq/hang, @moq/publish and @moq/watch contain zero references to
+  // datagrams between them, so both ends of this are ours to write.
+  //
+  // WHY: iOS Safari stops delivering after ~7000 cumulative incoming unidirectional streams,
+  // and 20ms Opus burns that in ~135 seconds. QUIC datagrams (RFC 9221) consume no stream ids
+  // and are exempt from connection-level flow control, so they sidestep both candidate
+  // mechanisms. Audio is ~99% of our streams; video is ~0.5/s and is NOT moved (a 720p frame
+  // does not fit the ~1200 byte limit, and a lost video frame corrupts until the next keyframe
+  // where a lost audio frame is a concealable 20ms gap).
+  //
+  // BEST-EFFORT, WITH NO FALLBACK. A datagram that does not fit, or that the transport cannot
+  // carry, is simply not delivered — the relay has no group fallback either (moq-lite.md: "There
+  // is no stream fallback"). So this is gated OFF by default and opt-in per broadcast via
+  // ?adg=1, because a publisher on the WebSocket transport (Firefox is forced onto it, and this
+  // deployment deliberately keeps that fallback) reports maxDatagramSize 0 and would publish
+  // audio into a void, silently.
   const AUDIO_REPLACE = `    writeFrame(frame) {
         const __mc = globalThis.__VIVOH_MEDIA_CRYPTO__;
         const __enc = !!(__mc && __mc.shouldEncrypt(this.name));
+        const __isAudio = String(this.name || "").indexOf("audio") === 0;
+        if (__isAudio && globalThis.__VIVOH_AUDIO_DATAGRAM__ === true && typeof this.appendDatagram === "function") {
+            if (__enc) { __mc.writeDatagram(this, frame); }
+            else { try { this.appendDatagram(frame.timestamp, frame.payload); } catch (e) { console.warn("[adg] datagram dropped", e); } }
+            return;
+        }
         const __n = globalThis.__VIVOH_AUDIO_GROUP__ | 0;
         if (__n > 1 && String(this.name || "").indexOf("audio") === 0) {
             if (!this.__vbGroup || this.__vbCount >= __n) {
