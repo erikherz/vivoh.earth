@@ -3742,10 +3742,33 @@ async function initWatchView(streamId: string, user: User | null) {
       let lastAudioMove = 0;
       let lastVideoMove = 0;
       let lastDecMove = 0;
-      // Which transport the page ACTUALLY chose. iOS Safari has no WebTransport and falls back
-      // to the WebSocket polyfill; every clean headless run used native WebTransport, so this
-      // is the single most important line for telling those two worlds apart.
-      const TRANSPORT = needsPolyfill ? "TRANSPORT=websocket-polyfill" : "TRANSPORT=native-webtransport";
+      // WHAT THIS LINE USED TO CLAIM, AND WHY IT WAS WRONG. It said "which transport the page
+      // ACTUALLY chose" while being computed from `needsPolyfill`, i.e.
+      // `typeof WebTransport === "undefined"` — a CAPABILITY check evaluated once at module load.
+      // It answers "does this browser have the WebTransport API", never "what is this session
+      // running over".
+      //
+      // Those differ exactly where it matters. @moq's connect() races a WebSocket fallback
+      // against WebTransport (500ms head start, Promise.any) and this deployment keeps that race
+      // on deliberately. A browser can have WebTransport, lose the race, and run the whole
+      // session over qmux/WebSocket — where there are no datagrams at all, so audio published as
+      // datagrams simply never arrives while video keeps playing over groups.
+      //
+      // That is precisely the state Erik's iPhone was in for an entire afternoon of testing, and
+      // this line said "native-webtransport" the whole time, which is how it sent me looking at
+      // iOS datagram support instead of at the race.
+      //
+      // Now it reports evidence: the probe counts every WebTransport actually constructed, so a
+      // live session with zero of them is a session that is not on WebTransport.
+      //
+      // Evaluated per tick, not once: this used to be a `const` computed before any session
+      // existed, which with an evidence-based check would have read "not webtransport" forever.
+      const TRANSPORT = () =>
+        needsPolyfill
+          ? "TRANSPORT=no-webtransport-api"
+          : wtProbe.constructed > 0
+            ? `TRANSPORT=webtransport (${wtProbe.constructed} sess)`
+            : "TRANSPORT=NOT-webtransport (websocket fallback won)";
 
       const tick = () => {
         const el = live as unknown as {
@@ -3833,7 +3856,7 @@ async function initWatchView(streamId: string, user: User | null) {
         panel.style.color = stalledFor >= 3 ? "#f87171" : "#4ade80";
         panel.textContent =
           `up ${nowS.toFixed(0)}s   ${stalledFor >= 3 ? `STALLED ${stalledFor}s` : "flowing"}\n` +
-          `conn    ${conn}  bcast=${bstatus}/${bactive}  ${TRANSPORT}\n` +
+          `conn    ${conn}  bcast=${bstatus}/${bactive}  ${TRANSPORT()}\n` +
           quicLine +
           // The line that says whether audio can arrive at all on this device. Audio rides QUIC
           // datagrams under ?adg=1 and nothing falls back to groups, so a platform that carries
