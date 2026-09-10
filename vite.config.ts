@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 
 // Force the MoQ stack to use WebTransport ONLY (no WebSocket, no race).
@@ -61,17 +63,39 @@ function moqWebTransportOnly(): Plugin {
 // build that could leave a media payload path unencrypted while the feature is
 // believed active. (A future @moq upgrade that changes these strings will fail
 // the build loudly rather than silently publish plaintext.)
+// The @moq versions these seams were read against and re-derived for. A string match proves
+// only that a string matched — @moq/net's writeFrame body was byte-identical across 0.1.5 and
+// 0.3.5 while its argument changed from bytes to an object, so the audio seam patched happily
+// into a shape it no longer understood. Pinning the versions turns that class of silent drift
+// into a build failure with an instruction attached.
+//
+// Bumping a version here is a deliberate act: re-read all three seams in the new sources first,
+// then change these, then run scripts/e2e/encrypted-negative.mjs against a deploy.
+const SEAMS_DERIVED_FOR: Record<string, string> = {
+  "@moq/net": "0.3.5",
+  "@moq/hang": "0.4.3",
+};
+
 function mediaCryptoPatch(): Plugin {
   // --- seam 1: video encrypt (Producer.encode in legacy.js) ---
+  // Re-derived for @moq/hang 0.4.3. Two things changed from 0.2.11: the group is now indexed
+  // into a timeline the moment it opens, and writeFrame takes a {payload, timestamp} object
+  // rather than bare bytes. The timeline call is preserved verbatim — it is not ours to drop,
+  // and losing it would break seeking while leaving playback looking fine.
   const VIDEO_FIND = `    encode(data, timestamp, keyframe) {
         if (keyframe) {
             this.#group?.close();
             this.#group = this.#track.appendGroup();
+            // Index the group the moment it opens: its start is this keyframe's timestamp.
+            this.#timeline?.record(this.#group.sequence, timestamp);
         }
         else if (!this.#group) {
             throw new Error("must start with a keyframe");
         }
-        this.#group?.writeFrame(encodeFrame(data, timestamp));
+        this.#group?.writeFrame({
+            payload: encodeFrame(data, timestamp),
+            timestamp: Time.Timestamp.fromMicros(timestamp),
+        });
     }`;
   const VIDEO_REPLACE = `    encode(data, timestamp, keyframe) {
         const __mc = globalThis.__VIVOH_MEDIA_CRYPTO__;
@@ -80,18 +104,36 @@ function mediaCryptoPatch(): Plugin {
             const __old = this.#group;
             if (__old) { __enc ? __mc.closeGroup(__old) : __old.close(); }
             this.#group = this.#track.appendGroup();
+            this.#timeline?.record(this.#group.sequence, timestamp);
         }
         else if (!this.#group) {
             throw new Error("must start with a keyframe");
         }
         const __g = this.#group;
         if (!__g) return;
-        const __frame = encodeFrame(data, timestamp);
+        const __frame = {
+            payload: encodeFrame(data, timestamp),
+            timestamp: Time.Timestamp.fromMicros(timestamp),
+        };
         if (__enc) __mc.write(__g, __frame);
         else __g.writeFrame(__frame);
     }`;
 
   // --- seam 2: audio encrypt (Track.writeFrame in track.js) ---
+  //
+  // READ THIS BEFORE TRUSTING THIS SEAM. Its FIND string is character-identical in @moq/net
+  // 0.1.5 and 0.3.5, so it kept patching cleanly across the upgrade and buildEnd reported
+  // audio=1 — while `frame` silently changed from a bare Uint8Array to a {payload, timestamp}
+  // object. The other two seams broke loudly and were fixed; this one would have shipped,
+  // handing the encryptor an object it cannot encrypt.
+  //
+  // The lesson is that "the string was replaced" is not the same claim as "the path is
+  // correct", and only the first one was ever being checked. Two things now cover it: the
+  // version assertion in buildEnd below, and requireFrame() in media-crypto.ts, which throws
+  // on the first frame if the shape is not what these seams assume.
+  //
+  // The replacement itself needs no change for 0.3.5: `frame` is passed through opaquely to
+  // the hooks (which now take the object) and to group.writeFrame on the unencrypted path.
   const AUDIO_FIND = `    writeFrame(frame) {
         const group = this.appendGroup();
         group.writeFrame(frame);
@@ -143,8 +185,11 @@ function mediaCryptoPatch(): Plugin {
     }`;
 
   // --- seam 3: decrypt both (consumer.js, before Format.decode) ---
-  const DECRYPT_FIND = `const decoded = this.#format.decode(next);`;
-  const DECRYPT_REPLACE = `const __mc = globalThis.__VIVOH_MEDIA_CRYPTO__; let __raw = next; if (__mc && __mc.shouldDecrypt()) { try { __raw = await __mc.beforeDecode(next); } catch (e) { console.error("[media-crypto] decrypt failed; dropping frame", e); continue; } } const decoded = this.#format.decode(__raw);`;
+  // Re-derived for @moq/hang 0.4.3: the read side now yields a frame OBJECT, so the decode site
+  // reads `next.payload` where it used to take `next` whole. We decrypt the payload only —
+  // the timestamp was never encrypted.
+  const DECRYPT_FIND = `const decoded = this.#format.decode(next.payload);`;
+  const DECRYPT_REPLACE = `const __mc = globalThis.__VIVOH_MEDIA_CRYPTO__; let __raw = next.payload; if (__mc && __mc.shouldDecrypt()) { try { __raw = await __mc.beforeDecode(next.payload); } catch (e) { console.error("[media-crypto] decrypt failed; dropping frame", e); continue; } } const decoded = this.#format.decode(__raw);`;
 
   let video = 0;
   let audio = 0;
@@ -152,6 +197,30 @@ function mediaCryptoPatch(): Plugin {
   return {
     name: "vivoh-media-crypto-patch",
     enforce: "pre",
+    buildStart() {
+      // Fail before doing any work if the library moved underneath the seams. Checked here
+      // rather than in buildEnd so the message arrives before a wall of transform output.
+      for (const [pkg, expected] of Object.entries(SEAMS_DERIVED_FOR)) {
+        let actual: string;
+        try {
+          actual = JSON.parse(
+            readFileSync(resolvePath(`node_modules/${pkg}/package.json`), "utf8")
+          ).version;
+        } catch {
+          throw new Error(`vivoh-media-crypto-patch: cannot read ${pkg}'s version to verify the seams.`);
+        }
+        if (actual !== expected) {
+          throw new Error(
+            `vivoh-media-crypto-patch: ${pkg} is ${actual} but the media-crypto seams were ` +
+              `derived against ${expected}. A seam can keep matching while the data flowing ` +
+              `through it changes shape — @moq/net's writeFrame body was identical across ` +
+              `0.1.5 and 0.3.5 while its argument became an object — so a clean patch is NOT ` +
+              `evidence the encryption still works. Re-read all three seams in the new ` +
+              `sources, update them, then update SEAMS_DERIVED_FOR.`
+          );
+        }
+      }
+    },
     transform(code, id) {
       if (!id.includes("@moq")) return null;
       if (id.includes("/container/legacy.js") && code.includes(VIDEO_FIND)) {

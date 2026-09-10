@@ -165,8 +165,26 @@ function chain(group: object, task: () => Promise<void>): void {
   chains.set(group, next);
 }
 
+/**
+ * A moq-lite frame as of @moq 0.3.x: payload plus a presentation timestamp.
+ *
+ * It used to be a bare `Uint8Array`. The 0.1.5 -> 0.3.5 upgrade wrapped it in this object, and
+ * that change is quiet in a dangerous way: the build-time patch string-matches call sites, and
+ * `Track.writeFrame(frame)` in @moq/net/track.js is character-identical across both versions.
+ * The seam kept "patching" cleanly while `frame` silently changed from bytes to an object — so
+ * the guard went green and the encryptor would have been handed something it cannot encrypt.
+ *
+ * Only the PAYLOAD is encrypted. The timestamp stays in the clear because the relay needs it to
+ * order and forward frames, and it is metadata we already accept leaking (it is a presentation
+ * time, not content). Encrypting it would break routing for no confidentiality gain.
+ */
+interface MoqFrame {
+  payload: Uint8Array;
+  timestamp: unknown;
+}
+
 interface GroupLike {
-  writeFrame(frame: Uint8Array): void;
+  writeFrame(frame: MoqFrame): void;
   close(): void;
 }
 
@@ -175,11 +193,26 @@ interface MediaCryptoHooks {
   shouldEncrypt(trackName?: string): boolean;
   shouldDecrypt(): boolean;
   // video path: many frames per group, group rotates on keyframe
-  write(group: GroupLike, frame: Uint8Array): void;
+  write(group: GroupLike, frame: MoqFrame): void;
   closeGroup(group: GroupLike): void; // chained close so pending writes flush first
   // audio path: one group per frame (Track.writeFrame), closed immediately
-  writeAndClose(group: GroupLike, frame: Uint8Array): void;
-  beforeDecode(frame: Uint8Array): Promise<Uint8Array>;
+  writeAndClose(group: GroupLike, frame: MoqFrame): void;
+  beforeDecode(payload: Uint8Array): Promise<Uint8Array>;
+}
+
+/**
+ * Guard against the failure above recurring. If a future @moq version changes the frame shape
+ * again, this throws where it is visible instead of encrypting garbage or silently passing
+ * plaintext through. Cheap, and it runs on the very first frame of every broadcast.
+ */
+function requireFrame(frame: MoqFrame, where: string): void {
+  if (!frame || !(frame.payload instanceof Uint8Array)) {
+    throw new Error(
+      `[media-crypto] ${where}: expected a {payload: Uint8Array} frame, got ${
+        frame === null || frame === undefined ? String(frame) : typeof frame
+      }. The @moq frame shape changed — the seams in vite.config.ts need re-deriving.`
+    );
+  }
 }
 
 function install(): void {
@@ -187,15 +220,16 @@ function install(): void {
     shouldEncrypt: () => mode === "publisher" && armed,
     shouldDecrypt: () => mode === "viewer" && armed,
     write(group, frame) {
+      requireFrame(frame, "write");
       // The first write to a group is its keyframe — the only safe moment to change key.
       if (!chains.has(group)) {
         sawVideoGroup = true;
         promotePendingKey();
       }
       chain(group, async () => {
-        const enc = await encryptFrame(frame);
+        const enc = await encryptFrame(frame.payload);
         try {
-          group.writeFrame(enc);
+          group.writeFrame({ payload: enc, timestamp: frame.timestamp });
         } catch {
           /* group already closed — drop */
         }
@@ -211,14 +245,15 @@ function install(): void {
       });
     },
     writeAndClose(group, frame) {
+      requireFrame(frame, "writeAndClose");
       // Audio has no keyframe dependency: every frame is its own group, so a viewer recovers
       // on the next frame regardless. Only carry a pending re-key here when there is no video
       // to wait for, otherwise audio would run ahead of the video keyframe and re-split it.
       if (!sawVideoGroup) promotePendingKey();
       chain(group, async () => {
         try {
-          const enc = await encryptFrame(frame);
-          group.writeFrame(enc);
+          const enc = await encryptFrame(frame.payload);
+          group.writeFrame({ payload: enc, timestamp: frame.timestamp });
         } catch {
           /* drop */
         } finally {
