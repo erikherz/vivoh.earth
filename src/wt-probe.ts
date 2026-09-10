@@ -84,7 +84,86 @@ function describeClose(reason: "resolved" | "rejected", value: unknown): string 
  * Replace window.WebTransport with a counting subclass. Call AFTER any polyfill install so
  * that whichever implementation actually ends up in use is the one being measured.
  */
+/**
+ * Count datagrams by patching the PROTOTYPE, not by swapping the global constructor.
+ *
+ * The subclass below only sees sessions built through `globalThis.WebTransport` AFTER
+ * installWtProbe ran. On Erik's iPhone that never happened: media flowed (decrypt ok 734) while
+ * the panel read `sess=0`, so every counter fed by the subclass — including maxDatagramSize —
+ * was reporting the probe's own absence, not the platform's. `dgram max=?` there was not
+ * evidence that iOS lacks datagrams; it was no evidence at all, and would have condemned the
+ * whole approach on a measurement of nothing.
+ *
+ * A prototype getter has no such window: it applies to every instance whoever constructed it and
+ * whenever. main.ts already patches `createBidirectionalStream` this way and those [wt-stream]
+ * logs DO appear on the phone, which is what says this route works where the other does not.
+ *
+ * Idempotent, and it never breaks playback: if anything here throws, the original getter is left
+ * in place and the failure is recorded instead.
+ */
+function patchDatagramPrototype(): void {
+  const WT = (globalThis as unknown as { WebTransport?: WtCtor }).WebTransport;
+  if (typeof WT !== "function") return;
+  const proto = (WT as unknown as { prototype: object }).prototype as {
+    __dgProbed?: boolean;
+  };
+  if (proto.__dgProbed) return;
+  const desc = Object.getOwnPropertyDescriptor(proto, "datagrams");
+  if (!desc?.get) {
+    // No `datagrams` on the prototype at all is itself the answer worth recording.
+    wtProbe.datagramErr = "no datagrams accessor on WebTransport.prototype";
+    return;
+  }
+  const origGet = desc.get;
+  const cache = new WeakMap<object, WebTransportDatagramDuplexStream>();
+  try {
+    Object.defineProperty(proto, "datagrams", {
+      configurable: true,
+      get(this: object) {
+        const src = origGet.call(this) as WebTransportDatagramDuplexStream;
+        const hit = cache.get(this);
+        if (hit) return hit;
+        try {
+          wtProbe.maxDatagramSize =
+            typeof src?.maxDatagramSize === "number" ? src.maxDatagramSize : null;
+          const reader = src.readable.getReader();
+          const counted = new ReadableStream({
+            async pull(ctrl) {
+              const { done, value } = await reader.read();
+              if (done) {
+                ctrl.close();
+                return;
+              }
+              wtProbe.datagrams++;
+              wtProbe.lastDatagramAt = performance.now();
+              ctrl.enqueue(value);
+            },
+            cancel(reason) {
+              return reader.cancel(reason);
+            },
+          });
+          const wrapped = new Proxy(src, {
+            get: (t, k) => (k === "readable" ? counted : Reflect.get(t, k)),
+          }) as WebTransportDatagramDuplexStream;
+          cache.set(this, wrapped);
+          return wrapped;
+        } catch (e) {
+          // The platform has the field but not a usable stream. Record it and hand back the
+          // untouched object — a diagnostic must never be why datagrams stop working.
+          wtProbe.datagramErr = String(e);
+          return src;
+        }
+      },
+    });
+    proto.__dgProbed = true;
+  } catch (e) {
+    wtProbe.datagramErr = `prototype patch failed: ${String(e)}`;
+  }
+}
+
 export function installWtProbe(anticipated = 0): void {
+  // Runs first and unconditionally: it is the half that works when the constructor swap does not.
+  patchDatagramPrototype();
   if (wtProbe.installed) return;
   const g = globalThis as unknown as { WebTransport?: WtCtor };
   const Orig = g.WebTransport;
@@ -93,7 +172,6 @@ export function installWtProbe(anticipated = 0): void {
 
   class ProbedWebTransport extends (Orig as WtCtor) {
     private _uni?: ReadableStream;
-    private _dg?: WebTransportDatagramDuplexStream;
 
     constructor(url: string, options?: unknown) {
       // Ask for a larger initial unidirectional stream budget.
@@ -169,46 +247,10 @@ export function installWtProbe(anticipated = 0): void {
       return this._uni;
     }
 
-    // Same pull-driven wrapper for datagrams, because audio now rides them and a viewer whose
-    // platform cannot carry them gets silence with nothing to fall back to. Reading
-    // maxDatagramSize here — once, off the real transport — is the single fact that separates
-    // "the platform will not carry datagrams" from every other reason audio might be missing.
-    get datagrams(): WebTransportDatagramDuplexStream {
-      const src = super.datagrams;
-      if (this._dg) return this._dg;
-      try {
-        wtProbe.maxDatagramSize =
-          typeof src?.maxDatagramSize === "number" ? src.maxDatagramSize : null;
-        const reader = src.readable.getReader();
-        const counted = new ReadableStream({
-          async pull(ctrl) {
-            const { done, value } = await reader.read();
-            if (done) {
-              ctrl.close();
-              return;
-            }
-            wtProbe.datagrams++;
-            wtProbe.lastDatagramAt = performance.now();
-            ctrl.enqueue(value);
-          },
-          cancel(reason) {
-            return reader.cancel(reason);
-          },
-        });
-        // Swap only `readable`; everything else (writable, maxDatagramSize, the age knobs) has
-        // to keep working, and the library reads several of them.
-        this._dg = new Proxy(src, {
-          get: (t, k) => (k === "readable" ? counted : Reflect.get(t, k)),
-        }) as WebTransportDatagramDuplexStream;
-      } catch (e) {
-        // A platform can expose `datagrams` and still fail here. That is exactly the case worth
-        // reporting, so record it — but hand back the untouched object, because a diagnostic
-        // must never be the reason datagrams stop working.
-        wtProbe.datagramErr = String(e);
-        this._dg = src;
-      }
-      return this._dg;
-    }
+    // NOTE: datagrams are counted by patchDatagramPrototype() above, not here. Wrapping them
+    // in this subclass as well would double-count (super.datagrams already returns the patched,
+    // counting object) and, worse, would only ever work on the sessions this subclass sees —
+    // which on iOS is none of them.
   }
 
   g.WebTransport = ProbedWebTransport as unknown as WtCtor;
