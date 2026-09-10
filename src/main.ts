@@ -4038,6 +4038,14 @@ async function initWatchView(streamId: string, user: User | null) {
       };
 
       const tick = () => {
+        // Re-attach if something re-rendered the page out from under us. The panel is appended
+        // to <body> once, and a later view render can take it with it: in the transport matrix
+        // two cells out of four ended a run with no panel in the DOM at all while audio and
+        // video were both playing fine. A diagnostic that silently disappears is worse than one
+        // that is merely wrong — its absence reads as "the page is broken", and on a phone,
+        // where the panel is the only surface, there is nothing else to check.
+        if (!panel.isConnected) document.body.appendChild(panel);
+
         const el = live as unknown as {
           connection?: { established?: { peek?: () => unknown }; url?: { peek?: () => URL | undefined } };
           broadcast?: {
