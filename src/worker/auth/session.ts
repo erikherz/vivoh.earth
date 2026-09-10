@@ -70,16 +70,21 @@ export async function verifySessionToken(
   }
 }
 
+// maxAgeSeconds should match the lifetime baked into the token. They are separate values —
+// the token's `exp` is what verifySessionToken enforces, the cookie's Max-Age only decides how
+// long the browser keeps sending it — so a mismatch is not a security hole, just a cookie that
+// outlives its own contents. The e2e door mints a one-hour token and passes the same here.
 export function setSessionCookie(
   token: string,
-  isProduction: boolean
+  isProduction: boolean,
+  maxAgeSeconds: number = SESSION_DURATION
 ): string {
   const parts = [
     `session=${token}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
-    `Max-Age=${SESSION_DURATION}`,
+    `Max-Age=${maxAgeSeconds}`,
   ];
 
   if (isProduction) {

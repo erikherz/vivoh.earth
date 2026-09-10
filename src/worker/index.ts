@@ -84,6 +84,23 @@ export interface Env {
   // signed-in identity that an operator has put on the broadcaster allow list. Adding a
   // shared secret back would create a second, weaker door into the same room.
   //
+  // E2E_SECRET/E2E_EMAIL are the one narrow exception, and they are deliberately NOT that
+  // second door. What they open is a way to obtain a SESSION for an account that already
+  // exists and has already been granted access by hand — the equivalent of skipping the
+  // OAuth redirect, not of skipping the allow list. The door grants nothing: it cannot
+  // create a user, cannot write broadcaster_access, and hands back a one-hour session
+  // instead of the usual seven days.
+  //
+  // Why it exists: with OAuth the only door, scripts/e2e/broadcast-watch.mjs could not
+  // publish, so the deploy gate that proves media still flows — and, once the datagram
+  // work lands, that audio is still ENCRYPTED — could not run against this deployment at
+  // all. A gate that cannot run is not a gate.
+  //
+  // Both must be set. Either one missing and the route 404s, byte-identical to an unknown
+  // path, so an unconfigured deployment does not advertise that the door exists.
+  E2E_SECRET?: string; // wrangler secret; bearer required by POST /api/auth/e2e
+  E2E_EMAIL?: string; // which existing, already-granted account that door signs in as
+  //
   // HMAC key for stateless publish challenges — the OWNERSHIP half, which survives the change:
   // it proves a broadcast NAME belongs to the keypair claiming it. Identity says you may
   // publish; this says what you may publish as. wrangler secret.
@@ -412,6 +429,8 @@ async function handleApiRoutes(
     switch (url.pathname) {
       case "/api/auth/me":
         return handleMe(request, env);
+      case "/api/auth/e2e":
+        return handleE2eSession(request, env, url);
       case "/api/auth/logout":
         return handleLogout(url);
       default:
@@ -579,6 +598,63 @@ async function handleCallback(
     console.error("OAuth callback error:", err);
     return Response.redirect(`${url.origin}/?error=auth_failed`, 302);
   }
+}
+
+// POST /api/auth/e2e — mint a session for the designated test account, skipping OAuth.
+//
+// SCOPE, precisely. This impersonates ONE pre-existing, pre-authorized account. It does not
+// create users (a missing row is an error, not an invitation), does not touch
+// broadcaster_access, and cannot turn an unauthorized email into a broadcaster: the caller
+// still meets canBroadcast() on the way to publishing, exactly like a human would. The only
+// thing it replaces is the redirect to Google/Microsoft/Discord — which is the only part a
+// headless browser cannot survive.
+//
+// FAIL CLOSED AND SILENT. Unset config, or a wrong bearer, both return the same plain 404 an
+// unknown path returns. Not 401, not 403: a deployment without E2E_SECRET should be
+// indistinguishable from one where this code does not exist, so probing for the door tells an
+// attacker nothing. The test in scripts/e2e/e2e-door.mjs asserts exactly that against
+// production, because an auth gate nobody probes is a gate nobody knows is wired up — this
+// codebase has shipped an unreachable one twice.
+//
+// SHORT LIFETIME. One hour, against the seven days a real sign-in gets. A leaked e2e session
+// should expire before it is useful, and CI never needs longer than one run.
+const E2E_SESSION_SECONDS = 60 * 60;
+
+async function handleE2eSession(request: Request, env: Env, url: URL): Promise<Response> {
+  const notFound = () => new Response("Not Found", { status: 404 });
+
+  const secret = env.E2E_SECRET;
+  const email = env.E2E_EMAIL;
+  if (!secret || !email) return notFound();
+  if (request.method !== "POST") return notFound();
+
+  const presented = (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
+  if (!presented || !constantTimeEqual(presented, secret)) return notFound();
+
+  // Look up, never create. The account must already exist, which means a human has signed in
+  // through a real provider at least once and an operator has granted the email. That keeps
+  // the allow list the single source of truth about who may broadcast.
+  const user = await env.DB.prepare("SELECT * FROM users WHERE email = ?")
+    .bind(email)
+    .first<User>();
+  if (!user) {
+    // The caller already proved the secret, so a specific message here leaks nothing and
+    // saves an operator from debugging a silent 404 that means something else entirely.
+    return Response.json(
+      { error: `No account for ${email}. Sign in once through a provider, then grant the email.` },
+      { status: 409 }
+    );
+  }
+
+  const token = await createSessionToken(user.id, env.SESSION_SECRET, E2E_SESSION_SECONDS);
+  const isProduction = url.hostname !== "localhost";
+  return new Response(JSON.stringify({ ok: true, email }), {
+    status: 200,
+    headers: [
+      ["Content-Type", "application/json"],
+      ["Set-Cookie", setSessionCookie(token, isProduction, E2E_SESSION_SECONDS)],
+    ],
+  });
 }
 
 // GET /api/auth/logout - Clear session and redirect

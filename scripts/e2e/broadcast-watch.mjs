@@ -18,12 +18,18 @@
 
 import puppeteer from "puppeteer";
 
-const ORIGIN = (process.argv[2] || "https://wallflower.tv").replace(/\/+$/, "");
+const ORIGIN = (process.argv[2] || "https://vivoh.earth").replace(/\/+$/, "");
 
-// Broadcasting requires the admission credential. Passed via ?pk= (which the page then
-// remembers) so the test does not need a pre-seeded browser profile.
-const PK = process.env.WF_PUBLISH_KEY || "";
-const BROADCAST_URL = `${ORIGIN}/broadcast${PK ? `?pk=${encodeURIComponent(PK)}` : ""}`;
+// ADMISSION. This used to be a `?pk=` publish key, which stopped working the day OAuth became
+// the only publisher door here — and the suite has been unable to publish against vivoh.earth
+// ever since. It now signs in through POST /api/auth/e2e, which mints a session for one
+// pre-existing, pre-granted account (see handleE2eSession in src/worker/index.ts).
+//
+// The account still has to clear canBroadcast() like anybody else; this only skips the OAuth
+// redirect, which is the part a headless browser cannot survive. scripts/e2e/e2e-door.mjs is
+// the test that the door is shut to everyone else.
+const SECRET = process.env.VE_E2E_SECRET || "";
+const BROADCAST_URL = `${ORIGIN}/broadcast`;
 const STEP = (m) => console.log(`  ${m}`);
 const fail = (m) => {
   console.error(`\nFAIL: ${m}`);
@@ -85,6 +91,35 @@ try {
   bc.on("response", (r) => {
     if (r.status() >= 400) errors.push(`broadcast http ${r.status()}: ${r.url()}`);
   });
+
+  // Sign in BEFORE the first navigation. The cookie has to be in the jar when /broadcast
+  // loads, or the page renders its signed-out state and every later selector misses for a
+  // reason that looks nothing like the real one.
+  if (!SECRET) {
+    throw new Error(
+      "VE_E2E_SECRET is not set — publishing needs a session and this deployment has no other " +
+        "non-interactive way in. Set it to the value of the E2E_SECRET wrangler secret."
+    );
+  }
+  // Land on the origin first. Issuing the sign-in fetch from about:blank would make it a
+  // cross-origin request whose Set-Cookie never reaches the jar for ORIGIN, and the failure
+  // would surface much later as "not signed in" with nothing pointing back to here.
+  await bc.goto(ORIGIN, { waitUntil: "domcontentloaded", timeout: 60000 });
+  const signIn = await bc
+    .evaluate(async (secret) => {
+      const r = await fetch("/api/auth/e2e", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${secret}` },
+        credentials: "include",
+      });
+      // Deliberately does not echo the secret into the return value; this lands in CI logs.
+      return { status: r.status, body: (await r.text()).slice(0, 200) };
+    }, SECRET)
+    .catch((e) => ({ status: 0, body: String(e) }));
+  if (signIn.status !== 200) {
+    throw new Error(`e2e sign-in failed (${signIn.status}): ${signIn.body}`);
+  }
+  STEP("signed in through the e2e door");
 
   STEP(`opening ${ORIGIN}/broadcast`);
   await bc.goto(BROADCAST_URL, { waitUntil: "networkidle2", timeout: 60000 });
