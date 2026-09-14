@@ -1394,6 +1394,51 @@
             max-width: 100%;
         }
 
+        /* The Link watermark's tappable copy, directly under the video.
+           The QR in the picture serves anyone looking at another screen; this serves the
+           viewer holding the screen it is drawn on, who cannot scan their own hand. */
+        .viewer-link-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            width: 100%;
+            max-width: 900px;
+            margin: 1rem auto 0;
+            padding: 0.85rem 1.1rem;
+            /* 48px is the comfortable touch target, and this control exists specifically for
+               people on phones — it would be an odd one to make fiddly. */
+            min-height: 48px;
+            box-sizing: border-box;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            /* Through the tokens rather than a literal: this page has a light theme, and a
+               fixed dark-theme cyan here would sit on #f5f5f5 at roughly 1.9:1. */
+            color: var(--stream-id-color);
+            text-decoration: none;
+            font-size: 0.95rem;
+            transition: border-color 0.2s ease, background-color 0.2s ease;
+        }
+        .viewer-link-bar:hover,
+        .viewer-link-bar:focus-visible {
+            border-color: var(--border-active);
+            background: var(--bg-tertiary);
+        }
+        .viewer-link-icon {
+            flex: 0 0 auto;
+            font-size: 1.1rem;
+            line-height: 1;
+        }
+        /* A long address truncates rather than wrapping to three lines or, worse, pushing the
+           row wider than the video. The full thing stays in the title attribute. */
+        .viewer-link-text {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         /* Viewer HTML overlay display */
         .viewer-html-overlay {
             width: 100%;

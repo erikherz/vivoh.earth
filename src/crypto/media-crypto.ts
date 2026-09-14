@@ -1,4 +1,4 @@
-// Relay-blind end-to-end media encryption (AES-GCM per encoded chunk).
+// Relay-blind end-to-end media encryption, using SFrame (RFC 9605) per encoded chunk.
 //
 // GOAL: the CDN relay (tinymoq) forwards only ciphertext it cannot read. The
 // access JWT gates the *connection*; this content key gates *decryption*. They
@@ -6,13 +6,24 @@
 // opaque bytes. This is NOT DRM: an authorized viewer can still capture decoded
 // frames. See PER-BROADCAST-TOKENS.md / stream-security.md §7 for scope.
 //
+// THE FRAME FORMAT is RFC 9605's, implemented in ./sframe.ts and checked against the SFrame
+// working group's published test vectors by scripts/e2e/sframe-vectors.mjs. This file supplies
+// what the RFC deliberately leaves to the application: where base_key comes from, what the KID
+// and CTR mean, and how (KID, CTR) uniqueness is guaranteed. The RFC's own words, §4.4.1: "The
+// process for provisioning base_key values and their KID values is beyond the scope of this
+// specification, but its security properties will bound the assurances that SFrame provides."
+// Ours is the `#k=` fragment of the share link, which the browser never transmits.
+//
+// Adopting the standard changes the *frame encryption* only. It makes no claim about key
+// distribution, which remains the link and nothing else.
+//
 // HOW IT HOOKS IN (no public @moq API exists, so we patch the library at build
 // time — see vite.config.ts `mediaCryptoPatch`, same mechanism as the existing
 // `moqWebTransportOnly` patch). The legacy container frame on the wire is:
 //     [varint timestamp][raw codec payload]
-// We keep the varint in the clear (the container reads it, and we bind it as
-// AES-GCM additional-authenticated-data) and encrypt only the payload:
-//     [varint timestamp][12-byte nonce][AES-GCM ciphertext + 16-byte tag]
+// We keep the varint in the clear — the container reads it — and encrypt only the payload,
+// passing the varint to SFrame as `metadata` so it is authenticated without being hidden:
+//     [varint timestamp][SFrame header][ciphertext + tag]
 // MoQ object/group framing is untouched, so the relay still routes groups and
 // keyframe boundaries exactly as before. The catalog (codec config / SPS-PPS)
 // travels via writeJson, NOT through these seams, so it stays in the clear by
@@ -24,50 +35,128 @@
 // our JS). When no key is armed, the global is absent and the library behaves
 // byte-for-byte as upstream (passthrough).
 //
-// NONCE: a fresh 12-byte random nonce per chunk, carried in the frame. The
-// publisher is the sole encryptor (the relay fans out identical ciphertext to
-// every viewer — that is what preserves MoQ single-encode fan-out), so nonce
-// uniqueness is a single-writer problem; random 96-bit nonces are safe well
-// past our per-session frame counts and need no cross-track / cross-reconnect
-// coordination (the failure mode of counters). The GCM auth tag additionally
-// gives integrity for free: a tampering/injecting relay fails decryption.
+// NONCE UNIQUENESS is the one obligation SFrame hands back to us, and it is worth stating
+// plainly because getting it wrong is not a degradation but a break. The nonce is
+// salt XOR CTR, so a repeated (base_key, KID, CTR) means a repeated (key, nonce) — which under
+// AES-GCM discloses the XOR of two plaintexts and yields the forgery key. The construction this
+// replaced used a fresh random 96-bit nonce per frame precisely to avoid needing any such
+// argument. Three things make the counter safe here:
+//
+//   1. ONE ENCRYPTOR. The publisher is the sole encryptor; the relay fans identical ciphertext
+//      out to every viewer, which is what preserves MoQ's single-encode fan-out. So CTR is a
+//      single-writer counter, incremented in one place (encryptFrame) with no await between
+//      read and increment. Audio, video and the datagram rendition share it rather than keeping
+//      one each — two counters over one key is exactly the collision to avoid.
+//   2. KID IS MONOTONIC FOR THE LIFE OF THE PAGE and never reset (see `nextKid`). CTR restarts
+//      at 0 on every re-key, so the safety of a restart rests entirely on the KID having moved.
+//      Read this before concluding the hazard cannot arise here. This app has no passcode — the
+//      case e2eMoQ's copy of this comment names — but it reaches a repeated base_key on an
+//      ORDINARY GO-LIVE, which is a lower bar, not a higher one. deriveMediaKey runs once when
+//      stream settings load and again at go-live (main.ts, the /assign and /route responses),
+//      and when the salt has not rotated in between, the second call derives a base_key
+//      byte-identical to the first. Under the construction this replaced that was free: same
+//      key, fresh random nonce. Under SFrame a CTR restarting at 0 against an identical
+//      base_key is keystream reuse. Because KID is in the HKDF label, advancing it makes the
+//      sframe_key unrelated even when the base_key is not, which is the whole protection.
+//      The salt-rotation re-key (termination, and the viewer's pickup at main.ts's blank-poll
+//      recovery) lands in the same place for the same reason.
+//   3. A FRESH SECRET PER BROADCAST PAGE. `linkSecret` is generated at page load and never
+//      restored from storage, so base_key does not survive a reload.
+//
+// Point 2 is also what let the group-boundary re-key machinery go. The old code held a new key
+// until the next keyframe so that no group was ever split across two keys; with the generation
+// named in every frame's header, a re-key can take effect immediately. What the old code was
+// really protecting — a VideoDecoder fed deltas after an undecryptable keyframe — is now handled
+// on the viewer, at `starved`, where the necessary information actually exists.
+
+import {
+  CIPHER_SUITES,
+  decrypt as sframeDecrypt,
+  deriveKeySalt,
+  encrypt as sframeEncrypt,
+  type SframeKey,
+} from "./sframe";
 
 const ALGO = "AES-GCM";
 const NONCE_BYTES = 12;
 
 type Mode = "publisher" | "viewer";
 
+/**
+ * The cipher suite, from the IANA registry in RFC 9605 §8.1.
+ *
+ * AES_256_GCM_SHA512_128 rather than the 128-bit suite, because it is what the construction
+ * being replaced already used: a 256-bit AES key and a full 128-bit tag. Adopting a standard is
+ * not a reason to quietly halve a key length, and our base_key is 32 bytes already.
+ *
+ * The RFC also defines AES-CTR + HMAC suites with 80-, 64- and 32-bit tags, which cost 6 to 12
+ * fewer bytes per frame and are the obvious candidate for the datagram audio rendition. They are
+ * implemented and vector-checked in sframe.ts; adopting one is a separate decision that should
+ * follow a measurement, not precede it, and it is not made here.
+ */
+const SUITE = CIPHER_SUITES[0x0005];
+
+/**
+ * A base_key plus the per-KID (key, salt) pairs derived from it — the RFC's `key_store`.
+ *
+ * Derivations are cached as PROMISES, not values, so the first few frames of a stream arriving
+ * together cannot each start their own HKDF for the same KID.
+ */
+interface Keyring {
+  base: Uint8Array;
+  derived: Map<string, Promise<SframeKey>>;
+}
+
+/**
+ * An upper bound on KID, and on how many generations a keyring will derive.
+ *
+ * Our resolver is TOTAL — unlike the RFC's `key_store[KID]`, which can miss, any KID resolves
+ * here, because a viewer holding the link secret can derive any generation of it. That is the
+ * right behaviour (a viewer never has to be told a re-key happened) but it means the KID on the
+ * wire is attacker-controlled input that costs us an HKDF and a map entry. A relay feeding
+ * fabricated KIDs must not be able to grow either without bound; the frames still fail to
+ * authenticate, this only stops the failing from being expensive.
+ *
+ * A publisher reaches KID 1 on its second deriveMediaKey — normally the go-live that follows
+ * settings loading — and climbs from there only on salt rotation. 1024 is far above anything a
+ * session reaches by use.
+ */
+const MAX_KID = 1024n;
+
+function keyringFor(base: Uint8Array): Keyring {
+  return { base, derived: new Map() };
+}
+
+function keyFor(ring: Keyring, kid: bigint): Promise<SframeKey> {
+  if (kid < 0n || kid > MAX_KID) {
+    return Promise.reject(new Error(`media-crypto: KID ${kid} out of range`));
+  }
+  const k = kid.toString();
+  let p = ring.derived.get(k);
+  if (!p) {
+    p = deriveKeySalt(SUITE, kid, ring.base);
+    ring.derived.set(k, p);
+  }
+  return p;
+}
+
 // --- module state (one role per page: a broadcast page OR a watch page) ------
 let mode: Mode | null = null;
 let armed = false; // we KNOW this stream is encrypted; encrypt/decrypt is live
-let key: CryptoKey | null = null;
+let ring: Keyring | null = null;
 
-// A re-key that is waiting for a group boundary. Publisher side only.
-//
-// Swapping the key the instant a passcode changes splits the group in flight: its keyframe is
-// encrypted under the old key and its tail under the new one. That group is then undecodable
-// by EVERYONE — the old passcode fails on the tail, and a viewer arriving with the new one
-// fails on the keyframe. The second case is the damaging one, because the patched consumer
-// drops the frame it cannot decrypt and hands the FOLLOWING delta frames to the decoder. A
-// VideoDecoder given deltas with no keyframe errors and closes, and nothing rebuilds it, so
-// the viewer stays black permanently rather than recovering at the next keyframe.
-//
-// Holding the new key until the next group makes "one group, one key" an invariant, which is
-// what the decoder actually requires. Cost: viewers holding the OLD passcode keep decrypting
-// until the next keyframe — up to keyframeInterval, 2s by default.
-let pendingKey: CryptoKey | null = null;
+/**
+ * The next KID to hand out, for the lifetime of the page. Deliberately NOT reset by
+ * armPublisher, resetMediaKey or anything else — see point 2 of the nonce-uniqueness argument
+ * at the top of this file. Resetting it is the one edit here that would silently reintroduce
+ * keystream reuse, so it has no reset path at all rather than a carefully-placed one.
+ */
+let nextKid = 0n;
 
-// Whether this publisher has produced any video group. Audio writes one group per frame, so
-// on an audio-only broadcast it is the only thing that can carry a pending key forward.
-let sawVideoGroup = false;
+/** The generation this publisher is encrypting under, and its frame counter. */
+let kid = 0n;
+let ctr = 0n;
 
-/** Install a re-key that was held for a group boundary. */
-function promotePendingKey(): void {
-  if (!pendingKey) return;
-  key = pendingKey;
-  pendingKey = null;
-  keyReadyResolve?.();
-}
 // Frames can be produced before the key arrives (encoder warms up while the
 // /assign + key fetch is in flight). We arm encryption immediately and make the
 // per-frame work await this promise, so nothing is ever published in the clear.
@@ -94,23 +183,28 @@ function b64urlToBytes(s: string): Uint8Array {
 
 async function encryptFrame(frame: Uint8Array): Promise<Uint8Array> {
   await keyReady;
-  if (!key) throw new Error("media-crypto: encrypt with no key");
+
+  // Snapshot the generation and take a counter SYNCHRONOUSLY, in one run of statements with no
+  // await between them. Several chains encrypt concurrently — video groups run in parallel with
+  // the audio track and with the datagram rendition — so this is the point where two frames
+  // could otherwise be handed the same CTR, or one frame could be labelled with a KID and
+  // encrypted under the key of the next. Everything after this line works from the snapshot.
+  const r = ring;
+  if (!r) throw new Error("media-crypto: encrypt with no key");
+  const id = kid;
+  const c = ctr++;
+
   const vlen = varintLen(frame[0]);
-  const ts = frame.subarray(0, vlen); // cleartext timestamp + AAD
+  const ts = frame.subarray(0, vlen); // cleartext timestamp, authenticated as SFrame metadata
   const payload = frame.subarray(vlen);
-  const nonce = new Uint8Array(NONCE_BYTES);
-  crypto.getRandomValues(nonce);
-  const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: ALGO, iv: nonce, additionalData: ts }, key, payload)
-  );
-  const out = new Uint8Array(vlen + NONCE_BYTES + ct.byteLength);
+  const sealed = await sframeEncrypt(await keyFor(r, id), id, c, ts, payload);
+  const out = new Uint8Array(vlen + sealed.byteLength);
   out.set(ts, 0);
-  out.set(nonce, vlen);
-  out.set(ct, vlen + NONCE_BYTES);
+  out.set(sealed, vlen);
   return out;
 }
 
-// Frames that failed AES-GCM authentication. A wrong passcode (or a stale salt) produces a
+// Frames that failed AES-GCM authentication. A wrong link secret (or a stale salt) produces a
 // wrong key rather than an error anywhere in the system, so this counter is the only signal
 // distinguishing "wrong secret" from "stream not started yet" -- both otherwise look like a
 // black player. Deliberately no server is involved: nothing can confirm or deny a guess.
@@ -120,9 +214,28 @@ let decryptFailures = 0;
 // NOTHING has actually got the wrong secret.
 let decryptSuccesses = 0;
 
+/**
+ * Tracks on which we have dropped a frame and must not resume mid-group. Viewer side only.
+ *
+ * This is what replaces the publisher holding a re-key until the next keyframe, and it protects
+ * against strictly more than that did. The hazard has nothing to do with keys: the patched
+ * consumer drops a frame it cannot decrypt and hands the FOLLOWING delta frames to the decoder,
+ * and a VideoDecoder given deltas with no keyframe errors and closes. Nothing rebuilds it, so
+ * the viewer stays black permanently rather than recovering at the next keyframe. A re-key was
+ * only one way to reach that state; a corrupted frame, or a viewer that joined under a salt
+ * since rotated, reach it too — and the old publisher-side rule did nothing for either.
+ *
+ * Keyed by track so a stall on video does not mute audio. Audio recovers immediately whichever
+ * way it is carried: the group path writes one group per frame and the datagram path is wrapped
+ * as a single-frame group (vite.config.ts seam 4), so `firstInGroup` is true for every audio
+ * frame by construction.
+ */
+const starved = new Set<string>();
+
 function resetDecryptStats(): void {
   decryptFailures = 0;
   decryptSuccesses = 0;
+  starved.clear();
 }
 
 /** Failures and successes since the current key was installed. */
@@ -130,22 +243,37 @@ export function decryptStats(): { failures: number; successes: number } {
   return { failures: decryptFailures, successes: decryptSuccesses };
 }
 
-async function decryptFrame(frame: Uint8Array): Promise<Uint8Array> {
+async function decryptFrame(
+  frame: Uint8Array,
+  trackName?: string,
+  firstInGroup = false
+): Promise<Uint8Array> {
   await keyReady;
-  if (!key) throw new Error("media-crypto: decrypt with no key");
+  const r = ring;
+  if (!r) throw new Error("media-crypto: decrypt with no key");
+  const track = trackName ?? "";
   const vlen = varintLen(frame[0]);
   const ts = frame.subarray(0, vlen);
-  const nonce = frame.subarray(vlen, vlen + NONCE_BYTES);
-  const ct = frame.subarray(vlen + NONCE_BYTES);
+  const body = frame.subarray(vlen);
+
   let pt: Uint8Array;
   try {
-    pt = new Uint8Array(
-      await crypto.subtle.decrypt({ name: ALGO, iv: nonce, additionalData: ts }, key, ct)
-    );
+    pt = await sframeDecrypt((k) => keyFor(r, k), ts, body);
   } catch (e) {
     decryptFailures++;
+    starved.add(track);
     throw e;
   }
+
+  // Decryptable, but the decoder is mid-gap. Withhold until a frame that can start one: for
+  // video that is a keyframe, and delivering anything before it is what kills the decoder.
+  // Deliberately NOT counted as a failure — the secret is right, which is the question the
+  // counters exist to answer, and counting these would make a correct link look wrong.
+  if (starved.has(track)) {
+    if (!firstInGroup) throw new Error("media-crypto: waiting for a keyframe after a dropped frame");
+    starved.delete(track);
+  }
+
   decryptSuccesses++;
   const out = new Uint8Array(vlen + pt.byteLength);
   out.set(ts, 0);
@@ -166,17 +294,13 @@ function chain(group: object, task: () => Promise<void>): void {
 }
 
 /**
- * A moq-lite frame as of @moq 0.3.x: payload plus a presentation timestamp.
+ * A media frame as @moq hands it to the seams.
  *
- * It used to be a bare `Uint8Array`. The 0.1.5 -> 0.3.5 upgrade wrapped it in this object, and
- * that change is quiet in a dangerous way: the build-time patch string-matches call sites, and
- * `Track.writeFrame(frame)` in @moq/net/track.js is character-identical across both versions.
- * The seam kept "patching" cleanly while `frame` silently changed from bytes to an object — so
- * the guard went green and the encryptor would have been handed something it cannot encrypt.
- *
- * Only the PAYLOAD is encrypted. The timestamp stays in the clear because the relay needs it to
- * order and forward frames, and it is metadata we already accept leaking (it is a presentation
- * time, not content). Encrypting it would break routing for no confidentiality gain.
+ * This CHANGED at the upgrade: `writeFrame(bytes)` became `writeFrame({ payload, timestamp })`.
+ * The seam string in vite.config.ts for @moq/net's Track.writeFrame is character-identical
+ * across both versions, so the patch kept applying cleanly and silently started passing an
+ * object where bytes were expected. `requireFrame` below exists because of that: a shape
+ * change that a string match cannot see has to be caught at the first frame instead.
  */
 interface MoqFrame {
   payload: Uint8Array;
@@ -188,9 +312,9 @@ interface GroupLike {
   close(): void;
 }
 
-/** The subset of @moq/net's Track.Producer the datagram path needs. */
+/** A track that can carry a frame as a QUIC datagram rather than opening a group. */
 interface TrackLike {
-  appendDatagram(timestamp: unknown, payload: Uint8Array): number;
+  appendDatagram(timestamp: unknown, payload: Uint8Array): void;
 }
 
 // Installed onto globalThis for the build-time library patch to call.
@@ -202,22 +326,26 @@ interface MediaCryptoHooks {
   closeGroup(group: GroupLike): void; // chained close so pending writes flush first
   // audio path: one group per frame (Track.writeFrame), closed immediately
   writeAndClose(group: GroupLike, frame: MoqFrame): void;
-  // audio path over QUIC datagrams (lite-05): no group, no stream, no retransmit
+  // audio-over-datagrams: no group, no stream, one datagram per frame
   writeDatagram(track: TrackLike, frame: MoqFrame): void;
-  beforeDecode(payload: Uint8Array): Promise<Uint8Array>;
+  beforeDecode(frame: Uint8Array, trackName?: string, firstInGroup?: boolean): Promise<Uint8Array>;
 }
 
 /**
- * Guard against the failure above recurring. If a future @moq version changes the frame shape
- * again, this throws where it is visible instead of encrypting garbage or silently passing
- * plaintext through. Cheap, and it runs on the very first frame of every broadcast.
+ * Fail loudly on the first frame if the seams are handing us a shape we do not understand.
+ *
+ * A build-time string match proves a string matched, not that the value flowing through it is
+ * what the code assumes. When `writeFrame(bytes)` became `writeFrame({payload, timestamp})` the
+ * seam still applied and the build still reported success; what changed was the meaning of the
+ * argument. Encrypting `frame` instead of `frame.payload` would ship garbage, and encrypting
+ * nothing would ship PLAINTEXT — which is the failure this whole module exists to prevent.
  */
 function requireFrame(frame: MoqFrame, where: string): void {
   if (!frame || !(frame.payload instanceof Uint8Array)) {
     throw new Error(
-      `[media-crypto] ${where}: expected a {payload: Uint8Array} frame, got ${
-        frame === null || frame === undefined ? String(frame) : typeof frame
-      }. The @moq frame shape changed — the seams in vite.config.ts need re-deriving.`
+      `[media-crypto] ${where}: expected a { payload: Uint8Array } frame, got ` +
+        `${Object.prototype.toString.call(frame)} — the @moq frame shape moved and the seam is ` +
+        `now feeding this the wrong thing. Refusing to encrypt an unknown shape.`
     );
   }
 }
@@ -228,15 +356,11 @@ function install(): void {
     shouldDecrypt: () => mode === "viewer" && armed,
     write(group, frame) {
       requireFrame(frame, "write");
-      // The first write to a group is its keyframe — the only safe moment to change key.
-      if (!chains.has(group)) {
-        sawVideoGroup = true;
-        promotePendingKey();
-      }
+      const { payload, timestamp } = frame;
       chain(group, async () => {
-        const enc = await encryptFrame(frame.payload);
+        const enc = await encryptFrame(payload);
         try {
-          group.writeFrame({ payload: enc, timestamp: frame.timestamp });
+          group.writeFrame({ payload: enc, timestamp });
         } catch {
           /* group already closed — drop */
         }
@@ -253,14 +377,11 @@ function install(): void {
     },
     writeAndClose(group, frame) {
       requireFrame(frame, "writeAndClose");
-      // Audio has no keyframe dependency: every frame is its own group, so a viewer recovers
-      // on the next frame regardless. Only carry a pending re-key here when there is no video
-      // to wait for, otherwise audio would run ahead of the video keyframe and re-split it.
-      if (!sawVideoGroup) promotePendingKey();
+      const { payload, timestamp } = frame;
       chain(group, async () => {
         try {
-          const enc = await encryptFrame(frame.payload);
-          group.writeFrame({ payload: enc, timestamp: frame.timestamp });
+          const enc = await encryptFrame(payload);
+          group.writeFrame({ payload: enc, timestamp });
         } catch {
           /* drop */
         } finally {
@@ -274,25 +395,29 @@ function install(): void {
     },
     writeDatagram(track, frame) {
       requireFrame(frame, "writeDatagram");
-      // Same re-key rule as writeAndClose: audio has no keyframe dependency, so a new key can
-      // take effect on any frame. Datagrams make that MORE true, not less — a lost one is a
-      // 20ms gap the decoder conceals, where a lost video frame corrupts until the next keyframe.
-      if (!sawVideoGroup) promotePendingKey();
-      // Chained on the TRACK rather than a group, because there is no group here. That still
-      // serialises encryption, which matters: appendDatagram assigns the next sequence at call
-      // time, so unordered completion would hand out sequence numbers that disagree with the
-      // timestamps inside the payloads.
-      chain(track, async () => {
+      // Datagram audio takes a different route to the wire than the group path above, so it
+      // needs its own encrypt call — and therefore its own chance to ship plaintext. It is
+      // chained on the TRACK rather than a group, because there is no group: one datagram per
+      // frame, no stream opened, which is the entire point (it is what takes an iPhone out from
+      // under WebKit's ~7,600-stream ceiling).
+      //
+      // It shares the CTR sequence with every other encrypt call rather than keeping its own —
+      // this rendition carries the SAME audio frames as the group path, so two counters over one
+      // key would collide by design rather than by accident.
+      const { payload, timestamp } = frame;
+      chain(track as unknown as GroupLike, async () => {
         try {
-          const enc = await encryptFrame(frame.payload);
-          track.appendDatagram(frame.timestamp, enc);
-        } catch {
-          // Best-effort by definition. A datagram that cannot be encrypted is DROPPED, never
-          // sent in the clear — the one outcome this whole module exists to prevent.
+          const enc = await encryptFrame(payload);
+          track.appendDatagram(timestamp, enc);
+        } catch (e) {
+          // DROP, never fall back to sending it in the clear. A silent gap in the audio is a
+          // bug; a frame on the wire that the relay can read is the product failing at the one
+          // thing it claims.
+          console.warn("[media-crypto] datagram dropped", e);
         }
       });
     },
-    beforeDecode: (frame) => decryptFrame(frame),
+    beforeDecode: (frame, trackName, firstInGroup) => decryptFrame(frame, trackName, firstInGroup ?? false),
   };
   (globalThis as unknown as { __VIVOH_MEDIA_CRYPTO__?: MediaCryptoHooks }).__VIVOH_MEDIA_CRYPTO__ =
     hooks;
@@ -303,15 +428,13 @@ function install(): void {
 /**
  * Arm publisher-side encryption BEFORE going live. Call as soon as the stream
  * is known to be encrypted (from its settings), even before the content key has
- * been fetched — frames produced in the meantime queue until {@link setMediaKey}.
+ * been fetched — frames produced in the meantime queue until {@link deriveMediaKey}.
  */
 export function armPublisher(): void {
   if (mode === "publisher" && armed) return; // already armed — keep the pending keyReady
   mode = "publisher";
   armed = true;
-  key = null;
-  pendingKey = null;
-  sawVideoGroup = false;
+  ring = null;
   resetKeyReady();
   install();
 }
@@ -321,8 +444,7 @@ export function armViewer(): void {
   if (mode === "viewer" && armed) return; // already armed
   mode = "viewer";
   armed = true;
-  key = null;
-  pendingKey = null;
+  ring = null;
   resetDecryptStats();
   resetKeyReady();
   install();
@@ -330,29 +452,17 @@ export function armViewer(): void {
 
 /**
  * Drop the current key WITHOUT un-arming (e.g. between broadcasts on the same
- * page). Subsequent frames queue until the next {@link setMediaKey} so a new
+ * page). Subsequent frames queue until the next {@link deriveMediaKey} so a new
  * broadcast's frames are never encrypted with the previous session's key.
  */
 export function resetMediaKey(): void {
   if (!armed) return;
-  key = null;
-  pendingKey = null;
-  sawVideoGroup = false;
+  ring = null;
   resetKeyReady();
-}
-
-/** Import the per-broadcast content key (base64url, 256-bit) and release queued frames. */
-export async function setMediaKey(b64url: string): Promise<void> {
-  const raw = b64urlToBytes(b64url);
-  key = await crypto.subtle.importKey("raw", raw, { name: ALGO }, false, ["encrypt", "decrypt"]);
-  keyReadyResolve?.();
 }
 
 /** Context version. Bumping it re-keys every stream, invalidating existing share links. */
 const HKDF_INFO = "wallflower-content-key-v1";
-
-// generatePasscode() lived here. Removed with the passcode itself — see DeriveOpts below.
-
 
 /** A fresh 32-byte link secret, base64url. This value is the whole capability. */
 export function generateLinkSecret(): string {
@@ -369,32 +479,19 @@ export function generateLinkSecret(): string {
  *
  * The secret is HKDF input rather than the key itself so that other material can be mixed
  * in without changing the link format:
- *   - `salt`   — a rotatable per-stream value; rotating it re-keys the stream and revokes
- *                existing viewers.
+ *   - `salt` — a rotatable per-stream value carried in the /assign and /route responses.
+ *              Rotating it re-keys the stream and revokes existing viewers, which is how a
+ *              broadcast is terminated. When absent the stream id stands in, which is public
+ *              and needs no storage.
  *
- * A stale salt yields a wrong key rather than an error: decryption simply fails, and no
- * server is ever in a position to confirm or deny a guess.
+ * There is deliberately NO passcode field. Wallflower and e2eMoQ mix an optional second
+ * secret in here; this app removed it (task #55) so that the `#k=` fragment is the entire key
+ * material and "holds the link" is the whole access rule. Do not reintroduce one without also
+ * restoring the UI and the viewer prompt — a half-wired field would silently derive a key
+ * nobody else can match, and the failure would look like a dead stream rather than a bug.
  *
- * ── The passcode is gone, and this is the load-bearing difference from Wallflower ──────
- *
- * Wallflower mixes a `passcode` in here: a second secret deliberately kept OUT of the link
- * and sent by another channel, so that holding the link alone is not sufficient. Crucially,
- * because it is an input to KEY DERIVATION, no server can grant access without it — not a
- * compromised Worker, not a subpoena, not the operator.
- *
- * Vivoh.Earth replaces that with `require_auth`: the broadcaster ticks a box and the Worker
- * refuses to mint a viewer token to anyone without a session. That is a real access control
- * and it is the right one for a known audience, but be exact about what changed:
- *
- *   access control moved OUT of cryptography and INTO server policy.
- *
- * The operator can now grant and revoke viewing. Under the passcode model they could do
- * neither. What did NOT change: the content key is still derived here, in the browser, from
- * the link fragment that browsers never transmit — so the relay and the Worker still cannot
- * decrypt anything. Relay-blind survives; the second factor does not.
- *
- * Do not reintroduce a passcode field here without also restoring the UI and the viewer
- * prompt — a half-wired one would silently derive a key nobody else can match.
+ * A stale salt yields a wrong key rather than an error: decryption simply fails, and no server
+ * is ever in a position to confirm or deny a guess.
  */
 export interface DeriveOpts {
   streamId: string;
@@ -402,7 +499,7 @@ export interface DeriveOpts {
 }
 
 /**
- * Shared input keying material: the link secret. Both the media key and the chat key derive
+ * Shared input keying material: the link secret. Media, chat and the Link watermark all derive
  * from this, so rotating a salt re-keys all of it at once.
  */
 async function deriveIkm(secretB64url: string, _opts: DeriveOpts): Promise<Uint8Array> {
@@ -431,20 +528,54 @@ async function deriveFor(secretB64url: string, opts: DeriveOpts, info: string): 
   );
 }
 
-export async function deriveMediaKey(secretB64url: string, opts: DeriveOpts): Promise<void> {
-  const derived = await deriveFor(secretB64url, opts, HKDF_INFO);
+/**
+ * The same derivation as {@link deriveFor}, but yielding raw bytes.
+ *
+ * SFrame's base_key is HKDF *input*, not an AES key — the cipher key is one HKDF expansion
+ * further down, per KID (RFC 9605 §4.4.2). So this one purpose needs extractable material where
+ * every other key here is deliberately non-extractable. It is the media path only: chat,
+ * recordings, messages and the link watermark keep getting CryptoKeys that cannot leave the
+ * browser's key store.
+ */
+async function deriveBitsFor(
+  secretB64url: string,
+  opts: DeriveOpts,
+  info: string
+): Promise<Uint8Array> {
+  const enc = new TextEncoder();
+  const ikm = (await deriveIkm(secretB64url, opts)) as BufferSource;
+  const base = await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]);
+  return new Uint8Array(
+    await crypto.subtle.deriveBits(
+      {
+        name: "HKDF",
+        hash: "SHA-256",
+        salt: enc.encode(opts.salt ?? `wf-salt|${opts.streamId}`),
+        info: enc.encode(info),
+      },
+      base,
+      256
+    )
+  );
+}
 
-  // A publisher that is already keyed is re-keying mid-broadcast (a passcode toggled or
-  // cycled). Hold it for the next group so no group is ever split across two keys — see
-  // pendingKey. Every other case is a first install and takes effect immediately.
-  if (mode === "publisher" && key) {
-    pendingKey = derived;
-    return;
+export async function deriveMediaKey(secretB64url: string, opts: DeriveOpts): Promise<void> {
+  const base = await deriveBitsFor(secretB64url, opts, HKDF_INFO);
+
+  // A publisher that is already keyed is re-keying — either a salt rotation, or the ordinary
+  // second call at go-live after settings loaded. It takes effect on the very next frame: the
+  // new generation announces itself in every SFrame header, so there is nothing to hold back
+  // and no group boundary to wait for.
+  // The KID must advance even when the base_key is one we have used before — see point 2 of
+  // the nonce-uniqueness argument at the top of this file.
+  ring = keyringFor(base);
+  if (mode === "publisher") {
+    kid = nextKid++;
+    ctr = 0n;
   }
 
-  key = derived;
   // A viewer re-deriving has a new secret and is about to be judged on it; failures counted
-  // against the previous key would otherwise make a correct passcode look wrong.
+  // against the previous key would otherwise make a correct link look wrong.
   if (mode === "viewer") resetDecryptStats();
   keyReadyResolve?.();
 }
@@ -456,6 +587,69 @@ export async function deriveMediaKey(secretB64url: string, opts: DeriveOpts): Pr
  */
 export async function deriveChatKey(secretB64url: string, opts: DeriveOpts): Promise<CryptoKey> {
   return deriveFor(secretB64url, opts, "wallflower-chat-key-v1");
+}
+
+/**
+ * The media key as a VALUE rather than as module state.
+ *
+ * {@link deriveMediaKey} installs into the live pipeline; replaying a recording must not
+ * disturb that, because a viewer can open a recording while still watching something.
+ */
+export async function deriveMediaKeyStandalone(
+  secretB64url: string,
+  opts: DeriveOpts
+): Promise<MediaKeyring> {
+  return keyringFor(await deriveBitsFor(secretB64url, opts, HKDF_INFO));
+}
+
+/**
+ * A media key as a value: the base_key plus whatever generations have been derived from it.
+ *
+ * Opaque on purpose — callers pass it back to {@link decryptFrameWith} and never look inside.
+ * It is a keyring rather than a key because a recording can span a re-key, and each KID in it
+ * needs its own derivation.
+ */
+export type MediaKeyring = Keyring;
+
+/**
+ * Open one frame under a supplied keyring — the replay path's counterpart to
+ * {@link decryptFrame}, with no module state and no effect on the live decrypt statistics.
+ *
+ * Recordings hold frames exactly as they arrived, so this is also the compatibility boundary:
+ * a file written before the SFrame cutover parses as a malformed header or fails to
+ * authenticate, and cannot be opened. That was accepted deliberately rather than carried as a
+ * dual-read path — see issue #1.
+ */
+export async function decryptFrameWith(
+  ring: MediaKeyring,
+  frame: Uint8Array
+): Promise<Uint8Array> {
+  const vlen = varintLen(frame[0]);
+  const ts = frame.subarray(0, vlen);
+  const pt = await sframeDecrypt((k) => keyFor(ring, k), ts, frame.subarray(vlen));
+  const out = new Uint8Array(vlen + pt.byteLength);
+  out.set(ts, 0);
+  out.set(pt, vlen);
+  return out;
+}
+
+/**
+ * The key for the broadcaster's Link watermark.
+ *
+ * The QR itself needs no key — it is drawn into the picture and encrypted with every other
+ * pixel. This exists for the other half of the feature: someone watching on the same device
+ * cannot point a phone at their own screen, so the URL also has to arrive as text they can
+ * tap.
+ *
+ * Text has to be stored somewhere both ends can reach, which means our Worker — and a plain
+ * URL in a database row would quietly undo the property the QR had for free. So the
+ * broadcaster seals it under this key before it leaves the browser and the viewer opens it
+ * with the same one, derived from the `#k=` fragment neither the Worker nor the CDN ever
+ * sees. What gets stored is an opaque blob: where a broadcaster points their audience stays
+ * exactly as private as what they are broadcasting.
+ */
+export async function deriveLinkKey(secretB64url: string, opts: DeriveOpts): Promise<CryptoKey> {
+  return deriveFor(secretB64url, opts, "wallflower-link-key-v1");
 }
 
 /**
@@ -474,9 +668,9 @@ export async function deriveChatKey(secretB64url: string, opts: DeriveOpts): Pro
  *
  *   - Different HKDF `info` AND a different salt, so the tag is cryptographically independent
  *     of the content key. Handing it to the Worker gives the Worker no path to decryption.
- *   - The passcode is NOT mixed in. A viewer calls /route before being prompted for one, and
- *     the publisher sets it independently; including it would make the tag underivable at the
- *     moment it is needed. The passcode protects CONTENT, which is a separate job.
+ *   - It is derived from the link secret ALONE. The tag proves possession of the link, which
+ *     is the only thing /route needs to decide; content protection is a separate job done by
+ *     a separate key.
  *
  * The server-rotated salt is likewise excluded: it arrives IN the /route response, so
  * depending on it here would be circular.
@@ -531,7 +725,8 @@ export async function openText(k: CryptoKey, sealed: string): Promise<string | n
 export function clearMediaCrypto(): void {
   mode = null;
   armed = false;
-  key = null;
+  ring = null;
+  starved.clear();
   keyReadyResolve?.(); // unblock any awaiters so they don't hang
   keyReady = Promise.resolve();
   keyReadyResolve = null;

@@ -423,6 +423,13 @@ export async function checkStreamExists(streamId: string): Promise<boolean> {
 export interface StreamSettings {
   require_auth: boolean;
   overlay_html: string;
+  /**
+   * The Link watermark's URL, SEALED — `<nonce>.<ciphertext>` under the key from
+   * deriveLinkKey, never a URL. The name carries the `_enc` suffix so that nothing downstream
+   * mistakes it for something it can render or follow; opening it needs the `#k=` fragment,
+   * which never leaves the browser. Empty string means no link is set.
+   */
+  link_enc: string;
   encrypted: boolean;
   chat_enabled: boolean;
   /** Terminated by an operator. Both sides poll for this and stop; see stopForKill(). */
@@ -436,6 +443,7 @@ export async function getStreamSettings(streamId: string): Promise<StreamSetting
     return {
       require_auth: data.require_auth ?? false,
       overlay_html: data.overlay_html ?? "",
+      link_enc: data.link_enc ?? "",
       encrypted: data.encrypted ?? false,
       chat_enabled: data.chat_enabled ?? false,
       killed: data.killed ?? false,
@@ -444,22 +452,40 @@ export async function getStreamSettings(streamId: string): Promise<StreamSetting
     // Fails to `killed: false` deliberately. A network blip must not black out a stream that
     // is running perfectly well — the real signal is an explicit `true` from the server, and
     // a poll that fails will simply be retried five seconds later.
-    return { require_auth: false, overlay_html: "", encrypted: false, chat_enabled: false, killed: false };
+    return { require_auth: false, overlay_html: "", link_enc: "", encrypted: false, chat_enabled: false, killed: false };
   }
 }
 
+/**
+ * Save stream settings, and SAY WHETHER IT WORKED.
+ *
+ * This used to return void and swallow everything, which made "saved" and "refused"
+ * indistinguishable to every caller. That is tolerable for a checkbox the broadcaster can see
+ * the state of, and not tolerable for the Link watermark: a failed save there leaves the QR
+ * burned into the picture while the tappable copy viewers need — the one that reaches anyone
+ * watching on the same device — never reaches the server, with nothing on screen to say so.
+ *
+ * Returns false on a network error OR on a non-2xx, because a 403 from the ownership check and
+ * a dropped connection are both "not saved" and neither should read as success.
+ */
 export async function updateStreamSettings(
   streamId: string,
   settings: Partial<Omit<StreamSettings, never>>
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await fetch("/api/streams", {
+    const res = await fetch("/api/streams", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ stream_id: streamId, ...settings }),
     });
-  } catch {
-    // Ignore errors
+    if (!res.ok) {
+      console.warn(`[settings] not saved: ${res.status} ${res.statusText}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn("[settings] not saved:", e);
+    return false;
   }
 }
 

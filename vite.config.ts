@@ -352,7 +352,26 @@ function mediaCryptoPatch(): Plugin {
   // reads `next.payload` where it used to take `next` whole. We decrypt the payload only —
   // the timestamp was never encrypted.
   const DECRYPT_FIND = `const decoded = this.#format.decode(next.payload);`;
-  const DECRYPT_REPLACE = `const __mc = globalThis.__VIVOH_MEDIA_CRYPTO__; let __raw = next.payload; if (__mc && __mc.shouldDecrypt()) { try { __raw = await __mc.beforeDecode(next.payload); } catch (e) { console.error("[media-crypto] decrypt failed; dropping frame", e); continue; } } const decoded = this.#format.decode(__raw);`;
+  //
+  // THE TWO EXTRA ARGUMENTS ARE LOAD-BEARING as of the SFrame cutover. They used to be absent
+  // here (this seam passed only the payload) because nothing downstream read them. They are now
+  // what feeds `starved` in media-crypto.ts: after a dropped frame a track withholds everything
+  // until one arrives that can start a group, which is the protection that replaced the
+  // publisher holding a re-key until the next keyframe. Drop either argument and the gate can
+  // never release — `firstInGroup` would be permanently false — so a single undecryptable frame
+  // would black the viewer out for good. The build would be clean and nothing would throw.
+  //
+  // Both are in scope at this site in @moq/hang 0.4.3: `#track` is declared at consumer.js:84
+  // and `#runGroup` declares `let index = 0` at :170, immediately above the decode at :176.
+  //
+  // KNOWN SKEW, carried deliberately from e2eMoQ rather than diverged from: `index++` happens
+  // below this line, so the `continue` on a decrypt failure skips it. A group whose FIRST frame
+  // fails therefore presents its second frame as index 0 — the gate releases on a delta, and the
+  // library's own `keyframe: index === 0 ? true : ...` labels it a keyframe. That mislabels one
+  // frame after a mid-group corruption, which is rare and self-correcting at the next real
+  // keyframe. It is the behaviour running in production on e2emoq.com; fixing it means moving
+  // the counter, which is a change to upstream's logic and wants its own measurement.
+  const DECRYPT_REPLACE = `const __mc = globalThis.__VIVOH_MEDIA_CRYPTO__; let __raw = next.payload; if (__mc && __mc.shouldDecrypt()) { try { __raw = await __mc.beforeDecode(next.payload, this.#track?.name, index === 0); } catch (e) { console.error("[media-crypto] decrypt failed; dropping frame", e); continue; } } const decoded = this.#format.decode(__raw);`;
 
   let video = 0;
   let audio = 0;

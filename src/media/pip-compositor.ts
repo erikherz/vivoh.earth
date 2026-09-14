@@ -1,3 +1,5 @@
+import type { QrMatrix } from "./qr";
+
 // Single A/V compositor for the publisher.
 //
 // It composites optional camera + screen video onto a FIXED-size <canvas> and mixes
@@ -170,6 +172,14 @@ export interface Compositor {
    * Static text, unlike the burn-in, so it is set rather than polled per frame.
    */
   setWatermark: (text: string | null) => void;
+  /**
+   * The Link watermark: a QR symbol drawn into the picture, or null to take it down.
+   *
+   * Takes an already-encoded matrix rather than a URL because deciding whether a URL fits at
+   * all belongs to the caller — a link too long for a scannable symbol has to be refused
+   * before the broadcaster is told it worked. See main.ts's Link control.
+   */
+  setLinkQr: (matrix: QrMatrix | null) => void;
   setMicEnabled: (on: boolean) => Promise<void>;
   setSystemAudioEnabled: (on: boolean) => void;
   stop: () => void;
@@ -357,6 +367,138 @@ export function createCompositor(): Compositor {
     ctx.restore();
   };
 
+  // ---- Link watermark (a QR symbol drawn into the picture) ----
+  //
+  // These constants were measured, not chosen, and the measurements are worth keeping next to
+  // them. Same caveats throughout: one detector, synthetic backgrounds, re-measure before
+  // changing any of them.
+  const QR_MODULE_TARGET_PX = 232; // default plate side before rounding to whole modules
+  const QR_MAX_PLATE_PX = 460;     // past ~64% of frame height it stops being a video with a QR on it
+  const QR_MODULE_MIN_PX = 6;      // below this the symbol stops surviving being scaled
+  const QR_QUIET = 4;              // light modules of margin, per the standard
+  const QR_MARGIN = 24;            // inset from the top and right edges, matching the handle
+
+  // The plate's two tones. NOT pure white and black, and not transparent either — this is the
+  // one setting here that went through a wrong answer first, so the reasoning is worth keeping.
+  //
+  // The obvious way to make a watermark less obtrusive is to make it see-through, the way the
+  // handle above is. Measured, that is the WORSE of the two available levers, on both axes at
+  // once. Alpha lets background texture into the quiet zone, and the quiet zone is what a
+  // scanner uses to find the symbol's edge — so transparency starts failing over busy content
+  // at around 0.70, while only reaching a plate brightness of ~192/255. Anything gentle enough
+  // to notice was already too damaged to scan.
+  //
+  // Muting the palette instead keeps the plate perfectly uniform, so the quiet zone stays
+  // clean and the local contrast a decoder needs is untouched — both tones simply move down
+  // together. 170/40 reads softer than transparency ever managed and decoded across dark,
+  // light and busy backgrounds through the full degradation. Strictly better, which is not the
+  // trade-off it looked like from the outside. Going darker still (120/20) starts costing
+  // decodes over a white slide.
+  const QR_LIGHT = "#aaaaaa"; // 170 — the plate and its quiet zone
+  const QR_DARK = "#282828";  // 40  — the modules
+
+  let qrPlate: HTMLCanvasElement | null = null;
+  // Kept so a resize can re-render from the same symbol without asking the caller to encode
+  // again — the caller's job is deciding whether a URL fits at all, and that answer does not
+  // change when the broadcaster drags a corner.
+  let qrMatrix: QrMatrix | null = null;
+
+  // Move/resize state, mirroring the camera inset above. The QR differs in one way that
+  // matters: its lower bound is not aesthetic. Below QR_MODULE_MIN_PX per module the symbol
+  // stops surviving being scaled, so shrinking past that does not produce a small QR — it
+  // produces a decoration no phone can read. The clamp is therefore on the MODULE size, and
+  // for a link long enough to carry a key the default plate already sits on that floor, so
+  // such a code can be moved and enlarged but not shrunk. That is a real limit of the format,
+  // not a missing feature, and it is better felt as a hard stop than discovered by a viewer
+  // whose camera will not lock on.
+  let qrTargetPx = QR_MODULE_TARGET_PX;
+  let qrX = 0;
+  let qrY = 0;
+  let qrPlaced = false;
+
+  // Keep the whole plate on the canvas. A half-cropped QR is not merely untidy: the quiet
+  // zone is what a scanner uses to find the symbol's edge, so a clipped one stops being
+  // findable at all.
+  const clampQr = () => {
+    if (!qrPlate) return;
+    qrX = Math.max(0, Math.min(qrX, CANVAS_W - qrPlate.width));
+    qrY = Math.max(0, Math.min(qrY, CANVAS_H - qrPlate.height));
+  };
+
+  const qrZoneAt = (pt: { x: number; y: number }): Zone | null => {
+    if (!qrPlate) return null;
+    const w = qrPlate.width;
+    const h = qrPlate.height;
+    if (pt.x < qrX - HANDLE || pt.x > qrX + w + HANDLE) return null;
+    if (pt.y < qrY - HANDLE || pt.y > qrY + h + HANDLE) return null;
+    const l = Math.abs(pt.x - qrX) <= HANDLE;
+    const r = Math.abs(pt.x - (qrX + w)) <= HANDLE;
+    const t = Math.abs(pt.y - qrY) <= HANDLE;
+    const b = Math.abs(pt.y - (qrY + h)) <= HANDLE;
+    if (t && l) return "nw";
+    if (t && r) return "ne";
+    if (b && l) return "sw";
+    if (b && r) return "se";
+    if (t) return "n";
+    if (b) return "s";
+    if (l) return "w";
+    if (r) return "e";
+    return pt.x >= qrX && pt.x <= qrX + w && pt.y >= qrY && pt.y <= qrY + h ? "move" : null;
+  };
+
+  const renderQrPlate = (matrix: QrMatrix | null) => {
+    qrMatrix = matrix;
+    if (!matrix) {
+      qrPlate = null;
+      return;
+    }
+    const total = matrix.size + QR_QUIET * 2;
+    // Whole pixels per module at EVERY size, which is why resizing re-renders the plate
+    // rather than scaling the bitmap: drawImage at a fractional scale anti-aliases modules
+    // into grey, the one tone a decoder cannot classify. The visible consequence is that a
+    // corner drag steps between scannable sizes instead of sliding smoothly, and that is the
+    // honest behaviour — every size it stops at is one that actually scans.
+    const px2 = Math.max(QR_MODULE_MIN_PX, Math.floor(qrTargetPx / total));
+    const side = total * px2;
+
+    const plate = document.createElement("canvas");
+    plate.width = side;
+    plate.height = side;
+    const pctx = plate.getContext("2d");
+    if (!pctx) return;
+    pctx.fillStyle = QR_LIGHT;
+    pctx.fillRect(0, 0, side, side);
+    pctx.fillStyle = QR_DARK;
+    for (let y = 0; y < matrix.size; y++) {
+      for (let x = 0; x < matrix.size; x++) {
+        if (matrix.get(x, y)) {
+          pctx.fillRect((x + QR_QUIET) * px2, (y + QR_QUIET) * px2, px2, px2);
+        }
+      }
+    }
+    qrPlate = plate;
+    if (!qrPlaced) {
+      // First appearance keeps the original home, inset from the top and right edges. After
+      // that the broadcaster's own placement survives a URL change, which is the point.
+      qrX = CANVAS_W - side - QR_MARGIN;
+      qrY = QR_MARGIN;
+      qrPlaced = true;
+    }
+    clampQr();
+  };
+
+  const drawLinkQr = () => {
+    if (!qrPlate) return;
+    ctx.save();
+    // A soft shadow separates the plate from similarly-toned content behind it. It falls
+    // outside the plate, so it never touches a module or the quiet zone. Drawn OPAQUE — see
+    // QR_LIGHT for why transparency was measured and rejected.
+    ctx.shadowColor = "rgba(0,0,0,0.45)";
+    ctx.shadowBlur = 12;
+    ctx.drawImage(qrPlate, qrX, qrY);
+    ctx.restore();
+  };
+
   let raf = 0;
   // Declared up here, not beside stop(), because startLoop() below reads it and runs during
   // this factory's own body. Left further down it is a temporal-dead-zone crash on every
@@ -415,6 +557,10 @@ export function createCompositor(): Compositor {
     // is what a provenance stamp is about. Screen-only stamps the screen grab. Neither
     // present (audio-only, or before the first frame) falls through to "draw".
     drawWatermark();
+    // Above the video, below the burn-in strip. The strip is the provenance claim and keeps
+    // its rule that nothing covers it; the QR is content the broadcaster placed and may sit
+    // over the camera inset, which is why hit-testing below runs in the reverse order.
+    drawLinkQr();
     drawStamp((camera ? cameraFrame : screen ? screenFrame : null) ?? NO_FRAME_TIMING);
     // Keep the DOM chrome on top of the inset it describes. Defined below; by the time any
     // rAF callback runs, the whole factory body has finished executing.
@@ -484,21 +630,37 @@ export function createCompositor(): Compositor {
     };
   };
   canvas.style.touchAction = "none";
+
+  // WHICH object a drag is acting on. Before the QR there was only one draggable thing, so
+  // this did not need to exist; now a zone alone is ambiguous ("nw" of what?).
+  let target: "cam" | "qr" | null = null;
+  let hoverTarget: "cam" | "qr" | null = null;
+
   canvas.addEventListener("pointerdown", (e) => {
     const p = toCanvas(e);
-    const z = zoneAt(p);
+    // Drawing order is camera then QR — so hit-testing runs in reverse and the topmost thing
+    // under the pointer wins. Grabbing what is visibly on top is the only behaviour that is
+    // not a surprise.
+    const qz = qrZoneAt(p);
+    const z = qz ?? zoneAt(p);
     if (!z) return;
+    target = qz ? "qr" : "cam";
     mode = z;
     hover = z;
+    hoverTarget = target;
+    const ox = target === "qr" ? qrX : px;
+    const oy = target === "qr" ? qrY : py;
+    const ow = target === "qr" ? qrPlate?.width ?? 0 : insetW();
+    const oh = target === "qr" ? qrPlate?.height ?? 0 : insetH();
     if (z === "move") {
-      dx = p.x - px;
-      dy = p.y - py;
+      dx = p.x - ox;
+      dy = p.y - oy;
       canvas.style.cursor = "grabbing";
     } else {
       // Anchor the OPPOSITE edge/corner. Dragging the north-west handle keeps the south-east
       // corner planted, which is what every image editor does and what the hand expects.
-      anchorX = z.includes("w") ? px + insetW() : px;
-      anchorY = z.includes("n") ? py + insetH() : py;
+      anchorX = z.includes("w") ? ox + ow : ox;
+      anchorY = z.includes("n") ? oy + oh : oy;
     }
     canvas.setPointerCapture(e.pointerId);
     e.preventDefault();
@@ -506,8 +668,36 @@ export function createCompositor(): Compositor {
   canvas.addEventListener("pointermove", (e) => {
     const p = toCanvas(e);
     if (!mode) {
-      hover = zoneAt(p);
+      const qz = qrZoneAt(p);
+      hover = qz ?? zoneAt(p);
+      hoverTarget = hover ? (qz ? "qr" : "cam") : null;
       canvas.style.cursor = hover ? CURSOR[hover] : "";
+      return;
+    }
+    if (target === "qr") {
+      if (mode === "move") {
+        qrX = p.x - dx;
+        qrY = p.y - dy;
+        clampQr();
+        return;
+      }
+      // The plate is square, so one axis is enough and a corner follows the bolder of the
+      // two. Re-render rather than scale — see renderQrPlate for why that is not optional.
+      const fx = mode.includes("w") ? anchorX - p.x : p.x - anchorX;
+      const fy = mode.includes("n") ? anchorY - p.y : p.y - anchorY;
+      let side: number;
+      if (mode === "n" || mode === "s") side = fy;
+      else if (mode === "e" || mode === "w") side = fx;
+      else side = Math.max(fx, fy);
+      qrTargetPx = Math.max(0, Math.min(side, QR_MAX_PLATE_PX));
+      renderQrPlate(qrMatrix);
+      if (qrPlate) {
+        // Re-derive the origin from the anchor so the held corner does not creep as the
+        // module size quantises underneath it.
+        qrX = mode.includes("w") ? anchorX - qrPlate.width : anchorX;
+        qrY = mode.includes("n") ? anchorY - qrPlate.height : anchorY;
+        clampQr();
+      }
       return;
     }
     if (mode === "move") {
@@ -531,7 +721,11 @@ export function createCompositor(): Compositor {
   });
   const endDrag = (e: PointerEvent) => {
     mode = null;
-    hover = zoneAt(toCanvas(e));
+    target = null;
+    const p = toCanvas(e);
+    const qz = qrZoneAt(p);
+    hover = qz ?? zoneAt(p);
+    hoverTarget = hover ? (qz ? "qr" : "cam") : null;
     canvas.style.cursor = hover ? CURSOR[hover] : "";
     try { canvas.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
   };
@@ -540,6 +734,7 @@ export function createCompositor(): Compositor {
   canvas.addEventListener("pointerleave", () => {
     if (mode) return; // a capture is in progress; leaving the box is normal mid-drag
     hover = null;
+    hoverTarget = null;
     canvas.style.cursor = "";
   });
 
@@ -552,11 +747,15 @@ export function createCompositor(): Compositor {
   //
   // So the interactive chrome is a plain <div> positioned over the canvas, tracking the same
   // rect in CSS pixels. It costs nothing in the encoder and no viewer can ever see it.
-  let chrome: HTMLDivElement | null = null;
-  let chromeKey = "";
+  // One per draggable object. This used to be a single element because there was a single
+  // draggable thing; with two, a shared outline would have to jump between them and its
+  // cached rect key would thrash every frame the hand moved between them.
+  type Chrome = { el: HTMLDivElement | null; key: string };
+  const camChrome: Chrome = { el: null, key: "" };
+  const qrChrome: Chrome = { el: null, key: "" };
 
-  const ensureChrome = (): HTMLDivElement | null => {
-    if (chrome) return chrome;
+  const ensureChrome = (c: Chrome): HTMLDivElement | null => {
+    if (c.el) return c.el;
     const parent = canvas.parentElement;
     if (!parent) return null; // not mounted yet; try again next frame
     if (!parent.style.position) parent.style.position = "relative";
@@ -577,34 +776,40 @@ export function createCompositor(): Compositor {
       el.appendChild(h);
     }
     parent.appendChild(el);
-    chrome = el;
+    c.el = el;
     return el;
   };
 
   // Called once per drawn frame, but only WRITES when the rect actually changed — otherwise
   // this would touch layout 60 times a second for a box that is usually sitting still.
-  const syncChrome = () => {
-    const wanted = !!(screen && camera) && (mode !== null || hover !== null);
-    const el = wanted ? ensureChrome() : chrome;
+  const syncOne = (c: Chrome, wanted: boolean, x: number, y: number, w: number, h: number) => {
+    const el = wanted ? ensureChrome(c) : c.el;
     if (!el) return;
     if (!wanted) {
       if (el.style.display !== "none") el.style.display = "none";
-      chromeKey = "";
+      c.key = "";
       return;
     }
     const shown = canvas.clientWidth;
     if (!shown) return; // laid out at zero width (hidden tab); nothing sensible to draw
     const scale = shown / CANVAS_W;
-    const w = insetW();
-    const h = insetH();
-    const key = `${Math.round(px)}|${Math.round(py)}|${w}|${h}|${scale.toFixed(4)}|${canvas.offsetLeft}|${canvas.offsetTop}`;
-    if (key === chromeKey) return;
-    chromeKey = key;
+    const key = `${Math.round(x)}|${Math.round(y)}|${Math.round(w)}|${Math.round(h)}|${scale.toFixed(4)}|${canvas.offsetLeft}|${canvas.offsetTop}`;
+    if (key === c.key) return;
+    c.key = key;
     el.style.display = "block";
-    el.style.left = `${canvas.offsetLeft + px * scale}px`;
-    el.style.top = `${canvas.offsetTop + py * scale}px`;
+    el.style.left = `${canvas.offsetLeft + x * scale}px`;
+    el.style.top = `${canvas.offsetTop + y * scale}px`;
     el.style.width = `${w * scale}px`;
     el.style.height = `${h * scale}px`;
+  };
+
+  // Only ever ONE outline at a time: the object under the hand, or the one being dragged.
+  // Showing both would advertise handles the pointer is not going to reach, since the QR
+  // takes the pointer wherever the two overlap.
+  const syncChrome = () => {
+    const active = mode !== null ? target : hoverTarget;
+    syncOne(camChrome, !!(screen && camera) && active === "cam", px, py, insetW(), insetH());
+    syncOne(qrChrome, !!qrPlate && active === "qr", qrX, qrY, qrPlate?.width ?? 0, qrPlate?.height ?? 0);
   };
 
   // ---- Audio mix: one stable output track; mic + system audio are inputs ----
@@ -740,6 +945,10 @@ export function createCompositor(): Compositor {
 
     setWatermark(text) {
       watermark = stopped ? null : text;
+    },
+
+    setLinkQr(matrix) {
+      renderQrPlate(stopped ? null : matrix);
     },
 
     async setMicEnabled(on) {

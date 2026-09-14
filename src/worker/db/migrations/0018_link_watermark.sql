@@ -1,0 +1,19 @@
+-- The Link watermark: a URL the broadcaster puts on screen as a QR code.
+--
+-- Stored SEALED, never as a URL. The client encrypts it under a key derived from the share
+-- link's `#k=` fragment (see deriveLinkKey in src/crypto/media-crypto.ts), so what lands in
+-- this column is an opaque `<nonce>.<ciphertext>` string that this service cannot read. That
+-- is deliberate and worth stating in the schema itself: the QR drawn into the video is already
+-- private by construction — it is encrypted with every other pixel — and a plaintext column
+-- here would have been the one place the destination leaked. The column name says `_enc` so
+-- that nothing later treats it as a URL.
+--
+-- Nothing indexes or queries it — it is only ever read back whole alongside the other
+-- per-stream settings, and only a viewer holding the fragment can make sense of it.
+--
+-- Additive. overlay_html (the older "Extras" feature) is left exactly as it is, and unlike
+-- Wallflower — which hid the Extras UI when Link shipped — both controls stay on the bar here.
+-- They do different jobs: Extras renders markup below the video for people already watching in
+-- a browser, Link puts a scannable destination INTO the picture for someone looking at a screen
+-- they are not holding.
+ALTER TABLE streams ADD COLUMN link_enc TEXT;

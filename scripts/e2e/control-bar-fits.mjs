@@ -67,6 +67,13 @@ const REST = `
 
 // Promotion inserts before More, in registration order — this is the real resulting DOM.
 //
+// EXTRAS IS HERE, and that makes this the widest control bar of the three products. Wallflower
+// hid the Extras UI when the Link watermark shipped, so its row tops out one button shorter.
+// This app keeps both deliberately: they do different jobs — Extras renders markup BELOW the
+// video for someone already watching in a browser, Link puts a scannable destination INTO the
+// picture for someone looking at a screen they are not holding. Keeping both is a product call,
+// and this file is where its cost gets measured rather than assumed.
+//
 // Flip is deliberately absent. It is not a row control at all: it lives inside the More panel
 // and is never promoted out of it, because promotion exists to keep controls that are ON in
 // sight and an action has no ON. The panel is laid out with flex-wrap, so it cannot overflow
@@ -84,6 +91,7 @@ const PROMOTED = `
   <button class="publish-btn toggle-btn glyph-btn" id="handle-btn">${faced("@", "Handle")}</button>
   <button class="publish-btn toggle-btn" id="link-btn">${faced(ICON, "Link")}</button>
   <button class="publish-btn toggle-btn" id="chat-btn">${faced(ICON, "Chat")}</button>
+  <button class="publish-btn html-overlay-btn">${faced("&lt;/&gt;", "Extras")}</button>
   <button class="publish-btn more-btn" id="more-btn">${faced(ICON, "More")}</button>
 </div>`;
 

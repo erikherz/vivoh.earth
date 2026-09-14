@@ -782,12 +782,16 @@ import {
   armPublisher,
   armViewer,
   deriveChatKey,
+  deriveLinkKey,
   deriveMediaKey,
   deriveRouteTag,
   generateLinkSecret,
   decryptStats,
   resetMediaKey,
+  sealText,
+  openText,
 } from "./crypto/media-crypto";
+import { encodeQr, type QrMatrix } from "./media/qr";
 import { initChat, type ChatHandle } from "./chat/chat-client";
 import { describeLocation } from "./geo/nearest-city";
 import { createCompositor, type CameraFacing, type Compositor } from "./media/pip-compositor";
@@ -1152,6 +1156,14 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   // re-key uses the SAME salt across both sides — deriving with different ones would silently
   // break the stream for everyone.
   let activeSalt: string | undefined;
+
+  // Re-seal the Link watermark's tappable copy under the CURRENT secret and salt.
+  //
+  // A mutable hook because the two places that invalidate a seal — go-live, which is where the
+  // salt first exists, and identity rotation, which mints a whole new linkSecret — are both
+  // defined ABOVE the Link control that assigns this. A no-op until then, which is correct:
+  // there is nothing to reseal before a link has been set.
+  let resealLink: () => void = () => {};
 
   // No `&p=1`. Wallflower appends it to tell a viewer to ask for a passcode; there is no
   // passcode here, so the link carries the content key and nothing else.
@@ -1620,6 +1632,10 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
           activeSalt = res?.salt ?? undefined;
           armPublisher(); // idempotent; covers the case where settings load lost the race
           await deriveMediaKey(linkSecret, { streamId, salt: activeSalt });
+          // The salt only exists NOW, so anything sealed before this moment was sealed under a
+          // key no viewer can reproduce. A broadcaster who sets a link before going live would
+          // otherwise get a QR on screen and a tappable copy that silently never opens.
+          resealLink();
         }
         if (res?.path) {
           // moq.pro (Mode A): the broadcast path travels in the connect URL, so `name`
@@ -1727,6 +1743,11 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
 
         if (wasLive) await goLive();
         if (chatEnabled) openChat();   // re-joins, now keyed to the new stream id
+        // New id and new link secret, so the sealed copy has to be written again under the new
+        // stream's row — the old blob is unopenable by anyone, including its author. goLive
+        // already did this when the rotation was live; this covers rotate-while-stopped, where
+        // nothing else would, and the link would quietly vanish for viewers of the new id.
+        if (!wasLive) resealLink();
         console.log("[rotate] new identity:", streamId);
       } finally {
         rotating = false;
@@ -1955,6 +1976,12 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     let geoStamp: GeoStamp | null = null;
     // The handle watermark, likewise armed independently (see the @ button below).
     let watermark: string | null = null;
+    // The Link watermark, same deal. Declared HERE rather than beside its button further down,
+    // because the compositor-creation block above re-applies it to each new compositor and a
+    // `let` declared after that block would be read from its temporal dead zone if capture ever
+    // started before the control bar finished building.
+    let linkUrl: string | null = null;
+    let linkQr: QrMatrix | null = null;
     // Video and audio sources are wired in independently and each exactly once, so a track
     // that appears later (camera added after audio-only, or vice versa) binds without
     // re-setting the other (re-setting a live track triggers RESET_STREAM → frozen viewers).
@@ -2009,6 +2036,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
               // must survive a stop/start). Re-attach them to each new compositor.
               if (geoStamp) comp.setStampProvider(geoStamp.line);
               if (watermark) comp.setWatermark(watermark);
+              if (linkQr) comp.setLinkQr(linkQr);
             }
             // Reconcile video sources without re-prompting the ones already captured.
             if (screen && !comp.hasScreen()) {
@@ -2492,6 +2520,144 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       handleBtn.classList.add("toggle-on");
     });
     advanced(handleBtn);
+
+    // --- Link watermark (QR) ---
+    //
+    // A web address the broadcaster wants viewers to reach. It gets there by TWO routes, and
+    // it needs both:
+    //
+    //   1. The QR, drawn into the frame. For someone in the room, or watching on a TV, or on a
+    //      second device — they point a phone at it. This is also the copy that survives a
+    //      screen recording, and the copy our servers never see, since it is only ever pixels
+    //      inside the same encryption as everything else in the picture.
+    //   2. A tappable link under the video. Someone watching on their phone cannot scan their
+    //      own screen, so the QR alone would be useless to exactly the audience most likely to
+    //      act on it. That copy travels as text, SEALED under the link key (see publishLink
+    //      below), so storing it does not hand us the destination.
+    const LINK_KEY = "vivoh.link";
+    // Held at version 4 — 33 modules, about 62 bytes at this correction level.
+    //
+    // The limit is the PICTURE, not the encoder. Modules have to stay at QR_MODULE_MIN_PX or
+    // the symbol does not survive being scaled (see the measurements in pip-compositor.ts), and
+    // holding module size fixed means a longer URL can only produce a bigger plate: version 4
+    // already takes 246 of 1280 pixels across, and version 6 would take 294. Past that the
+    // watermark stops being a watermark and starts being a billboard sitting on the shot.
+    //
+    // So a long URL is declined rather than drawn small. Almost every link people actually put
+    // on screen — a shop, a tip jar, a home page — is comfortably inside 62 characters.
+    const LINK_MAX_VERSION = 4;
+
+    const normaliseUrl = (raw: string): string | null => {
+      const trimmed = raw.trim();
+      if (!trimmed) return null;
+      // Typing "example.com" is the common case and meaning https:// is unambiguous, so fill
+      // it in rather than rejecting.
+      const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
+      let parsed: URL;
+      try {
+        parsed = new URL(withScheme);
+      } catch {
+        return null;
+      }
+      // http(s) only. A javascript: or data: URL here would end up both in a QR a stranger
+      // scans and in an href on the watch page — the second of those is an XSS, and the first
+      // is worse for being one nobody can inspect before their phone offers to open it.
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+      return parsed.href;
+    };
+
+    const linkBtn = document.createElement("button");
+    linkBtn.type = "button";
+    linkBtn.className = "publish-btn toggle-btn";
+    linkBtn.id = "link-btn";
+    linkBtn.title = "Link — show a QR code in the corner of the video, and a tappable link below it";
+    // A QR at icon scale: three finder squares and a scatter of modules. Drawn rather than
+    // rendered as a real QR because at 18px a real one would be an unreadable smudge, and this
+    // has to say "QR code" at a glance, which the shape alone does.
+    linkBtn.innerHTML = faced(
+      '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true">' +
+      '<path d="M3 3h8v8H3V3zm2 2v4h4V5H5zm8-2h8v8h-8V3zm2 2v4h4V5h-4zM3 13h8v8H3v-8zm2 2v4h4v-4H5z"/>' +
+      '<path d="M6 6h2v2H6V6zm10 0h2v2h-2V6zM6 16h2v2H6v-2z"/>' +
+      '<path d="M13 13h2v2h-2v-2zm4 0h2v2h-2v-2zm-4 4h2v2h-2v-2zm4 4h2v-2h-2v2zm2-4h2v2h-2v-2zm0 4h-2v2h2v-2z"/>' +
+      "</svg>",
+      "Link"
+    );
+
+    /**
+     * Seal the URL for the watch page and save it, or clear it.
+     *
+     * REPORTS rather than swallows. The QR is already on screen by the time this runs, so a
+     * write that does not land costs the tappable copy and nothing else — taking the watermark
+     * back down because a network call failed would be the worse outcome. But leaving it
+     * entirely silent is how "the link works" and "the link works for nobody on a phone"
+     * become indistinguishable to the one person who could fix it. So the watermark stays and
+     * the notice line says what is missing.
+     */
+    const publishLink = async (url: string | null): Promise<void> => {
+      try {
+        if (!url) {
+          await updateStreamSettings(streamId, { link_enc: "" });
+          return;
+        }
+        // Same secret and salt as the video, through a different HKDF context — so the link is
+        // exactly as reachable as the stream it belongs to, and no more.
+        const key = await deriveLinkKey(linkSecret, { streamId, salt: activeSalt });
+        const ok = await updateStreamSettings(streamId, { link_enc: await sealText(key, url) });
+        if (!ok) {
+          say(
+            "Your QR code is on the video, but the tappable copy under it was not saved — " +
+            "viewers watching on a phone will not see the link."
+          );
+        }
+      } catch (e) {
+        console.warn("[link] the tappable copy was not saved; the QR is unaffected:", e);
+        say(
+          "Your QR code is on the video, but the tappable copy under it was not saved — " +
+          "viewers watching on a phone will not see the link."
+        );
+      }
+    };
+    resealLink = () => { if (linkUrl) void publishLink(linkUrl); };
+
+    linkBtn.addEventListener("click", () => {
+      if (linkUrl) {
+        linkUrl = null;
+        linkQr = null;
+        comp?.setLinkQr(null);
+        linkBtn.classList.remove("toggle-on");
+        void publishLink(null);
+        return;
+      }
+      let stored = "";
+      try { stored = localStorage.getItem(LINK_KEY) || ""; } catch { /* private mode */ }
+      const raw = window.prompt(
+        "A link to show your viewers — it appears as a QR code in the corner of the video, and as a tappable link below it",
+        stored
+      );
+      if (raw == null) return; // cancelled: stay off, keep what was stored
+      const url = normaliseUrl(raw);
+      if (!url) {
+        if (raw.trim()) window.alert("That does not look like a web address. Try something like example.com/support");
+        else { try { localStorage.removeItem(LINK_KEY); } catch { /* private mode */ } }
+        return;
+      }
+      const matrix = encodeQr(url, { ecl: "M", maxVersion: LINK_MAX_VERSION });
+      if (!matrix) {
+        // Refusing beats drawing a symbol too dense to scan — see LINK_MAX_VERSION.
+        window.alert(
+          "That address is too long to show as a QR code people can actually scan.\n\n" +
+          "Try one under about 60 characters — a home page, or a short link from your own domain."
+        );
+        return;
+      }
+      try { localStorage.setItem(LINK_KEY, url); } catch { /* private mode */ }
+      linkUrl = url;
+      linkQr = matrix;
+      comp?.setLinkQr(matrix);
+      linkBtn.classList.add("toggle-on");
+      void publishLink(url);
+    });
+    advanced(linkBtn);
 
     // --- Live chat ---
     //
@@ -4459,10 +4625,94 @@ async function initWatchView(streamId: string, user: User | null) {
       overlayDiv.innerHTML = overlayHtml.trim() ? renderOverlay(overlayHtml).html : "";
     };
 
+    // --- The Link watermark's tappable copy -------------------------------------------
+    //
+    // The QR is already in the picture and needs nothing from this code. This is the other
+    // half, for the viewer holding the screen the QR is drawn on, who cannot point a phone at
+    // their own hand.
+    let linkBar: HTMLAnchorElement | null = null;
+    let shownLink = "";
+
+    const renderWatchLink = (url: string | null) => {
+      if (!url) {
+        linkBar?.remove();
+        linkBar = null;
+        return;
+      }
+      if (!linkBar) {
+        // Nowhere to put it means no link, rather than a detached node quietly collecting
+        // href updates that nobody can see.
+        const mount = overlayDiv ?? watchLayout;
+        if (!mount) return;
+        linkBar = document.createElement("a");
+        linkBar.className = "viewer-link-bar";
+        // noopener/noreferrer: the destination is chosen by the broadcaster, so it must not
+        // get a handle on this window or learn which stream sent the traffic. nofollow because
+        // this is user-submitted in every sense that matters.
+        linkBar.target = "_blank";
+        linkBar.rel = "noopener noreferrer nofollow";
+        // Not innerHTML anywhere near the URL. The arrow is static markup; the address is set
+        // as text below.
+        linkBar.innerHTML = '<span class="viewer-link-icon" aria-hidden="true">↗</span><span class="viewer-link-text"></span>';
+        // Directly under the video, above the Extras block if one is present.
+        mount.before(linkBar);
+      }
+      const label = linkBar.querySelector(".viewer-link-text") as HTMLElement;
+      // Show the whole address rather than a prettified host. Someone deciding whether to tap
+      // a stranger's link deserves to see where it goes; CSS truncates it if it is long, and
+      // the title carries the rest.
+      label.textContent = url;
+      linkBar.href = url;
+      linkBar.title = url;
+    };
+
+    /**
+     * Unseal and display, or take the bar down.
+     *
+     * Re-validates the scheme AFTER decryption even though the broadcaster's side already did.
+     * This value made a round trip through storage before becoming an href, and the cost of
+     * checking again is three lines against a `javascript:` URL landing in a link the viewer is
+     * being invited to tap.
+     */
+    const updateWatchLink = async (sealed: string) => {
+      if (sealed === shownLink) return;   // unchanged; skip the crypto on every poll
+      shownLink = sealed;
+      if (!sealed || !watchLinkSecret) {
+        renderWatchLink(null);
+        return;
+      }
+      try {
+        const key = await deriveLinkKey(watchLinkSecret, { streamId, salt: watchSalt });
+        const url = await openText(key, sealed);
+        // null means the wrong key — typically a stale salt, mid-rotation. Same treatment as
+        // undecryptable video: show nothing and let a later poll succeed once the viewer has
+        // what they need. Never surface it as an error, because it is routinely temporary.
+        if (!url) {
+          renderWatchLink(null);
+          // Forget what we just tried, so the NEXT poll re-attempts the same blob under the
+          // salt that has since arrived. Without this, `sealed === shownLink` would short
+          // circuit forever and the link would never appear.
+          shownLink = "";
+          return;
+        }
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+          console.warn("[link] refusing a non-http link from the broadcaster");
+          renderWatchLink(null);
+          return;
+        }
+        renderWatchLink(parsed.href);
+      } catch {
+        renderWatchLink(null);
+        shownLink = "";
+      }
+    };
+
     // Load initial overlay content
     if (settings.overlay_html) {
       updateOverlay(settings.overlay_html);
     }
+    void updateWatchLink(settings.link_enc);
 
     // Poll for setting changes (auth and overlay)
     const settingsCheckInterval = setInterval(async () => {
@@ -4488,6 +4738,9 @@ async function initWatchView(streamId: string, user: User | null) {
 
       // Update overlay content
       updateOverlay(currentSettings.overlay_html);
+      // And the Link watermark's tappable copy, which the broadcaster can set, change or take
+      // down mid-stream exactly as they can the QR.
+      void updateWatchLink(currentSettings.link_enc);
 
       // React to the broadcaster toggling live chat on/off mid-stream.
       if (currentSettings.chat_enabled) openWatchChat();

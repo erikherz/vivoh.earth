@@ -835,7 +835,7 @@ async function handleStreamRoutes(
     // with settings but no salt row, or a salt row with no settings, must both be answerable.
     const stream = await env.DB
       .prepare(`
-        SELECT s.require_auth, s.overlay_html, s.encrypted, s.chat_enabled, k.killed_at
+        SELECT s.require_auth, s.overlay_html, s.link_enc, s.encrypted, s.chat_enabled, k.killed_at
         FROM (SELECT ? AS sid) q
         LEFT JOIN streams s ON s.stream_id = q.sid
         LEFT JOIN stream_salts k ON k.stream_id = q.sid
@@ -844,6 +844,7 @@ async function handleStreamRoutes(
       .first<{
         require_auth: number | null;
         overlay_html: string | null;
+        link_enc: string | null;
         encrypted: number | null;
         chat_enabled: number | null;
         killed_at: string | null;
@@ -857,6 +858,11 @@ async function handleStreamRoutes(
       // that lies.
       require_auth: (stream?.require_auth ?? 1) === 1,
       overlay_html: stream?.overlay_html || "",
+      // Opaque by construction. This column holds `<nonce>.<ciphertext>` sealed under a key
+      // derived from the share link's `#k=` fragment, so serving it discloses nothing: we
+      // cannot read where a broadcaster points their audience any more than we can read the
+      // video. See migration 0018.
+      link_enc: stream?.link_enc || "",
       encrypted: true, // mandatory for every stream; the column is retained but no longer authoritative
       chat_enabled: stream?.chat_enabled === 1,
       killed: !!stream?.killed_at,
@@ -1175,16 +1181,16 @@ async function handleStreamRoutes(
       return Response.json({ error: "Authentication required" }, { status: 401 });
     }
 
-    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; encrypted?: boolean; chat_enabled?: boolean };
+    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; link_enc?: string; encrypted?: boolean; chat_enabled?: boolean };
     if (!body.stream_id) {
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
 
     // Get current settings first
     const current = await env.DB
-      .prepare("SELECT user_id, require_auth, overlay_html, encrypted, chat_enabled FROM streams WHERE stream_id = ?")
+      .prepare("SELECT user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled FROM streams WHERE stream_id = ?")
       .bind(body.stream_id)
-      .first<{ user_id: number; require_auth: number; overlay_html: string | null; encrypted: number; chat_enabled: number }>();
+      .first<{ user_id: number; require_auth: number; overlay_html: string | null; link_enc: string | null; encrypted: number; chat_enabled: number }>();
 
     // OWNERSHIP. Wallflower does not need this check: with OAuth off every caller resolves to
     // the same anonymous user, so "someone else's row" does not exist there. The moment
@@ -1203,28 +1209,37 @@ async function handleStreamRoutes(
     const requireAuth =
       body.require_auth !== undefined ? body.require_auth : (current ? current.require_auth === 1 : true);
     const overlayHtml = body.overlay_html !== undefined ? body.overlay_html : (current?.overlay_html || "");
+    const linkEnc = body.link_enc !== undefined ? body.link_enc : (current?.link_enc || "");
+    // A bound on an opaque blob. We cannot validate the contents — that is the point — so the
+    // only check available is size, and without one this column is an unbounded write endpoint
+    // for any signed-in publisher. A sealed URL is a few hundred bytes.
+    if (linkEnc.length > 4096) {
+      return Response.json({ error: "link_enc too large" }, { status: 400 });
+    }
     const isEncrypted = body.encrypted !== undefined ? body.encrypted : (current?.encrypted === 1);
     const chatEnabled = body.chat_enabled !== undefined ? body.chat_enabled : (current?.chat_enabled === 1);
 
     // Upsert stream settings
     await env.DB
       .prepare(`
-        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html, encrypted, chat_enabled)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(stream_id) DO UPDATE SET
           require_auth = excluded.require_auth,
           overlay_html = excluded.overlay_html,
+          link_enc = excluded.link_enc,
           encrypted = excluded.encrypted,
           chat_enabled = excluded.chat_enabled,
           updated_at = datetime('now')
       `)
-      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, isEncrypted ? 1 : 0, chatEnabled ? 1 : 0)
+      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, linkEnc, isEncrypted ? 1 : 0, chatEnabled ? 1 : 0)
       .run();
 
     return Response.json({
       stream_id: body.stream_id,
       require_auth: requireAuth,
       overlay_html: overlayHtml,
+      link_enc: linkEnc,
       encrypted: isEncrypted,
       chat_enabled: chatEnabled,
     });
