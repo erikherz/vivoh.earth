@@ -19,6 +19,8 @@
 //
 // What this object still sees: how many sockets, how large each blob is, and when.
 
+import { mintGuestMedia } from "./auth/moq-token";
+
 /** A socket's small, hibernation-surviving bookkeeping. Never the presence blob itself. */
 interface Attachment {
   id: string;
@@ -77,6 +79,8 @@ const MAX_AUDIO = 4 * 1024;
  * lost it and made "who's next" unanswerable.
  */
 const HANDS_KEY = "hands";
+/** The stream id this room belongs to. Stored on first connect; the DO cannot read its own name. */
+const SID_KEY = "sid";
 const FLOOR_KEY = "floor";
 
 /** Storage key for one participant's sealed presence blob. */
@@ -90,8 +94,31 @@ const pkey = (id: string) => `p:${id}`;
  */
 const IDS_KEY = "ids";
 
+/**
+ * Only what this object needs to mint a guest's turn. Deliberately not the Worker's full Env:
+ * a narrower type is a narrower blast radius if someone later reaches for a binding in here.
+ */
+interface RoomEnv {
+  MOQ_PRO_JWK?: string;
+  MOQ_PRO_K?: string;
+  MOQ_PRO_ROOT?: string;
+}
+
+const MOQ_PRO_RELAY = "cdn.moq.pro";
+
 export class WatchRoom {
   private state: DurableObjectState;
+  /**
+   * WHY THIS OBJECT MINTS, rather than asking the Worker to.
+   *
+   * The token attests to exactly one fact — that this socket holds the floor — and this object
+   * is the only place that fact exists. Routing it through the Worker would mean inventing a
+   * nonce, handing it to the guest, and having the Worker call back here to validate it: three
+   * new moving parts to relay an answer we already have. It uses the same signing key as the
+   * Worker because it is the same isolate and the same account; this is not a wider trust
+   * boundary, only a shorter path across the one that was already there.
+   */
+  private env: RoomEnv;
 
   /**
    * Who currently holds the floor, cached in memory.
@@ -106,8 +133,9 @@ export class WatchRoom {
    */
   private floor: string | null | undefined = undefined;
 
-  constructor(state: DurableObjectState) {
+  constructor(state: DurableObjectState, env: RoomEnv) {
     this.state = state;
+    this.env = env;
   }
 
   private async currentFloor(): Promise<string | null> {
@@ -121,7 +149,48 @@ export class WatchRoom {
     this.floor = id;
     if (id) await this.state.storage.put(FLOOR_KEY, id);
     else await this.state.storage.delete(FLOOR_KEY);
-    this.broadcast(JSON.stringify({ t: "floor", id }));
+
+    if (!id) {
+      this.broadcast(JSON.stringify({ t: "floor", id: null }));
+      return;
+    }
+
+    // A turn begins. Mint the pair for it and fan out ASYMMETRICALLY — this is the one message
+    // in this file whose payload differs per recipient, and it differs because the capabilities
+    // do. Broadcasting one object with both tokens in it would hand every viewer in the room the
+    // ability to publish as the guest, which is the whole thing this scoping prevents.
+    const sid = (await this.state.storage.get<string>(SID_KEY)) ?? "";
+    const media = sid
+      ? await mintGuestMedia(
+          {
+            jwk: this.env.MOQ_PRO_JWK,
+            k: this.env.MOQ_PRO_K,
+            root: this.env.MOQ_PRO_ROOT || "erik",
+            relay: MOQ_PRO_RELAY,
+          },
+          sid,
+          id
+        )
+      : null;
+
+    for (const sock of this.state.getWebSockets()) {
+      const a = sock.deserializeAttachment() as Attachment | null;
+      const msg: Record<string, unknown> = { t: "floor", id };
+      if (media) {
+        msg.relay = media.relay;
+        msg.path = media.path;
+        msg.exp = media.expiresAt;
+        // The speaker publishes; the broadcaster subscribes; everyone else is told only that
+        // somebody has the floor, which is all they need to render a ring on a bubble.
+        if (a?.id === id) msg.jwt = media.publishJwt;
+        else if (a?.host) msg.jwt = media.subscribeJwt;
+      }
+      try {
+        sock.send(JSON.stringify(msg));
+      } catch {
+        // socket going away; ignore
+      }
+    }
   }
 
   /** Send to the broadcaster's sockets only. Used for the one-to-one voice path. */
@@ -146,6 +215,11 @@ export class WatchRoom {
     // is why every piece of per-socket state below lives in an attachment or in storage
     // rather than on `this`.
     this.state.acceptWebSocket(server);
+
+    // The Worker puts the stream id on the rebuilt URL; a Durable Object cannot recover the
+    // name it was addressed by. Needed only to build the guest's publish path.
+    const sid = new URL(request.url).searchParams.get("sid") ?? "";
+    if (sid) await this.state.storage.put(SID_KEY, sid);
 
     const id = crypto.randomUUID().slice(0, 8);
     // `host` comes from the query string the WORKER rebuilt, never from a header or a message.

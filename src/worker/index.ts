@@ -1025,6 +1025,12 @@ async function handleStreamRoutes(
     const roomUrl = new URL(request.url);
     roomUrl.searchParams.delete("host");
     if (isHost) roomUrl.searchParams.set("host", "1");
+    // Same rule as `host`: DELETE then set, so the value the object reads is one this line
+    // wrote. The object needs it to build a guest's publish path and cannot recover the name it
+    // was addressed by; a client-supplied `sid` would let a viewer aim a guest token at some
+    // other broadcast's path.
+    roomUrl.searchParams.delete("sid");
+    roomUrl.searchParams.set("sid", streamId);
 
     const id = env.WATCH_ROOMS.idFromName(streamId);
     return env.WATCH_ROOMS.get(id).fetch(new Request(roomUrl.toString(), request));

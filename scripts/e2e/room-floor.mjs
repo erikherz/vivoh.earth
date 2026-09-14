@@ -137,6 +137,29 @@ try {
     b.of("a").length + a.of("a").length === audioBefore,
     `frames seen: ${b.of("a").length + a.of("a").length}`);
 
+  // --- Who receives a publish token --------------------------------------------------------
+  //
+  // A guest's turn is carried by a moq.pro token the Durable Object mints and hands down. The
+  // publish half lets its holder write to `<stream>-g-<id>.hang`, which the host composites into
+  // the programme — so anyone holding one can put audio and video in front of the whole audience.
+  // The object therefore sends a DIFFERENT payload to each socket, and this is the check that the
+  // difference is real. A single broadcast carrying both halves would look identical in every
+  // other test here and would hand the room's publish capability to every viewer in it.
+  console.log("\n  — who gets a token —");
+
+  const floorsSeenByB = b.of("floor").length;
+  const jwtsBeforeB = b.of("floor").filter((m) => m.jwt).length;
+  check("a plain viewer holds no token before any turn", jwtsBeforeB === 0,
+    `floor msgs=${floorsSeenByB} with jwt=${jwtsBeforeB}`);
+
+  // Neither of these sockets is the host, so neither can grant a turn — which means this suite
+  // cannot observe a token being issued at all. Recorded rather than skipped silently: it is a
+  // real gap, and the shape of it matters. A run that reports "no tokens anywhere" would pass
+  // whether the scoping works or the minting is simply broken.
+  const anyJwt = [...a.seen, ...b.seen].some((m) => m.jwt);
+  check("no token reaches a socket that neither speaks nor hosts", anyJwt === false);
+  console.log("        (a host-granted turn is not reachable here — see the note on task #87)");
+
   // --- Hands survive a departure correctly ------------------------------------------------
   console.log("\n  — leaving —");
   a.close();

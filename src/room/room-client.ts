@@ -25,6 +25,16 @@ export interface RoomMember {
   avatar: AvatarImage | null;
 }
 
+/** A guest's moq.pro credentials for one turn, as handed down by the Durable Object. */
+export interface GuestMedia {
+  relay: string;
+  path: string;
+  /** Scoped to the guest path AND to this role: publish for the speaker, subscribe for a host. */
+  jwt: string;
+  /** Unix seconds. A turn outliving it needs a fresh grant, not a renewal. */
+  exp: number;
+}
+
 export interface RoomReaction {
   /** Who threw it; may be a member who has since left. */
   from: string;
@@ -69,8 +79,15 @@ export interface RoomCallbacks {
   onFull: (cap: number) => void;
   /** The raised-hand queue, in the order people raised. Always the WHOLE list. */
   onHands: (ids: string[]) => void;
-  /** Who holds the floor now, or null. Fires on every change, including self. */
-  onFloor: (id: string | null) => void;
+  /**
+   * Who holds the floor now, or null. Fires on every change, including self.
+   *
+   * `media` is present only for the two parties who need it, because the Durable Object sends a
+   * different payload to each: the speaker gets a token that may PUBLISH the guest path, the
+   * broadcaster gets one that may only SUBSCRIBE to it, and everyone else gets neither. A client
+   * cannot mint or widen one — it can only be handed one.
+   */
+  onFloor: (id: string | null, media: GuestMedia | null) => void;
   /** One Opus frame from the current speaker. Only the broadcaster receives these. */
   onAudio: (b64: string) => void;
   /** The socket is up and the Worker has said whether this page is the broadcaster. */
@@ -184,6 +201,10 @@ export function initRoom(opts: {
         p?: string;
         cap?: number;
         host?: boolean;
+        jwt?: string;
+        relay?: string;
+        path?: string;
+        exp?: number;
         ids?: unknown;
         hands?: unknown;
         floor?: unknown;
@@ -216,7 +237,12 @@ export function initRoom(opts: {
       }
 
       if (data.t === "floor") {
-        callbacks.onFloor(typeof data.id === "string" ? data.id : null);
+        const fid = typeof data.id === "string" ? data.id : null;
+        const media =
+          fid && typeof data.jwt === "string" && typeof data.relay === "string" && typeof data.path === "string"
+            ? { relay: data.relay, path: data.path, jwt: data.jwt, exp: Number(data.exp ?? 0) }
+            : null;
+        callbacks.onFloor(fid, media);
         return;
       }
 
@@ -255,7 +281,9 @@ export function initRoom(opts: {
           // After the roster, never before: both of these are rendered ONTO member bubbles,
           // and a hand delivered first would be attached to a grid that does not exist yet.
           callbacks.onHands(hands);
-          callbacks.onFloor(floor);
+          // No media here by design. The roster reports a turn already in progress; the tokens
+          // went to the parties involved when it STARTED, and a late joiner is not one of them.
+          callbacks.onFloor(floor, null);
         })();
         return;
       }

@@ -157,3 +157,59 @@ export async function mintMoqProTokenEd25519(privateJwk: string, claims: MoqProC
   const sig = await crypto.subtle.sign("Ed25519", key, new TextEncoder().encode(signingInput));
   return `${signingInput}.${b64url(sig)}`;
 }
+
+// ── Guest speaker tokens ────────────────────────────────────────────────────────────────
+//
+// A called-on viewer publishes their own short MoQ broadcast, which the host subscribes to and
+// composites into the programme. Two capabilities turn on for the length of a turn, and their
+// scoping is the whole security of the arrangement.
+//
+// THE GUEST PATH IS NOT THE BROADCAST PATH. The programme lives at `<streamId>.hang`; a guest
+// gets `<streamId>-g-<guestId>.hang`. moq.pro matches put/get against the names in the claim, so
+// a guest token cannot publish over the broadcast it is a guest of — not by policy, but because
+// the name it may write is a different name. Get this wrong and someone handed the microphone
+// could replace the presenter's own video.
+export const GUEST_TOKEN_TTL_SECONDS = 300;
+
+/** The moq.pro sub-path a guest publishes to. One spelling, in one place. */
+export function guestSub(streamId: string, guestId: string): string {
+  return `${streamId}-g-${guestId}.hang`;
+}
+
+export interface GuestMedia {
+  relay: string;
+  path: string;
+  /** put+get on the guest path only. Handed ONLY to the socket holding the floor. */
+  publishJwt: string;
+  /** get on the guest path, no put. Handed ONLY to the broadcaster's sockets. */
+  subscribeJwt: string;
+  expiresAt: number;
+}
+
+/**
+ * Mint the pair for one speaking turn.
+ *
+ * Returns both halves together so the asymmetry is visible in one place: the guest may write and
+ * read their own path, the host may only read it. A host able to WRITE the guest path could
+ * puppet the guest — and the audience cannot tell a guest's camera from a fabrication published
+ * under the guest's name, so that is a worse capability than it first appears.
+ */
+export async function mintGuestMedia(
+  opts: { jwk?: string; k?: string; root: string; relay: string },
+  streamId: string,
+  guestId: string,
+  ttlSeconds: number = GUEST_TOKEN_TTL_SECONDS
+): Promise<GuestMedia | null> {
+  if (!opts.jwk && !opts.k) return null;
+  const sub = guestSub(streamId, guestId);
+  const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const sign = (claims: MoqProClaims) =>
+    opts.jwk ? mintMoqProTokenEd25519(opts.jwk, claims) : mintMoqProToken(opts.k as string, claims);
+
+  const [publishJwt, subscribeJwt] = await Promise.all([
+    sign({ root: opts.root, put: [sub], get: [sub], exp }),
+    sign({ root: opts.root, put: [], get: [sub], exp }),
+  ]);
+
+  return { relay: opts.relay, path: `${opts.root}/${sub}`, publishJwt, subscribeJwt, expiresAt: exp };
+}

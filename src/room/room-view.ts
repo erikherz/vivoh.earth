@@ -15,7 +15,7 @@
 
 import type { User } from "../auth";
 import { anonAvatar, avatarToDataUrl, giphyAvatar, oauthAvatar, type AvatarImage } from "./avatar";
-import { initRoom, type RoomHandle, type RoomMember, type RoomReaction } from "./room-client";
+import { initRoom, type GuestMedia, type RoomHandle, type RoomMember, type RoomReaction } from "./room-client";
 import { startVoiceReceiver, startVoiceSender, type VoiceReceiver, type VoiceSender } from "./voice";
 
 // Shared with chat on purpose: a person who named themselves in chat should not have to do it
@@ -286,6 +286,8 @@ export function initRoomView(opts: {
   let sender: VoiceSender | null = null;
   let receiver: VoiceReceiver | null = null;
   let detachMix: (() => void) | null = null;
+  /** Set for the length of a turn, on the speaker's page and the host's. Null everywhere else. */
+  let guestMedia: GuestMedia | null = null;
 
   const nameOf = (id: string) => bubbles.get(id)?.label.textContent || "Someone";
 
@@ -432,8 +434,12 @@ export function initRoomView(opts: {
     receiver = null;
   };
 
-  const applyFloor = (id: string | null) => {
+  const applyFloor = (id: string | null, media: GuestMedia | null) => {
     floor = id;
+    // Held for the turn. Whoever receives one — the speaker gets a publish token, the host a
+    // subscribe token — uses it to reach cdn.moq.pro directly; everyone else gets null and
+    // simply renders a ring on a bubble.
+    guestMedia = media;
     for (const [bid, b] of bubbles) b.el.classList.toggle("speaking", bid === id);
 
     const mine = id !== null && id === room.myId();
