@@ -3,7 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vivoh.Earth</title>
+    <title>Vivoh.Earth &mdash; encrypted virtual events with no attendee cap</title>
+    <meta name="description" content="Town halls, all-hands and virtual events that scale like a broadcast. End-to-end encrypted in the browser, sub-second latency, no attendee cap, no app to install.">
+    <meta property="og:title" content="Vivoh.Earth">
+    <meta property="og:description" content="Interactive live events, end to end encrypted, with no attendee cap.">
+    <meta property="og:type" content="website">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <script type="module" src="/src/main.ts"></script>
     <style>
@@ -2065,6 +2069,16 @@
             background: linear-gradient(135deg, #b8860b 0%, #00997e 100%);
             -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
         }
+        /* One paragraph between the headline and the checklist. The headline names the
+           category, this says what the thing actually is for someone who has never heard of
+           Media over QUIC. */
+        .hero-sub {
+            max-width: 46rem;
+            margin: 0 auto;
+            font-size: 1.08rem;
+            line-height: 1.6;
+            color: var(--text-secondary);
+        }
         .hero-features {
             list-style: none;
             width: fit-content;
@@ -2156,6 +2170,60 @@
         .info-card p a:hover { text-decoration: underline; }
         :root.light .info-card p a { color: #00997e; }
         .info-card code { font-family: monospace; font-size: 0.82em; background: var(--bg-tertiary); padding: 1px 5px; border-radius: 4px; }
+
+        /* ===== Comparison table =====
+           Scrolls inside its own wrapper rather than widening the page: three columns of prose
+           will not fit a phone, and a body that scrolls sideways is worse than a table that
+           does. */
+        .compare-wrap {
+            overflow-x: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            background: var(--bg-secondary);
+        }
+        .compare {
+            width: 100%;
+            min-width: 640px;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+        .compare th, .compare td {
+            text-align: left;
+            padding: 0.85rem 1rem;
+            vertical-align: top;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .compare tr:last-child th, .compare tr:last-child td { border-bottom: none; }
+        .compare thead th {
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            background: var(--bg-tertiary);
+        }
+        .compare thead th.us { color: #00d4aa; }
+        :root.light .compare thead th.us { color: #00997e; }
+        .compare tbody th {
+            font-weight: 600;
+            color: var(--text-primary);
+            width: 9.5rem;
+        }
+        /* The claim column gets the readable text; the column about everyone else is
+           deliberately quieter, so the page reads as a description of us rather than an
+           attack on them. */
+        .compare td.us { color: var(--text-primary); }
+        .compare td.them { color: var(--text-secondary); }
+        .compare code { font-family: monospace; font-size: 0.85em; background: var(--bg-tertiary); padding: 1px 5px; border-radius: 4px; }
+        .compare a { color: #00d4aa; text-decoration: none; font-weight: 500; }
+        .compare a:hover { text-decoration: underline; }
+        :root.light .compare a { color: #00997e; }
+        .compare-note {
+            font-size: 0.8rem;
+            line-height: 1.5;
+            color: var(--text-muted);
+            margin-top: 0.75rem;
+        }
         .card-badge {
             display: inline-block;
             font-size: 0.68rem;
@@ -2236,7 +2304,7 @@
                 <img class="logo-icon" src="/favicon.svg" alt="" width="42" height="42">
                 <h1>Vivoh<span class="dot">.</span>Earth</h1>
             </a>
-            <span class="tagline" id="site-tagline">Secure contribution plus scalable distribution</span>
+            <span class="tagline" id="site-tagline">Encrypted live events, with no attendee cap</span>
             <div class="header-right">
                 <a href="/broadcast" class="btn btn-primary nav-btn" id="nav-broadcast">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
@@ -2269,19 +2337,117 @@
         <!-- Landing / promo view (bare "/") -->
         <div id="landing-view" class="hidden">
             <section class="hero">
-                <h2 class="hero-title">Secure contribution plus scalable distribution</h2>
-                <!-- ACCURACY, not style. The third line used to read "No identity tracking,
-                     accounts, or DRM" — false since OAuth became the only publisher door, and
-                     carried over from Wallflower where it IS true. The replacement claims only
-                     what has run in production: hands, faces and reactions are proven live;
-                     spoken questions are deployed but have never carried a frame, so they are
-                     deliberately NOT claimed here yet. Upgrade this line when they have. -->
+                <h2 class="hero-title">Virtual events that scale like a broadcast</h2>
+                <!-- ACCURACY, not style. Every line here has to be something that has actually
+                     run in production. Hands, faces, reactions and a called-on guest speaking
+                     with camera are all now verified live (2026-09-14) and may be claimed. What
+                     is NOT claimed: any attendee number we have not measured. "No attendee cap"
+                     is a statement about the ARCHITECTURE — relay fan-out, not conference slots
+                     — and is worded so it stays true whatever the largest real event turns out
+                     to be. Do not replace it with a figure until one has been measured. -->
+                <p class="hero-sub">
+                    Town halls, all-hands and customer events where the audience is visible &mdash;
+                    faces, applause, raised hands, and anyone you call on speaking live on camera.
+                    Built on a broadcast CDN instead of a conference bridge, so the ten-thousandth
+                    attendee costs what the tenth did, and encrypted in your browser before any of
+                    it leaves.
+                </p>
                 <ul class="hero-features">
-                    <li>Sub-second video, chat and reactions</li>
-                    <li>No app to install &mdash; any modern browser, including iPhone</li>
-                    <li>Hands up, faces and applause &mdash; at broadcast scale</li>
+                    <li>No attendee cap &mdash; relay fan-out, not licensed conference seats</li>
+                    <li>End-to-end encrypted &mdash; the key is in your link, never on our servers</li>
+                    <li>Sub-second latency, in any modern browser, including iPhone</li>
+                    <li>Raise a hand, get called on, speak on camera to the whole audience</li>
                 </ul>
+                <p style="margin-top: 1.75rem;">
+                    <a href="/broadcast" class="cta cta-primary">Start a broadcast</a>
+                </p>
             </section>
+
+            <!-- The competitive section. Erik's ask: position this directly against Vimeo Venues
+                 and Kaltura Virtual Events, on the two axes where we differ structurally rather
+                 than by degree — end-to-end encryption, and what happens as the audience grows.
+                 Rows that are PARITY are shown as parity on purpose. A comparison table where we
+                 win every row reads as marketing; one that concedes the even rows is believed. -->
+            <div class="promo-section">
+                <h3 class="promo-heading">Against a conferencing-based event platform</h3>
+                <div class="compare-wrap">
+                    <table class="compare">
+                        <thead>
+                            <tr>
+                                <th scope="col"></th>
+                                <th scope="col" class="us">Vivoh.Earth</th>
+                                <th scope="col">Vimeo Venues &middot; Kaltura Virtual Events</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <th scope="row">Audience size</th>
+                                <td class="us">No cap. Viewers subscribe from the nearest relay, so the hundredth and the hundred-thousandth cost the same to serve.</td>
+                                <td class="them">Licensed attendee tiers with a hard ceiling &mdash; Venues is capped at 3,000.</td>
+                            </tr>
+                            <tr>
+                                <th scope="row">Encryption</th>
+                                <td class="us">End to end. Your browser encrypts every frame; the key is derived from the part of the share link after the <code>#</code>, which browsers never send to a server.</td>
+                                <td class="them">Encrypted in transit to the vendor, then decrypted on the vendor's servers. No end-to-end option.</td>
+                            </tr>
+                            <tr>
+                                <th scope="row">What the vendor can see</th>
+                                <td class="us">Ciphertext. We cannot watch your event, and could not produce it if we were asked to. <a href="/trust">What we can and cannot see &rarr;</a></td>
+                                <td class="them">The full video, audio and chat, for as long as they retain it.</td>
+                            </tr>
+                            <tr>
+                                <th scope="row">Transport</th>
+                                <td class="us">Media over QUIC &mdash; an IETF publish/subscribe transport designed for one-to-many, with sub-second latency.</td>
+                                <td class="them">WebRTC, designed for conferences, with a server mesh doing the fan-out.</td>
+                            </tr>
+                            <tr>
+                                <th scope="row">Audience interaction</th>
+                                <td class="us">Face grid, emoji and GIF reactions, raise-a-hand queue, and a guest brought on with mic and camera.</td>
+                                <td class="them">Much the same. This is the part they do well, and the reason we built it.</td>
+                            </tr>
+                            <tr>
+                                <th scope="row">Getting in</th>
+                                <td class="us">A link, in the browser you already have &mdash; iPhone included. Nothing to install, no account required of your audience unless you require one.</td>
+                                <td class="them">A link in the browser too. Parity.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p class="compare-note">
+                    Competitor rows describe conferencing-architecture event platforms generally;
+                    the 3,000 figure is Vimeo's published Venues limit. Check both against current
+                    vendor documentation before quoting them in a deal.
+                </p>
+            </div>
+
+            <!-- Shipped features only. The guest turn — mic and camera, composited into the
+                 broadcast and out over the CDN — was verified working end to end in production
+                 on 2026-09-14 before this section was written. -->
+            <div class="promo-section">
+                <h3 class="promo-heading">What your audience does</h3>
+                <div class="card-grid">
+                    <div class="info-card">
+                        <span class="card-icon">👥</span>
+                        <h4>They have faces</h4>
+                        <p>Signed-in viewers appear as a wall of profile pictures under the video; anyone else picks a GIF or stays anonymous. Pictures travel <strong>sealed, as bytes</strong> &mdash; nobody's browser calls Google or Giphy to render the room. The grid seats 200; everyone past that keeps watching as normal.</p>
+                    </div>
+                    <div class="info-card">
+                        <span class="card-icon">🎉</span>
+                        <h4>They react</h4>
+                        <p>Emoji and GIFs fly across the stream and land on the sender's bubble, so a presenter can feel a room of thousands the way they'd feel a room of thirty. Reactions are encrypted on the same key as everything else.</p>
+                    </div>
+                    <div class="info-card">
+                        <span class="card-icon">✋</span>
+                        <h4>They raise a hand</h4>
+                        <p>A visible queue, in order, on the presenter's screen. Call on someone and their hand comes down and the floor is theirs. Only one person holds it at a time, and it is released the moment they finish.</p>
+                    </div>
+                    <div class="info-card">
+                        <span class="card-icon">🎤</span>
+                        <h4>They speak, on camera</h4>
+                        <p>Being called on <em>offers</em> a microphone &mdash; it never opens one. The guest chooses voice, or voice and camera, and their picture joins the broadcast as a second inset that the presenter can move and resize. A host cannot unmute anybody; only a viewer can.</p>
+                    </div>
+                </div>
+            </div>
 
             <div class="promo-section">
                 <h3 class="promo-heading">Built on open standards</h3>
