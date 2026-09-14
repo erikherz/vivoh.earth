@@ -225,7 +225,7 @@
   <p>
     A broadcast can be an ordinary one-way stream, or it can be a <strong>room</strong>, where the
     people watching appear to one another as a wall of faces, send reactions, raise a hand, and be
-    called on to speak. The room is <strong>off unless you turn it on</strong>, per broadcast.
+    called on to speak &mdash; with video, if they choose it. The room is <strong>off unless you turn it on</strong>, per broadcast.
   </p>
   <p>
     Everything in it is encrypted exactly like the video: names, pictures, reactions and the voice
@@ -248,12 +248,18 @@
     someone a spectator, not a participant.
   </p>
 
-  <h3>Nobody can turn on your microphone but you</h3>
+  <h3>Nobody can turn on your microphone or camera but you</h3>
   <p>
-    When a host calls on you, your microphone does <strong>not</strong> open. You are asked, and
-    nothing is captured until you press <em>Unmute</em>. This matters more than it sounds: browsers
-    remember microphone permission per site, so a page that simply called for the microphone would
-    get no prompt at all from anyone who had ever allowed it once.
+    When a host calls on you, nothing opens. You are asked, and nothing is captured until you
+    choose &mdash; <em>Unmute</em> for your voice alone, or <em>Unmute with video</em> if you also
+    want to be seen. This matters more than it sounds: browsers remember device permission per
+    site, so a page that simply called for the microphone would get no prompt at all from anyone
+    who had ever allowed it once.
+  </p>
+  <p>
+    A camera is more exposing than a microphone, so it is never implied. The plain <em>Unmute</em>
+    asks for no camera at all, and turning one on is a separate press every time &mdash; not a
+    setting you can leave on by mistake.
   </p>
   <p>
     The property that follows is worth stating plainly, because it is unusual: <strong>a host
@@ -262,10 +268,20 @@
     something we can answer on your behalf.
   </p>
   <p>
-    If you do speak, your voice is mixed into the broadcast, so everyone watching hears it. It is
-    part of the programme from that moment: as recordable by any viewer as the rest of the stream,
-    and within reach of the same reporting process. The host can drop you at any time, and you can
-    end your own turn whenever you like.
+    If you do speak, your voice &mdash; and your picture, if you chose video &mdash; is mixed into
+    the broadcast, so everyone watching hears and sees it. You are part of the programme from that
+    moment: as recordable by any viewer as the rest of the stream, and within reach of the same
+    reporting process. The host can drop you at any time, and you can end your own turn whenever
+    you like.
+  </p>
+  <p>
+    While you are speaking, your turn travels as its own short encrypted broadcast on the same CDN
+    that carries the programme, under a key that is <strong>not</strong> the one protecting the
+    stream. Two consequences worth knowing: the CDN carries it as ciphertext exactly like
+    everything else, and holding the share link is not enough to open it &mdash; only the presenter
+    can, because only they are given the matching key. Your turn is granted for a few minutes at a
+    time and has to be granted again; there is no standing permission to publish into someone
+    else's broadcast.
   </p>
   <p>
     The same limit as chat applies, and more sharply. We cannot moderate a room, because we cannot
@@ -364,7 +380,7 @@
   </p>
 
   <p class="foot">
-    Last reviewed 14 September 2026, when the room, reactions and voice questions shipped. Three
+    Last reviewed 14 September 2026, when the room, reactions and live questions shipped. Three
     claims on the previous version of this page had gone stale and were corrected: that viewers
     could see nothing but the stream, that broadcasting needed no account, and that a person's
     broadcasts were not linkable to each other. This describes Vivoh.Earth as it runs today; it
