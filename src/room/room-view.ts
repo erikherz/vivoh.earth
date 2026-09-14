@@ -114,6 +114,14 @@ export function initRoomView(opts: {
       </div>
       <ol class="room-queue-list"></ol>
     </div>
+    <!-- The accept step. Holding the floor does NOT open a microphone; only pressing Unmute
+         does. See offerMic() below for why this cannot be skipped even for someone who has
+         already granted microphone permission to this origin. -->
+    <div class="room-invite hidden" role="alertdialog" aria-live="assertive">
+      <span class="room-invite-text">You've been asked to speak.</span>
+      <button class="room-invite-yes" type="button">Unmute</button>
+      <button class="room-invite-no" type="button">Not now</button>
+    </div>
     <!-- Shown to whoever currently holds the floor, on their own screen. -->
     <div class="room-speaking hidden" role="status" aria-live="polite">
       <span class="room-speaking-dot"></span>
@@ -147,6 +155,10 @@ export function initRoomView(opts: {
   const queuePanel = container.querySelector(".room-queue") as HTMLElement;
   const queueList = container.querySelector(".room-queue-list") as HTMLOListElement;
   const queueCount = container.querySelector(".room-queue-count") as HTMLElement;
+  const invite = container.querySelector(".room-invite") as HTMLElement;
+  const inviteText = container.querySelector(".room-invite-text") as HTMLElement;
+  const inviteYes = container.querySelector(".room-invite-yes") as HTMLButtonElement;
+  const inviteNo = container.querySelector(".room-invite-no") as HTMLButtonElement;
   const speakingBar = container.querySelector(".room-speaking") as HTMLElement;
   const speakingText = container.querySelector(".room-speaking-text") as HTMLElement;
   const speakingDone = container.querySelector(".room-speaking-done") as HTMLButtonElement;
@@ -338,8 +350,40 @@ export function initRoomView(opts: {
    * requested it. A speaker whose page decided locally that it had the floor would be a live
    * microphone the presenter never granted.
    */
+  /**
+   * Being called on OFFERS the microphone. It does not open it.
+   *
+   * This step is the whole consent story, and it exists because browser microphone permission
+   * is granted per ORIGIN and PERSISTS. Anyone who has ever allowed the microphone on
+   * vivoh.earth would get no second prompt from the browser — `getUserMedia` would simply
+   * succeed and audio would start flowing into a live broadcast. The gap between raising a
+   * hand and being called can be many minutes; the hand may have been raised by accident; the
+   * person may have walked away from the desk.
+   *
+   * It also closes a subtler hole for free. The server deliberately lets a host call on
+   * someone who never raised a hand — "Sarah, what do you think?" is an ordinary thing to do
+   * in a town hall, and forbidding it server-side would have cost a real flow. What makes
+   * that safe is not a restriction on the host but this prompt: it does not matter who the
+   * host picked or why, because no microphone opens until the person themselves agrees.
+   *
+   * Consequence worth stating: a host cannot unmute anybody. Only a viewer can.
+   */
+  const offerMic = () => {
+    if (sender) return; // already speaking
+    inviteText.textContent = "You've been asked to speak. Your microphone stays off until you choose.";
+    invite.classList.remove("hidden");
+    // Focus the affirmative control so a keyboard user can accept without hunting, but do NOT
+    // make it a default-submit: accepting must be a deliberate press.
+    inviteYes.focus({ preventScroll: true });
+  };
+
+  const hideInvite = () => {
+    invite.classList.add("hidden");
+  };
+
   const startSpeaking = async () => {
     if (sender) return;
+    hideInvite();
     speakingText.textContent = "Connecting your microphone…";
     speakingBar.classList.remove("hidden");
     try {
@@ -360,6 +404,7 @@ export function initRoomView(opts: {
   const stopSpeaking = () => {
     sender?.stop();
     sender = null;
+    hideInvite();
     speakingBar.classList.add("hidden");
     speakingText.textContent = "";
   };
@@ -392,7 +437,8 @@ export function initRoomView(opts: {
     for (const [bid, b] of bubbles) b.el.classList.toggle("speaking", bid === id);
 
     const mine = id !== null && id === room.myId();
-    if (mine) void startSpeaking();
+    // OFFER, never open. startSpeaking() runs only from the Unmute button below.
+    if (mine) offerMic();
     else stopSpeaking();
 
     // The host decodes whoever is up. Torn down and rebuilt between speakers rather than
@@ -415,6 +461,19 @@ export function initRoomView(opts: {
 
   handBtn.addEventListener("click", () => setHand(!handUp));
   speakingDone.addEventListener("click", () => room.drop());
+
+  // The click that opens the microphone is also the user gesture that lets iOS resume an
+  // AudioContext. Calling getUserMedia straight from this handler — rather than after an
+  // await — keeps that activation intact; a suspended context captures silence.
+  inviteYes.addEventListener("click", () => void startSpeaking());
+
+  // Declining releases the floor, so the presenter's queue moves on rather than waiting on
+  // somebody who has stepped away. They keep their place in no queue — the hand is already
+  // down — and can simply raise it again.
+  inviteNo.addEventListener("click", () => {
+    hideInvite();
+    room.drop();
+  });
 
   // --- the connection ---------------------------------------------------------------
 

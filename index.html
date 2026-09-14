@@ -1755,6 +1755,45 @@
         .room-queue-call:disabled { opacity: 0.55; cursor: default; }
         .room-queue-empty { color: var(--text-secondary); font-size: 0.85rem; padding: 0.3rem; }
 
+        /* The accept step. Shown when someone is offered the floor, and it is the ONLY thing
+           that opens a microphone — see offerMic() in room-view.ts. Styled to read as a
+           question rather than as a status, because it is asking for a decision. */
+        .room-invite {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            margin-top: 0.9rem;
+            padding: 0.7rem 0.9rem;
+            border-radius: 8px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-active);
+            font-size: 0.9rem;
+        }
+        .room-invite-text { flex: 1 1 14rem; min-width: 0; }
+        .room-invite-yes,
+        .room-invite-no {
+            flex: 0 0 auto;
+            min-height: 44px;
+            padding: 0 1.1rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+        /* The affirmative is the emphasised control, but both are plainly visible: a decline
+           that is hard to find is not really a choice. */
+        .room-invite-yes {
+            border: 1px solid var(--stream-id-color);
+            background: var(--stream-id-color);
+            color: var(--bg-primary, #0a0a0a);
+            font-weight: 600;
+        }
+        .room-invite-no {
+            border: 1px solid var(--border-active);
+            background: transparent;
+            color: var(--text-primary);
+        }
+
         /* Shown only on the speaker's own screen. Deliberately loud: a hot microphone that is
            easy to forget about is the failure this bar exists to prevent. */
         .room-speaking {
