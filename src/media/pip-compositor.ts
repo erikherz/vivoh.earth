@@ -318,6 +318,42 @@ export function createCompositor(): Compositor {
     move: "grab",
   };
 
+  const guestW = () => Math.round(CANVAS_W * gScale);
+  const guestH = () => {
+    const g = guest;
+    if (!g || !g.width) return Math.round(guestW() * 9 / 16);
+    return Math.round(guestW() * (g.height / g.width));
+  };
+  /** Drawable only once @moq has sized the canvas — see the note in draw(). */
+  const guestReady = () =>
+    !!guest && !(guest.width === 300 && guest.height === 150) && guest.width > 0;
+
+  const guestZoneAt = (pt: { x: number; y: number }): Zone | null => {
+    if (!guestReady()) return null;
+    const w = guestW();
+    const h = guestH();
+    if (pt.x < gx - HANDLE || pt.x > gx + w + HANDLE) return null;
+    if (pt.y < gy - HANDLE || pt.y > gy + h + HANDLE) return null;
+    const l = Math.abs(pt.x - gx) <= HANDLE;
+    const r = Math.abs(pt.x - (gx + w)) <= HANDLE;
+    const t = Math.abs(pt.y - gy) <= HANDLE;
+    const b = Math.abs(pt.y - (gy + h)) <= HANDLE;
+    if (t && l) return "nw";
+    if (t && r) return "ne";
+    if (b && l) return "sw";
+    if (b && r) return "se";
+    if (t) return "n";
+    if (b) return "s";
+    if (l) return "w";
+    if (r) return "e";
+    return pt.x >= gx && pt.x <= gx + w && pt.y >= gy && pt.y <= gy + h ? "move" : null;
+  };
+
+  const clampGuest = () => {
+    gx = Math.max(0, Math.min(gx, CANVAS_W - guestW()));
+    gy = Math.max(0, Math.min(gy, CANVAS_H - guestH()));
+  };
+
   const zoneAt = (pt: { x: number; y: number }): Zone | null => {
     if (!screen || !camera) return null;
     const w = insetW();
@@ -591,18 +627,17 @@ export function createCompositor(): Compositor {
     // shipped that way, and the fix was claimed in a commit message before it was written.
     // @moq/watch resizes its canvas to the video on the first decoded frame, so anything that
     // is still exactly the HTML default has decoded nothing.
-    const guestReady = !!guest && !(guest.width === 300 && guest.height === 150) && guest.width > 0;
-    if (guest && guestReady) {
-      const gw = insetW();
-      const gh = Math.round(gw * (guest.height / guest.width));
-      // Anchored to the camera INSET when one exists — and the inset only exists when a screen
-      // share is the base layer. This said `camera ?` and was wrong: px/py are the inset's
-      // position and are only maintained inside the screen branch, so on a camera-only
-      // broadcast (the common case) they were still 0 and the guest was drawn at the very top
-      // left corner, half under the browser chrome and easy to read as "no video at all".
-      const hasInset = !!screen && !!camera;
-      const gx = hasInset ? Math.max(0, px - gw - 12) : CANVAS_W - gw - 24;
-      const gy = hasInset ? py : CANVAS_H - gh - 24;
+    if (guest && guestReady()) {
+      const gw = guestW();
+      const gh = guestH();
+      // First appearance only: park it bottom-right, clear of the camera inset when there is
+      // one. After that the broadcaster owns the position and nothing moves it under them.
+      if (!gPlaced) {
+        gx = CANVAS_W - gw - 24;
+        gy = CANVAS_H - gh - 24;
+        gPlaced = true;
+      }
+      clampGuest();
       ctx.save();
       ctx.shadowColor = "rgba(0,0,0,0.5)";
       ctx.shadowBlur = 14;
@@ -696,25 +731,28 @@ export function createCompositor(): Compositor {
 
   // WHICH object a drag is acting on. Before the QR there was only one draggable thing, so
   // this did not need to exist; now a zone alone is ambiguous ("nw" of what?).
-  let target: "cam" | "qr" | null = null;
-  let hoverTarget: "cam" | "qr" | null = null;
+  let target: "cam" | "qr" | "guest" | null = null;
+  let hoverTarget: "cam" | "qr" | "guest" | null = null;
 
   canvas.addEventListener("pointerdown", (e) => {
     const p = toCanvas(e);
     // Drawing order is camera then QR — so hit-testing runs in reverse and the topmost thing
     // under the pointer wins. Grabbing what is visibly on top is the only behaviour that is
     // not a surprise.
+    // Draw order is camera, then guest, then QR — so hit-testing runs in reverse and the
+    // topmost thing under the pointer wins.
+    const gz = guestZoneAt(p);
     const qz = qrZoneAt(p);
-    const z = qz ?? zoneAt(p);
+    const z = qz ?? gz ?? zoneAt(p);
     if (!z) return;
-    target = qz ? "qr" : "cam";
+    target = qz ? "qr" : gz ? "guest" : "cam";
     mode = z;
     hover = z;
     hoverTarget = target;
-    const ox = target === "qr" ? qrX : px;
-    const oy = target === "qr" ? qrY : py;
-    const ow = target === "qr" ? qrPlate?.width ?? 0 : insetW();
-    const oh = target === "qr" ? qrPlate?.height ?? 0 : insetH();
+    const ox = target === "qr" ? qrX : target === "guest" ? gx : px;
+    const oy = target === "qr" ? qrY : target === "guest" ? gy : py;
+    const ow = target === "qr" ? qrPlate?.width ?? 0 : target === "guest" ? guestW() : insetW();
+    const oh = target === "qr" ? qrPlate?.height ?? 0 : target === "guest" ? guestH() : insetH();
     if (z === "move") {
       dx = p.x - ox;
       dy = p.y - oy;
@@ -731,10 +769,34 @@ export function createCompositor(): Compositor {
   canvas.addEventListener("pointermove", (e) => {
     const p = toCanvas(e);
     if (!mode) {
+      const gz = guestZoneAt(p);
       const qz = qrZoneAt(p);
-      hover = qz ?? zoneAt(p);
-      hoverTarget = hover ? (qz ? "qr" : "cam") : null;
+      hover = qz ?? gz ?? zoneAt(p);
+      hoverTarget = hover ? (qz ? "qr" : gz ? "guest" : "cam") : null;
       canvas.style.cursor = hover ? CURSOR[hover] : "";
+      return;
+    }
+    if (target === "guest") {
+      if (mode === "move") {
+        gx = p.x - dx;
+        gy = p.y - dy;
+        clampGuest();
+        return;
+      }
+      // Width drives it and the aspect follows, so the guest is never distorted. Same anchor
+      // rule as the others: the opposite edge stays planted.
+      const fx = mode.includes("w") ? anchorX - p.x : p.x - anchorX;
+      const fy = mode.includes("n") ? anchorY - p.y : p.y - anchorY;
+      const g = guest;
+      const aspect = g && g.width ? g.height / g.width : 9 / 16;
+      let want: number;
+      if (mode === "n" || mode === "s") want = fy / aspect;
+      else if (mode === "e" || mode === "w") want = fx;
+      else want = Math.max(fx, fy / aspect);
+      gScale = Math.max(MIN_SCALE, Math.min(want / CANVAS_W, MAX_SCALE));
+      gx = mode.includes("w") ? anchorX - guestW() : anchorX;
+      gy = mode.includes("n") ? anchorY - guestH() : anchorY;
+      clampGuest();
       return;
     }
     if (target === "qr") {
@@ -786,9 +848,10 @@ export function createCompositor(): Compositor {
     mode = null;
     target = null;
     const p = toCanvas(e);
+    const gz = guestZoneAt(p);
     const qz = qrZoneAt(p);
-    hover = qz ?? zoneAt(p);
-    hoverTarget = hover ? (qz ? "qr" : "cam") : null;
+    hover = qz ?? gz ?? zoneAt(p);
+    hoverTarget = hover ? (qz ? "qr" : gz ? "guest" : "cam") : null;
     canvas.style.cursor = hover ? CURSOR[hover] : "";
     try { canvas.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
   };
@@ -816,6 +879,7 @@ export function createCompositor(): Compositor {
   type Chrome = { el: HTMLDivElement | null; key: string };
   const camChrome: Chrome = { el: null, key: "" };
   const qrChrome: Chrome = { el: null, key: "" };
+  const guestChrome: Chrome = { el: null, key: "" };
 
   const ensureChrome = (c: Chrome): HTMLDivElement | null => {
     if (c.el) return c.el;
@@ -873,6 +937,7 @@ export function createCompositor(): Compositor {
     const active = mode !== null ? target : hoverTarget;
     syncOne(camChrome, !!(screen && camera) && active === "cam", px, py, insetW(), insetH());
     syncOne(qrChrome, !!qrPlate && active === "qr", qrX, qrY, qrPlate?.width ?? 0, qrPlate?.height ?? 0);
+    syncOne(guestChrome, guestReady() && active === "guest", gx, gy, guestW(), guestH());
   };
 
   // ---- Audio mix: one stable output track; mic + system audio are inputs ----
@@ -901,6 +966,17 @@ export function createCompositor(): Compositor {
    * broadcaster actually repositions.
    */
   let guest: HTMLCanvasElement | null = null;
+  /**
+   * The guest inset's own placement, on the same terms as the camera inset and the QR plate.
+   *
+   * Separate from px/py deliberately. Those belong to the camera inset and are only meaningful
+   * when a screen share is the base layer; sharing them is what put the guest at 0,0 on a
+   * camera-only broadcast. A guest is a third independent object on the canvas.
+   */
+  let gx = 0;
+  let gy = 0;
+  let gScale = 0.28;
+  let gPlaced = false;
   let micStream: MediaStream | null = null;
   let micNode: MediaStreamAudioSourceNode | null = null;
   let sysNode: MediaStreamAudioSourceNode | null = null;
@@ -1101,8 +1177,16 @@ export function createCompositor(): Compositor {
       if (screen) screen.video.srcObject = null;
       if (camera) camera.video.srcObject = null;
       void ac.close().catch(() => {});
-      chrome?.remove();
-      chrome = null;
+      // Was `chrome?.remove(); chrome = null;` — left behind when the single outline became
+      // three (camera, QR, guest). It never failed a build because vite does not typecheck,
+      // and it is worse than dead: in Chrome the bare name resolves to window.chrome, so
+      // `chrome?.remove()` is a TypeError rather than a no-op and stop() threw before
+      // removing the canvas.
+      for (const c of [camChrome, qrChrome, guestChrome]) {
+        c.el?.remove();
+        c.el = null;
+        c.key = "";
+      }
       canvas.remove();
     },
   };

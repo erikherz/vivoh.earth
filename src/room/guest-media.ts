@@ -141,6 +141,14 @@ export async function startGuestSubscribe(opts: {
   };
   el.setAttribute("name", "");
   el.setAttribute("url", moqUrl(opts.media.relay, opts.media.path, opts.media.jwt));
+  // THE WHOLE BUG, for three rounds of testing. <moq-watch> only PAINTS when it thinks it is
+  // visible, and this element lives in a 1x1 clipped container so the host can composite its
+  // canvas rather than show it. Without this it decodes perfectly — catalog arrives, the canvas
+  // is sized to the real video, the diagnostic says "arriving" — and renders nothing, so the
+  // compositor draws a correctly-sized BLACK rectangle. index.html has carried visible="always"
+  // on the main watcher since long before this feature; I did not copy it across.
+  el.setAttribute("visible", "always");
+  el.setAttribute("muted", "");
 
   const canvas = document.createElement("canvas");
   el.appendChild(canvas);
