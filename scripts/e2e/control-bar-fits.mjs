@@ -91,6 +91,7 @@ const PROMOTED = `
   <button class="publish-btn toggle-btn glyph-btn" id="handle-btn">${faced("@", "Handle")}</button>
   <button class="publish-btn toggle-btn" id="link-btn">${faced(ICON, "Link")}</button>
   <button class="publish-btn toggle-btn" id="chat-btn">${faced(ICON, "Chat")}</button>
+  <button class="publish-btn toggle-btn" id="room-btn">${faced(ICON, "Room")}</button>
   <button class="publish-btn html-overlay-btn">${faced("&lt;/&gt;", "Extras")}</button>
   <button class="publish-btn more-btn" id="more-btn">${faced(ICON, "More")}</button>
 </div>`;

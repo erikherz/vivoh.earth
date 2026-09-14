@@ -34,6 +34,10 @@ import { mintEd25519Token, mintHs256Token, mintMoqProToken, mintMoqProTokenEd255
 // Per-stream live chat Durable Object (WebSocket hibernation). Re-exported so wrangler
 // can bind it; see wrangler.jsonc durable_objects + migrations.
 export { ChatRoom } from "./chat-room";
+// Per-stream presence + reactions for the room view. Same re-export reason as ChatRoom, and
+// the same E2E property: it relays sealed blobs it cannot read. See watch-room.ts for why it
+// is a separate class rather than more surface on ChatRoom.
+export { WatchRoom } from "./watch-room";
 
 export interface Env {
   DB: D1Database;
@@ -146,6 +150,14 @@ export interface Env {
   ENTERPRISE_MODE?: string;
   // Per-stream live chat rooms (one Durable Object instance per streamId).
   CHAT_ROOMS: DurableObjectNamespace;
+  // Per-stream presence/reaction rooms for the room view (one instance per streamId).
+  WATCH_ROOMS: DurableObjectNamespace;
+  // Giphy API key for the room view's GIF picker. OPTIONAL: unset simply means the picker
+  // offers emoji only, which is a working room, not a broken one. It lives here rather than
+  // in the client so that (a) the key is not published to everyone who loads the page, and
+  // (b) a viewer's browser never contacts Giphy directly — searches are proxied, so Giphy
+  // sees this Worker and not the audience.
+  GIPHY_API_KEY?: string;
 }
 
 interface User {
@@ -419,6 +431,141 @@ async function handleApiRoutes(
     // Admin routes
     if (url.pathname.startsWith("/api/admin/")) {
       return handleAdminRoutes(request, env, url);
+    }
+
+    // GET /api/avatar — the signed-in user's OWN OAuth picture, as bytes.
+    //
+    // The room needs a participant's picture as bytes it can seal, not as a URL it can hand
+    // out. Going straight to `lh3.googleusercontent.com` from the page has two problems: it
+    // tells Google that this person is in a room right now, and cross-origin canvas rules
+    // make the bytes unreadable anyway unless the provider happens to send permissive CORS —
+    // which varies by provider and silently breaks the feature when it changes.
+    //
+    // NOT an open proxy, and the reason is structural rather than a filter: this endpoint
+    // takes no URL. It looks up the avatar_url belonging to the CALLER'S OWN session row, so
+    // the only address it can ever be pointed at is one an OAuth provider wrote during that
+    // person's sign-in. The https check below is belt-and-braces against a provider (or a
+    // future migration) putting something else in that column.
+    if (request.method === "GET" && url.pathname === "/api/avatar") {
+      const me = await getAuthenticatedUser(request, env);
+      if (!me) return new Response("unauthorized", { status: 401 });
+      if (!me.avatar_url) return new Response("no avatar", { status: 404 });
+
+      let target: URL;
+      try {
+        target = new URL(me.avatar_url);
+      } catch {
+        return new Response("no avatar", { status: 404 });
+      }
+      if (target.protocol !== "https:") return new Response("no avatar", { status: 404 });
+
+      const upstream = await fetch(target.toString(), { cf: { cacheTtl: 3600, cacheEverything: true } });
+      if (!upstream.ok) return new Response("upstream error", { status: 502 });
+      const type = upstream.headers.get("content-type") ?? "";
+      if (!type.startsWith("image/")) return new Response("not an image", { status: 415 });
+
+      const out = new Response(upstream.body, upstream);
+      out.headers.set("content-type", type);
+      // Private: this is one person's picture, fetched under their cookie. It must never land
+      // in a shared cache where the next caller gets the previous caller's face.
+      out.headers.set("cache-control", "private, max-age=3600");
+      out.headers.delete("set-cookie");
+      return out;
+    }
+
+    // GET /api/giphy?q=<terms> — the room view's GIF picker, PROXIED.
+    //
+    // The point of proxying is not the API key, though it does keep that off every page we
+    // serve. It is that a viewer's browser never talks to Giphy. Called directly from the
+    // client, this feature would have told Giphy the IP of everyone in every room, when they
+    // were there, and what they searched for — audience metadata this service works hard not
+    // to hold, handed to a third party instead. Here, Giphy sees one Cloudflare Worker.
+    //
+    // WHAT WE SEE, stated honestly because it is new: this endpoint sees search terms. It is
+    // deliberately given nothing to attach them to — no stream id, no session token, no user
+    // lookup, and no logging below — so a term is an orphan string, but a term is more than
+    // the zero we saw before. A broadcaster who cannot accept that should leave rooms off.
+    //
+    // rating=g is a floor, not a nicety: whatever comes back becomes a participant's FACE in
+    // someone else's room, which is the one place unmoderated imagery would land in front of
+    // an audience that did not ask for it.
+    if (request.method === "GET" && url.pathname === "/api/giphy") {
+      if (!env.GIPHY_API_KEY) {
+        // Not an error condition. The picker falls back to emoji, which is a working room.
+        return Response.json({ enabled: false, gifs: [] });
+      }
+      const q = (url.searchParams.get("q") ?? "").trim().slice(0, 64);
+      const limit = 24;
+      const endpoint = q
+        ? `https://api.giphy.com/v1/gifs/search?api_key=${encodeURIComponent(env.GIPHY_API_KEY)}&q=${encodeURIComponent(q)}&limit=${limit}&rating=g&bundle=messaging_non_clips`
+        : `https://api.giphy.com/v1/gifs/trending?api_key=${encodeURIComponent(env.GIPHY_API_KEY)}&limit=${limit}&rating=g&bundle=messaging_non_clips`;
+
+      let payload: { data?: Array<{ id?: string; title?: string; images?: Record<string, { url?: string; width?: string; height?: string }> }> };
+      try {
+        const res = await fetch(endpoint, { cf: { cacheTtl: 300, cacheEverything: true } });
+        if (!res.ok) return Response.json({ enabled: true, gifs: [], error: "giphy_unavailable" });
+        payload = await res.json();
+      } catch {
+        return Response.json({ enabled: true, gifs: [], error: "giphy_unavailable" });
+      }
+
+      // Only the smallest animated rendition is offered. The client has to fit the bytes
+      // inside a sealed presence blob, so handing it the original — routinely megabytes —
+      // would just guarantee a rejection after a wasted download.
+      const gifs = (payload.data ?? []).flatMap((g) => {
+        const img = g.images?.fixed_height_small ?? g.images?.fixed_width_small;
+        if (!img?.url || !g.id) return [];
+        return [{ id: g.id, title: (g.title ?? "").slice(0, 80), url: img.url }];
+      });
+
+      return Response.json({ enabled: true, gifs }, {
+        // Searches repeat heavily across a room; this is a public, non-personal result set.
+        headers: { "cache-control": "public, max-age=300" },
+      });
+    }
+
+    // GET /api/giphy/img?u=<giphy media url> — the BYTES, also proxied.
+    //
+    // Without this the search proxy above is half a promise. The picker has to render
+    // thumbnails and the chosen GIF has to be downloaded before it can be re-encoded into a
+    // sealed presence blob, and both of those are the browser fetching from media.giphy.com.
+    // Everyone else in the room gets the sealed copy and never contacts Giphy; the person
+    // PICKING would have, on every keystroke's worth of results. So the bytes come through
+    // here too, and Giphy sees one Worker for the whole feature.
+    //
+    // THE ALLOWLIST IS THE SECURITY CONTROL, not a tidiness check. A `fetch(u)` on a
+    // caller-supplied URL is an open proxy: it would fetch internal addresses on our behalf,
+    // launder traffic through our IP reputation, and bill our account for someone else's
+    // bandwidth. Host must be giphy.com or a subdomain, scheme must be https, and nothing
+    // else is negotiable here.
+    if (request.method === "GET" && url.pathname === "/api/giphy/img") {
+      const raw = url.searchParams.get("u") ?? "";
+      let target: URL;
+      try {
+        target = new URL(raw);
+      } catch {
+        return new Response("bad url", { status: 400 });
+      }
+      const host = target.hostname.toLowerCase();
+      if (target.protocol !== "https:" || !(host === "giphy.com" || host.endsWith(".giphy.com"))) {
+        return new Response("forbidden host", { status: 403 });
+      }
+
+      const upstream = await fetch(target.toString(), { cf: { cacheTtl: 86400, cacheEverything: true } });
+      if (!upstream.ok) return new Response("upstream error", { status: 502 });
+
+      const type = upstream.headers.get("content-type") ?? "";
+      // Only images. The allowlist already bounds the origin; this bounds what that origin
+      // can talk us into relaying if a giphy.com path ever serves something else.
+      if (!type.startsWith("image/")) return new Response("not an image", { status: 415 });
+
+      const out = new Response(upstream.body, upstream);
+      out.headers.set("content-type", type);
+      out.headers.set("cache-control", "public, max-age=86400, immutable");
+      // The client draws these into a canvas to re-encode; same-origin by virtue of this
+      // proxy, so no CORS dance and no tainted canvas.
+      out.headers.delete("set-cookie");
+      return out;
     }
 
     // Stats routes
@@ -815,6 +962,51 @@ async function handleStreamRoutes(
     return env.CHAT_ROOMS.get(id).fetch(request);
   }
 
+  // GET /api/streams/:stream_id/room - Room presence + reactions WebSocket (forwarded to the
+  // per-stream WatchRoom Durable Object). WS handshakes are GET requests.
+  //
+  // Gated TWICE, and the second gate is the one chat does not have:
+  //
+  //   1. room_enabled, so a broadcaster who never turned the room on has no room.
+  //   2. the proof-of-link route tag, exactly as POST /api/stats/watch is gated.
+  //
+  // Chat gets away with (1) alone because a stranger who joins learns only that ciphertext is
+  // moving. A room is different: its blobs are PEOPLE'S FACES, and while a stranger without
+  // the fragment still cannot open them, letting them hold the ciphertext at all is a worse
+  // failure than letting them hold an unreadable chat line. Five-character stream ids are a
+  // sweepable space, so "you must already hold the link" is the gate that matters.
+  //
+  // 404 rather than 403 for a bad tag, matching /route and /api/stats/watch: a stranger
+  // walking the id space must not be able to use this endpoint to discover who is live.
+  const roomMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/room$/);
+  if (roomMatch) {
+    const streamId = roomMatch[1];
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("expected websocket", { status: 426 });
+    }
+    const s = await env.DB
+      .prepare("SELECT room_enabled FROM streams WHERE stream_id = ?")
+      .bind(streamId)
+      .first<{ room_enabled: number }>();
+    if (s?.room_enabled !== 1) {
+      return new Response("room disabled", { status: 403 });
+    }
+
+    const live = await env.DB
+      .prepare(
+        "SELECT route_tag FROM broadcast_events WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1"
+      )
+      .bind(streamId)
+      .first<{ route_tag: string | null }>();
+    if (!live) return new Response("offline", { status: 404 });
+    if (live.route_tag && !constantTimeEqual(url.searchParams.get("tag") ?? "", live.route_tag)) {
+      return new Response("offline", { status: 404 });
+    }
+
+    const id = env.WATCH_ROOMS.idFromName(streamId);
+    return env.WATCH_ROOMS.get(id).fetch(request);
+  }
+
   // GET /api/streams/:stream_id - Get stream settings (public)
   //
   // `killed` rides along here rather than getting its own endpoint because broadcaster and
@@ -835,7 +1027,7 @@ async function handleStreamRoutes(
     // with settings but no salt row, or a salt row with no settings, must both be answerable.
     const stream = await env.DB
       .prepare(`
-        SELECT s.require_auth, s.overlay_html, s.link_enc, s.encrypted, s.chat_enabled, k.killed_at
+        SELECT s.require_auth, s.overlay_html, s.link_enc, s.encrypted, s.chat_enabled, s.room_enabled, k.killed_at
         FROM (SELECT ? AS sid) q
         LEFT JOIN streams s ON s.stream_id = q.sid
         LEFT JOIN stream_salts k ON k.stream_id = q.sid
@@ -847,6 +1039,7 @@ async function handleStreamRoutes(
         link_enc: string | null;
         encrypted: number | null;
         chat_enabled: number | null;
+        room_enabled: number | null;
         killed_at: string | null;
       }>();
 
@@ -865,6 +1058,12 @@ async function handleStreamRoutes(
       link_enc: stream?.link_enc || "",
       encrypted: true, // mandatory for every stream; the column is retained but no longer authoritative
       chat_enabled: stream?.chat_enabled === 1,
+      // Defaults OFF, and defaults off for a stream with NO ROW too — unlike require_auth
+      // above, whose missing-row default is the strict one. The strict default for a room is
+      // "no room": a broadcaster who has never touched this setting has not agreed to let
+      // their audience see each other, and inferring that agreement from silence is exactly
+      // the mistake migration 0019 is written to prevent.
+      room_enabled: stream?.room_enabled === 1,
       killed: !!stream?.killed_at,
     });
   }
@@ -1181,16 +1380,16 @@ async function handleStreamRoutes(
       return Response.json({ error: "Authentication required" }, { status: 401 });
     }
 
-    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; link_enc?: string; encrypted?: boolean; chat_enabled?: boolean };
+    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; link_enc?: string; encrypted?: boolean; chat_enabled?: boolean; room_enabled?: boolean };
     if (!body.stream_id) {
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
 
     // Get current settings first
     const current = await env.DB
-      .prepare("SELECT user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled FROM streams WHERE stream_id = ?")
+      .prepare("SELECT user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled, room_enabled FROM streams WHERE stream_id = ?")
       .bind(body.stream_id)
-      .first<{ user_id: number; require_auth: number; overlay_html: string | null; link_enc: string | null; encrypted: number; chat_enabled: number }>();
+      .first<{ user_id: number; require_auth: number; overlay_html: string | null; link_enc: string | null; encrypted: number; chat_enabled: number; room_enabled: number }>();
 
     // OWNERSHIP. Wallflower does not need this check: with OAuth off every caller resolves to
     // the same anonymous user, so "someone else's row" does not exist there. The moment
@@ -1218,21 +1417,23 @@ async function handleStreamRoutes(
     }
     const isEncrypted = body.encrypted !== undefined ? body.encrypted : (current?.encrypted === 1);
     const chatEnabled = body.chat_enabled !== undefined ? body.chat_enabled : (current?.chat_enabled === 1);
+    const roomEnabled = body.room_enabled !== undefined ? body.room_enabled : (current?.room_enabled === 1);
 
     // Upsert stream settings
     await env.DB
       .prepare(`
-        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled, room_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(stream_id) DO UPDATE SET
           require_auth = excluded.require_auth,
           overlay_html = excluded.overlay_html,
           link_enc = excluded.link_enc,
           encrypted = excluded.encrypted,
           chat_enabled = excluded.chat_enabled,
+          room_enabled = excluded.room_enabled,
           updated_at = datetime('now')
       `)
-      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, linkEnc, isEncrypted ? 1 : 0, chatEnabled ? 1 : 0)
+      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, linkEnc, isEncrypted ? 1 : 0, chatEnabled ? 1 : 0, roomEnabled ? 1 : 0)
       .run();
 
     return Response.json({
@@ -1242,6 +1443,7 @@ async function handleStreamRoutes(
       link_enc: linkEnc,
       encrypted: isEncrypted,
       chat_enabled: chatEnabled,
+      room_enabled: roomEnabled,
     });
   }
 

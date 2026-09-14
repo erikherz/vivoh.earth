@@ -784,6 +784,7 @@ import {
   deriveChatKey,
   deriveLinkKey,
   deriveMediaKey,
+  deriveRoomKey,
   deriveRouteTag,
   generateLinkSecret,
   decryptStats,
@@ -793,6 +794,7 @@ import {
 } from "./crypto/media-crypto";
 import { encodeQr, type QrMatrix } from "./media/qr";
 import { initChat, type ChatHandle } from "./chat/chat-client";
+import { initRoomView, type RoomViewHandle } from "./room/room-view";
 import { describeLocation } from "./geo/nearest-city";
 import { createCompositor, type CameraFacing, type Compositor } from "./media/pip-compositor";
 import { createGeoStamp, type GeoStamp } from "./media/geo-stamp";
@@ -1377,8 +1379,49 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     chatBtn?.classList.toggle("toggle-on", on);
     if (persist) updateStreamSettings(streamId, { chat_enabled: on });
   };
+  // --- The room -------------------------------------------------------------------------
+  //
+  // Same shape as chat above, and for the same reason: the control is a button in the capture
+  // bar built much further down, so the state lives here and the button registers itself.
+  //
+  // The broadcaster joins their own room. That is not symmetry for its own sake — a presenter
+  // who cannot see the applause is this feature with its audience taken out — and the
+  // reactions fly over the preview they are already watching.
+  const broadcastRoomPanel = document.getElementById("broadcast-room") as HTMLElement | null;
+  const broadcastStage = document.getElementById("broadcast-stage") as HTMLElement | null;
+  let roomHandle: RoomViewHandle | null = null;
+  let roomEnabled = false;
+  let roomBtn: HTMLButtonElement | null = null;
+  const openRoom = () => {
+    if (!broadcastRoomPanel || !broadcastStage || roomHandle) return;
+    broadcastRoomPanel.classList.remove("hidden");
+    roomHandle = initRoomView({
+      streamId,
+      container: broadcastRoomPanel,
+      stage: broadcastStage,
+      user,
+      // Both getters, for the reason spelled out on initRoom's options: the salt only exists
+      // once go-live has happened, and rotating the id re-keys everything mid-session.
+      routeTag: () => deriveRouteTag(linkSecret, streamId),
+      roomKey: () => deriveRoomKey(linkSecret, { streamId, salt: activeSalt }),
+    });
+  };
+  const closeRoom = () => {
+    roomHandle?.destroy();
+    roomHandle = null;
+    broadcastRoomPanel?.classList.add("hidden");
+  };
+  const setRoomEnabled = (on: boolean, persist = true) => {
+    roomEnabled = on;
+    if (on) openRoom();
+    else closeRoom();
+    roomBtn?.classList.toggle("toggle-on", on);
+    if (persist) updateStreamSettings(streamId, { room_enabled: on });
+  };
+
   getStreamSettings(streamId).then((settings) => {
     if (settings.chat_enabled) setChatEnabled(true, false);
+    if (settings.room_enabled) setRoomEnabled(true, false);
   });
 
   // Stop publishing if this broadcast is terminated.
@@ -1739,10 +1782,19 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         await updateStreamSettings(streamId, {
           require_auth: requireAuthCheckbox?.checked ?? true,
           chat_enabled: chatEnabled,
+          room_enabled: roomEnabled,
         });
 
         if (wasLive) await goLive();
         if (chatEnabled) openChat();   // re-joins, now keyed to the new stream id
+        // The room has to be torn down and rebuilt rather than left alone: its Durable Object
+        // is addressed by stream id, so after a rotation the old socket is talking to the old
+        // room. closeRoom() first also drops everyone's stale bubbles, which is correct —
+        // those people are on the previous link and are no longer in this broadcast.
+        if (roomEnabled) {
+          closeRoom();
+          openRoom();
+        }
         // New id and new link secret, so the sealed copy has to be written again under the new
         // stream's row — the old blob is unopenable by anyone, including its author. goLive
         // already did this when the rotation was live; this covers rotate-while-stopped, where
@@ -2686,6 +2738,34 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     chatBtn.classList.toggle("toggle-on", chatEnabled);   // settings may have landed first
     advanced(chatBtnEl);
 
+    // --- The room ---
+    //
+    // Sits next to Chat because it belongs to the same family — a thing the broadcaster opens
+    // and closes for everyone watching, rather than a property of the link.
+    //
+    // The title says what it COSTS, not what it does, and that is deliberate. Every other
+    // control on this bar trades nothing: turning on the camera or the QR changes what the
+    // audience sees. This one changes what the audience can see of EACH OTHER, and a
+    // broadcaster whose viewers cannot afford to be seen together needs to learn that from
+    // the button rather than from the grid filling up with faces.
+    const roomBtnEl = document.createElement("button");
+    roomBtnEl.type = "button";
+    roomBtnEl.className = "publish-btn toggle-btn";
+    roomBtnEl.id = "room-btn";
+    roomBtnEl.title =
+      "Room — viewers see each other's names and pictures, and can send reactions. " +
+      "Encrypted end to end like chat, but visible to everyone else watching.";
+    roomBtnEl.innerHTML = faced(
+      '<svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" aria-hidden="true">' +
+      '<path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm-7 1a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm14 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM12 14c-3.3 0-6 1.8-6 4v2h12v-2c0-2.2-2.7-4-6-4zM5 15c-2.2 0-4 1.3-4 3v2h3.5v-2c0-1.1.4-2.1 1.1-2.9A5 5 0 0 0 5 15zm14 0c-.2 0-.4 0-.6.1.7.8 1.1 1.8 1.1 2.9v2H23v-2c0-1.7-1.8-3-4-3z"/>' +
+      "</svg>",
+      "Room"
+    );
+    roomBtnEl.addEventListener("click", () => setRoomEnabled(!roomEnabled));
+    roomBtn = roomBtnEl;
+    roomBtn.classList.toggle("toggle-on", roomEnabled);   // settings may have landed first
+    advanced(roomBtnEl);
+
     // No Stop button. It set all three capture flags false and called applyState(), which is
     // the same "nothing active" branch that turning off your last input already reaches — so
     // it was a second way to do what the toggles do, sitting in a row that had grown to eight
@@ -3610,6 +3690,34 @@ async function initWatchView(streamId: string, user: User | null) {
     watchChatPanel?.classList.add("hidden");
   };
   if (settings.chat_enabled) openWatchChat();
+
+  // The room, when the broadcaster turned it on. Same open/close shape as chat above so the
+  // settings poll further down can react to it being toggled mid-stream.
+  //
+  // Opening the panel is NOT joining. This connects the socket and shows whoever has already
+  // joined; this viewer's own name and picture go nowhere until they press Join. See the
+  // second rule at the top of room-view.ts.
+  const watchRoomPanel = document.getElementById("watch-room") as HTMLElement | null;
+  const watchStage = document.getElementById("watch-stage") as HTMLElement | null;
+  let watchRoomHandle: RoomViewHandle | null = null;
+  const openWatchRoom = () => {
+    if (!watchRoomPanel || !watchStage || watchRoomHandle) return;
+    watchRoomPanel.classList.remove("hidden");
+    watchRoomHandle = initRoomView({
+      streamId,
+      container: watchRoomPanel,
+      stage: watchStage,
+      user,
+      routeTag: () => deriveRouteTag(watchLinkSecret, streamId),
+      roomKey: () => deriveRoomKey(watchLinkSecret, { streamId, salt: watchSalt }),
+    });
+  };
+  const closeWatchRoom = () => {
+    watchRoomHandle?.destroy();
+    watchRoomHandle = null;
+    watchRoomPanel?.classList.add("hidden");
+  };
+  if (settings.room_enabled) openWatchRoom();
 
   // Set stream name on watcher (headless <moq-watch> core element)
   const watcher = document.querySelector("moq-watch") as MoqWatchElement | null;
@@ -4745,6 +4853,14 @@ async function initWatchView(streamId: string, user: User | null) {
       // React to the broadcaster toggling live chat on/off mid-stream.
       if (currentSettings.chat_enabled) openWatchChat();
       else closeWatchChat();
+
+      // Same for the room. Closing it matters more than opening it: a broadcaster who turns
+      // the room off has decided their audience should stop being visible to each other, and
+      // leaving the grid on screen would keep showing faces after that decision was made.
+      // The Worker refuses new sockets either way, but an already-open one would have kept
+      // relaying until it happened to drop.
+      if (currentSettings.room_enabled) openWatchRoom();
+      else closeWatchRoom();
     }, 5000); // Check every 5 seconds
 
     // Cleanup interval on page unload

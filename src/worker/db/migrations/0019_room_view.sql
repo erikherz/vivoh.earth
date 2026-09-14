@@ -1,0 +1,27 @@
+-- The room view: an alternate way to watch, where the audience is visible to itself.
+--
+-- WHAT CHANGES, stated plainly, because it moves a line this schema has defended since 0010.
+-- Everywhere else in this database the rule is that audience IDENTITY must stay unanswerable
+-- (see the comment on watch_events). That rule is about what WE can answer, and it is intact:
+-- this migration adds one boolean and nothing else. No faces, no names, no roster and no
+-- per-viewer row lands here, or anywhere else on our side.
+--
+-- What does change is what VIEWERS can see. In a room, each participant's picture and chosen
+-- name travel to the other participants, sealed under a key derived from the share link's
+-- `#k=` fragment and relayed by a Durable Object that cannot read any of it. The operator
+-- learns nothing new; the people in the room learn each other. That is the entire point of
+-- the feature and it is also its one real cost, which is why it is:
+--
+--   * OFF by default (DEFAULT 0), like chat before it;
+--   * per-stream, and settable only by the broadcaster who owns the stream id;
+--   * opt-in AGAIN on the viewer's side — arriving in a room does not publish your face,
+--     joining does, and the client asks first.
+--
+-- A broadcaster whose audience cannot afford to be seen by each other should leave this off.
+-- Nothing else about the stream changes when they do.
+--
+-- Deliberately NOT a second table's worth of state: presence is live-only, held in the
+-- Durable Object for exactly as long as a socket is open. When the last participant leaves,
+-- the room is empty and there is no history to preserve, disclose or subpoena, because none
+-- was ever written.
+ALTER TABLE streams ADD COLUMN room_enabled INTEGER DEFAULT 0;

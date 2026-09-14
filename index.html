@@ -1439,6 +1439,263 @@
             white-space: nowrap;
         }
 
+        /* ---- The room view: faces under the video, reactions over it ------------------
+           Everything here renders content that arrived encrypted and was opened in this page.
+           Colours go through the theme tokens, never literals: this page has a light theme,
+           and a grid of faces is the last thing that should come out unreadable on it. */
+
+        /* The positioned ancestor reactions fly inside. overflow:hidden keeps them on the
+           picture rather than letting them drift up over the page header. */
+        #watch-stage,
+        #broadcast-stage {
+            position: relative;
+            overflow: hidden;
+        }
+
+        .room-panel {
+            width: 100%;
+            max-width: 900px;
+            margin: 1rem auto 0;
+        }
+        .room-panel.room-offline { opacity: 0.6; }
+
+        .room-join {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem 1.1rem;
+        }
+        .room-join-text {
+            margin: 0 0 0.75rem;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+        .room-join-row { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+        .room-name {
+            flex: 1 1 12rem;
+            min-width: 0;
+            /* 16px exactly. Below it, iOS zooms the page on focus, which shrinks the visual
+               viewport and shoves fixed overlays off screen — a bug headless Chrome cannot
+               reproduce, so it has to be prevented here rather than caught in a test. */
+            font-size: 16px;
+            padding: 0.6rem 0.75rem;
+            min-height: 48px;
+            box-sizing: border-box;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-primary);
+        }
+        .room-join-btn {
+            flex: 0 0 auto;
+            min-height: 48px;
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-active);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            cursor: pointer;
+        }
+        .room-join-btn:disabled { opacity: 0.5; cursor: default; }
+
+        .room-grid {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-content: flex-start;
+            gap: 0.55rem;
+            margin-top: 0.9rem;
+            /* A large room scrolls inside itself rather than pushing the reaction bar below
+               the fold — the bar is what people came to use. */
+            max-height: 42vh;
+            overflow-y: auto;
+        }
+        .room-empty {
+            margin: 0.5rem 0;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .room-bubble {
+            position: relative;
+            width: 58px;
+            height: 58px;
+            flex: 0 0 auto;
+            border-radius: 50%;
+            overflow: visible;
+            background: var(--bg-tertiary);
+        }
+        .room-bubble-img {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            object-fit: cover;
+            display: block;
+        }
+        .room-bubble.reacting { box-shadow: 0 0 0 2px var(--stream-id-color); border-radius: 50%; }
+
+        /* The reaction takes the whole circle, on a light plate so an emoji reads against it
+           in either theme — this is the one place a fixed light ground is correct, because it
+           is standing in for a face, not for page furniture. */
+        .room-bubble-badge {
+            position: absolute;
+            inset: 0;
+            border-radius: 50%;
+            background-color: #fafafa;
+            background-size: cover;
+            background-position: center;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.8rem;
+            line-height: 1;
+        }
+
+        /* Names are a tooltip, not a caption: the grid stays dense at sixty people, and the
+           title attribute carries the same text for anyone who cannot hover. */
+        .room-bubble-name {
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 50%;
+            transform: translateX(-50%);
+            max-width: 12ch;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 0.7rem;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.15s ease;
+            z-index: 2;
+        }
+        .room-bubble:hover .room-bubble-name,
+        .room-bubble:focus-within .room-bubble-name { opacity: 1; }
+
+        .room-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.9rem;
+            padding: 0.5rem 0.6rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            justify-content: center;
+        }
+        .room-quick { display: flex; gap: 0.25rem; flex-wrap: wrap; justify-content: center; }
+        .room-emoji {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: 1px solid transparent;
+            background: transparent;
+            font-size: 1.4rem;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .room-emoji:hover,
+        .room-emoji:focus-visible { background: var(--bg-tertiary); border-color: var(--border-active); }
+        .room-gif-btn,
+        .room-throw-btn {
+            min-height: 44px;
+            padding: 0 0.9rem;
+            border-radius: 999px;
+            border: 1px solid var(--border-active);
+            background: transparent;
+            color: var(--text-primary);
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+
+        .room-gif-panel {
+            margin-top: 0.6rem;
+            padding: 0.75rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+        }
+        .room-gif-head { display: flex; gap: 0.5rem; }
+        .room-gif-q {
+            flex: 1 1 auto;
+            min-width: 0;
+            font-size: 16px; /* see .room-name */
+            min-height: 44px;
+            padding: 0.5rem 0.7rem;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-primary);
+        }
+        .room-gif-close {
+            flex: 0 0 auto;
+            width: 44px;
+            min-height: 44px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            cursor: pointer;
+        }
+        .room-gif-results {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+            gap: 0.4rem;
+            margin-top: 0.6rem;
+            max-height: 240px;
+            overflow-y: auto;
+        }
+        .room-gif-item {
+            padding: 0;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-tertiary);
+            overflow: hidden;
+            cursor: pointer;
+            aspect-ratio: 1 / 1;
+        }
+        .room-gif-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .room-gif-note { margin: 0.5rem 0 0; color: var(--text-secondary); font-size: 0.85rem; }
+        .room-gif-note:empty { display: none; }
+
+        /* A reaction in flight. Absolutely positioned inside #watch-stage; `left` and the
+           --drift custom property are set per element so a burst spreads instead of stacking
+           into one column. */
+        .room-fly {
+            position: absolute;
+            bottom: 8%;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            object-fit: cover;
+            font-size: 2.2rem;
+            line-height: 44px;
+            text-align: center;
+            pointer-events: none;
+            will-change: transform, opacity;
+            animation-name: room-fly-up;
+            animation-timing-function: ease-out;
+            animation-fill-mode: forwards;
+            z-index: 3;
+        }
+        @keyframes room-fly-up {
+            0%   { transform: translate(0, 0) scale(0.6); opacity: 0; }
+            12%  { transform: translate(0, -18px) scale(1); opacity: 1; }
+            80%  { opacity: 1; }
+            100% { transform: translate(var(--drift, 0px), -300px) scale(1.15); opacity: 0; }
+        }
+        /* The badge on the sender's bubble still changes, so a reaction is never invisible to
+           someone who asked for less motion — it simply does not fly. */
+        @media (prefers-reduced-motion: reduce) {
+            .room-fly { display: none; }
+        }
+
         /* Viewer HTML overlay display */
         .viewer-html-overlay {
             width: 100%;
@@ -1906,25 +2163,36 @@
             </div>
 
             <div class="video-chat-layout">
-                <section>
+                <!-- See #watch-stage: the positioned ancestor room reactions fly inside. The
+                     broadcaster gets one too, because a presenter who cannot see the applause
+                     is the whole feature missing its audience. -->
+                <section id="broadcast-stage">
                     <moq-publish announce="source">
                         <video muted autoplay playsinline></video>
                     </moq-publish>
                 </section>
                 <div id="broadcast-chat" class="chat-panel hidden"></div>
             </div>
+            <div id="broadcast-room" class="room-panel hidden"></div>
         </div>
 
         <!-- Watch View -->
         <div id="watch-view" class="hidden">
             <div class="video-chat-layout">
-                <section>
+                <!-- id="watch-stage" is what room reactions fly over. It has to be the
+                     positioned ancestor of the video, not the page, or a reaction would
+                     animate up the whole document instead of across the picture. -->
+                <section id="watch-stage">
                     <moq-watch muted visible="always">
                         <canvas></canvas>
                     </moq-watch>
                 </section>
                 <div id="watch-chat" class="chat-panel hidden"></div>
             </div>
+            <!-- The room: faces and reactions, populated only when the broadcaster enabled it
+                 AND this viewer pressed Join. Empty markup by design — everything inside is
+                 built by src/room/room-view.ts out of blobs opened in this page. -->
+            <div id="watch-room" class="room-panel hidden"></div>
         </div>
 
         <!-- TinyMoQ is gone from here deliberately: streams ride moq.pro, and the fleet path

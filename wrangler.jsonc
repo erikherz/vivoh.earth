@@ -76,12 +76,17 @@
 			{
 				"name": "CHAT_ROOMS",
 				"class_name": "ChatRoom"
+			},
+			{
+				"name": "WATCH_ROOMS",
+				"class_name": "WatchRoom"
 			}
 		]
 	},
-	// KEEP these tags as they are. This deployment has already applied v2 and v3; renumbering
-	// to match Wallflower's single "v1" would make Cloudflare try to re-create a class that
-	// already exists. The tag history is per-deployment state, not source you can port.
+	// KEEP these tags as they are. This deployment has already applied v2, v3 and v4;
+	// renumbering to match Wallflower's single "v1" would make Cloudflare try to re-create a
+	// class that already exists. The tag history is per-deployment state, not source you can
+	// port. Append new tags; never rewrite an old one.
 	"migrations": [
 		{
 			"tag": "v2",
@@ -90,6 +95,10 @@
 		{
 			"tag": "v3",
 			"new_sqlite_classes": ["ChatRoom"]
+		},
+		{
+			"tag": "v4",
+			"new_sqlite_classes": ["WatchRoom"]
 		}
 	]
 }

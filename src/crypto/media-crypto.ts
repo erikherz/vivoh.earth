@@ -590,6 +590,23 @@ export async function deriveChatKey(secretB64url: string, opts: DeriveOpts): Pro
 }
 
 /**
+ * The room key: presence and reactions in the room view.
+ *
+ * Same link secret and the same reasoning as chat, through its own HKDF context. What it
+ * protects is a heavier payload than a chat line — a display name and the actual BYTES of a
+ * participant's picture — which is precisely why it travels sealed. The room's Durable Object
+ * relays and briefly stores these blobs, and neither it nor anyone reading its storage can
+ * turn one back into a face.
+ *
+ * Kept separate from the chat context even though the two share a trust boundary (everyone
+ * holding the link can read both). The split costs one HKDF call, and means a key recovered
+ * from one feature's plaintext does not open the other's.
+ */
+export async function deriveRoomKey(secretB64url: string, opts: DeriveOpts): Promise<CryptoKey> {
+  return deriveFor(secretB64url, opts, "wallflower-room-key-v1");
+}
+
+/**
  * The media key as a VALUE rather than as module state.
  *
  * {@link deriveMediaKey} installs into the live pipeline; replaying a recording must not
