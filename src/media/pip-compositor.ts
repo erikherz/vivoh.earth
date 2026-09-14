@@ -148,6 +148,14 @@ export interface Compositor {
    * not modified at all to support this.
    */
   attachAudioSource: (node: AudioNode) => () => void;
+  /**
+   * Show a called-on guest as a second inset, beside the camera one.
+   *
+   * Takes the CANVAS @moq/watch renders into rather than a stream or frames: the element owns
+   * decoding and its own pacing, and drawImage on its canvas each paint is both the cheapest
+   * and the least coupled way to reach the pixels. Pass null to take the guest back off.
+   */
+  setGuest: (source: HTMLCanvasElement | null) => void;
   hasCamera: () => boolean;
   hasScreen: () => boolean;
   /**
@@ -570,6 +578,30 @@ export function createCompositor(): Compositor {
       // camera doesn't produce black pillarbox bars in the published stream.
       drawCover(camera.video);
     }
+    // The guest, when one holds the floor. Drawn AFTER the camera inset so the pair sits in a
+    // row with the guest to its left, and after the base layers so it is never occluded by the
+    // screen share it is discussing.
+    //
+    // `naturalWidth` has no meaning for a canvas, so the readiness test is its own dimensions:
+    // @moq/watch sizes its canvas when the first frame decodes, and drawing a 0x0 source throws.
+    if (guest && guest.width > 0 && guest.height > 0) {
+      const gw = insetW();
+      const gh = Math.round(gw * (guest.height / guest.width));
+      // Anchored to the camera inset when there is one, so moving the camera moves the pair.
+      const gx = camera ? Math.max(0, px - gw - 12) : CANVAS_W - gw - 24;
+      const gy = camera ? py : CANVAS_H - gh - 24;
+      ctx.save();
+      ctx.shadowColor = "rgba(0,0,0,0.5)";
+      ctx.shadowBlur = 14;
+      ctx.drawImage(guest, gx, gy, gw, gh);
+      ctx.restore();
+      // A different border colour from the camera inset's white, so the audience can tell at a
+      // glance which face is the presenter and which is the person asking.
+      ctx.strokeStyle = "rgba(34,197,94,0.95)";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(gx, gy, gw, gh);
+    }
+
     // Stamp the CAMERA's capture time when a camera is on, even while it is the small inset
     // over a screen share: the camera is the source that witnesses the physical world, which
     // is what a provenance stamp is about. Screen-only stamps the screen grab. Neither
@@ -847,6 +879,15 @@ export function createCompositor(): Compositor {
     }).catch(() => { /* retry on the next gesture */ });
   };
   document.addEventListener("pointerdown", onGesture);
+  /**
+   * A called-on guest's decoded video, drawn as a second inset.
+   *
+   * Placed to the LEFT of the camera inset and sized the same, so the pair reads as a row. It
+   * deliberately does not participate in the drag machinery: two draggable insets plus the QR
+   * plate is three overlapping hit zones on a phone, and the camera inset is the one a
+   * broadcaster actually repositions.
+   */
+  let guest: HTMLCanvasElement | null = null;
   let micStream: MediaStream | null = null;
   let micNode: MediaStreamAudioSourceNode | null = null;
   let sysNode: MediaStreamAudioSourceNode | null = null;
@@ -862,6 +903,9 @@ export function createCompositor(): Compositor {
     audioTrack,
     canvas,
     audioContext: ac,
+    setGuest(source) {
+      guest = stopped ? null : source;
+    },
     attachAudioSource(node) {
       if (stopped) return () => {};
       node.connect(dest);

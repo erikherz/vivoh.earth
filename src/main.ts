@@ -1413,6 +1413,8 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       // once go-live has happened, and rotating the id re-keys everything mid-session.
       routeTag: () => deriveRouteTag(linkSecret, streamId),
       roomKey: () => deriveRoomKey(linkSecret, { streamId, salt: activeSalt }),
+      linkSecret: () => linkSecret,
+      salt: () => activeSalt,
       // Read at the moment someone is called on, not captured now — see the `mix` option's
       // comment. Turning the room on before going live is the ordinary order of operations,
       // and at this point there is no compositor at all.
@@ -1420,6 +1422,9 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         activeComp
           ? { audioContext: activeComp.audioContext, attachAudioSource: activeComp.attachAudioSource }
           : null,
+      // Same lateness applies: the compositor may not exist when a guest is called on, and a
+      // guest with nowhere to be drawn is a warning, not a crash.
+      setGuestVideo: (source) => activeComp?.setGuest(source),
     });
   };
   const closeRoom = () => {
@@ -3728,6 +3733,10 @@ async function initWatchView(streamId: string, user: User | null) {
       user,
       routeTag: () => deriveRouteTag(watchLinkSecret, streamId),
       roomKey: () => deriveRoomKey(watchLinkSecret, { streamId, salt: watchSalt }),
+      linkSecret: () => watchLinkSecret,
+      salt: () => watchSalt,
+      // No `mix` and no `setGuestVideo` on a viewer's page: there is no composite here. A
+      // viewer who is called on PUBLISHES; only the broadcaster subscribes and draws.
     });
   };
   const closeWatchRoom = () => {

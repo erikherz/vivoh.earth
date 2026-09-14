@@ -16,7 +16,12 @@
 import type { User } from "../auth";
 import { anonAvatar, avatarToDataUrl, giphyAvatar, oauthAvatar, type AvatarImage } from "./avatar";
 import { initRoom, type GuestMedia, type RoomHandle, type RoomMember, type RoomReaction } from "./room-client";
-import { startVoiceReceiver, startVoiceSender, type VoiceReceiver, type VoiceSender } from "./voice";
+import {
+  startGuestPublish,
+  startGuestSubscribe,
+  type GuestPublication,
+  type GuestSubscription,
+} from "./guest-media";
 
 // Shared with chat on purpose: a person who named themselves in chat should not have to do it
 // again to join the room, and vice versa.
@@ -72,6 +77,22 @@ export function initRoomView(opts: {
    * audience would never have heard a single question.
    */
   mix?: () => { audioContext: AudioContext; attachAudioSource: (node: AudioNode) => () => void } | null;
+  /**
+   * The share link's secret, and the server-issued salt.
+   *
+   * Getters for the same reason the key getters are: the salt only exists once /route or
+   * go-live has answered, and rotating the stream id re-keys everything mid-session. A guest's
+   * turn derives its own key from these at the moment the turn starts.
+   */
+  linkSecret: () => string;
+  salt: () => string | undefined;
+  /**
+   * Put a called-on guest into the outgoing picture. Broadcaster's page only.
+   *
+   * Takes the canvas @moq/watch decodes into, or null to remove them. Absent on a viewer's
+   * page, where there is no composite to draw into.
+   */
+  setGuestVideo?: (source: HTMLCanvasElement | null) => void;
 }): RoomViewHandle {
   const { container, stage, user } = opts;
 
@@ -120,6 +141,7 @@ export function initRoomView(opts: {
     <div class="room-invite hidden" role="alertdialog" aria-live="assertive">
       <span class="room-invite-text">You've been asked to speak.</span>
       <button class="room-invite-yes" type="button">Unmute</button>
+      <button class="room-invite-cam" type="button">Unmute with video</button>
       <button class="room-invite-no" type="button">Not now</button>
     </div>
     <!-- Shown to whoever currently holds the floor, on their own screen. -->
@@ -158,6 +180,7 @@ export function initRoomView(opts: {
   const invite = container.querySelector(".room-invite") as HTMLElement;
   const inviteText = container.querySelector(".room-invite-text") as HTMLElement;
   const inviteYes = container.querySelector(".room-invite-yes") as HTMLButtonElement;
+  const inviteCam = container.querySelector(".room-invite-cam") as HTMLButtonElement;
   const inviteNo = container.querySelector(".room-invite-no") as HTMLButtonElement;
   const speakingBar = container.querySelector(".room-speaking") as HTMLElement;
   const speakingText = container.querySelector(".room-speaking-text") as HTMLElement;
@@ -283,9 +306,9 @@ export function initRoomView(opts: {
   let handUp = false;
   let hands: string[] = [];
   let floor: string | null = null;
-  let sender: VoiceSender | null = null;
-  let receiver: VoiceReceiver | null = null;
-  let detachMix: (() => void) | null = null;
+  let sender: GuestPublication | null = null;
+  let senderStream: MediaStream | null = null;
+  let receiver: GuestSubscription | null = null;
   /** Set for the length of a turn, on the speaker's page and the host's. Null everywhere else. */
   let guestMedia: GuestMedia | null = null;
 
@@ -383,22 +406,63 @@ export function initRoomView(opts: {
     invite.classList.add("hidden");
   };
 
-  const startSpeaking = async () => {
+  /**
+   * Accepting a turn. `withVideo` is the SECOND consent decision, and it is separate on purpose:
+   * a camera is strictly more exposing than a microphone, so it is never the default and never
+   * implied by Unmute.
+   */
+  const startSpeaking = async (withVideo: boolean) => {
     if (sender) return;
     hideInvite();
-    speakingText.textContent = "Connecting your microphone…";
+    speakingText.textContent = "Connecting…";
     speakingBar.classList.remove("hidden");
-    try {
-      sender = await startVoiceSender({
-        onFrame: (b64) => void room.sendAudio(b64),
-        onError: () => { /* a dropped frame; the turn continues */ },
-      });
-      speakingText.textContent = "You're live — everyone watching can hear you.";
-    } catch {
-      // A refused microphone must say so. Swallowed, this leaves a lit "you're live" badge
-      // over a dead mic, which is worse than either working or plainly failing.
+
+    const media = guestMedia;
+    if (!media) {
+      // The floor was granted but no token came with it, which means the CDN is unconfigured on
+      // this deployment. Say so rather than opening a microphone that leads nowhere.
       speakingText.textContent =
-        "Your microphone was blocked, so nobody can hear you. Allow it and ask to be called on again, or type in chat.";
+        "This broadcast cannot carry live questions right now. Ask in chat instead.";
+      room.drop();
+      return;
+    }
+
+    try {
+      senderStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: withVideo ? { width: { ideal: 480 }, height: { ideal: 270 }, frameRate: { ideal: 20 } } : false,
+      });
+    } catch {
+      // A refused device must say so. Swallowed, this leaves a lit "you're live" badge over a
+      // dead microphone, which is worse than either working or plainly failing.
+      speakingText.textContent =
+        "Your microphone or camera was blocked, so nobody can hear you. Allow it and ask to be " +
+        "called on again, or type in chat.";
+      room.drop();
+      return;
+    }
+
+    try {
+      sender = await startGuestPublish({
+        media,
+        stream: senderStream,
+        secret: opts.linkSecret(),
+        streamId: opts.streamId,
+        salt: opts.salt(),
+        guestId: room.myId(),
+        onError: () => {
+          speakingText.textContent =
+            "Something went wrong publishing your turn — the presenter may not be able to hear you.";
+        },
+      });
+      speakingText.textContent = withVideo
+        ? "You're live with video — everyone watching can see and hear you."
+        : "You're live — everyone watching can hear you.";
+    } catch (e) {
+      console.error("[room] guest publish failed", e);
+      speakingText.textContent = "Could not start your turn. Try asking to be called on again.";
+      senderStream?.getTracks().forEach((t) => t.stop());
+      senderStream = null;
       room.drop();
     }
   };
@@ -406,30 +470,46 @@ export function initRoomView(opts: {
   const stopSpeaking = () => {
     sender?.stop();
     sender = null;
+    // The stream is stopped HERE and not inside guest-media, because this is the layer that
+    // asked for it. A turn that ends without releasing the devices leaves the browser's
+    // recording indicator lit, which reads as "this site is still listening".
+    senderStream?.getTracks().forEach((t) => t.stop());
+    senderStream = null;
     hideInvite();
     speakingBar.classList.add("hidden");
     speakingText.textContent = "";
   };
 
-  /** The host's side: decode the speaker and put them into the outgoing broadcast. */
-  const startHearing = () => {
+  /** The host's side: subscribe to the guest and put them into the outgoing broadcast. */
+  const startHearing = async () => {
     if (receiver) return;
+    const media = guestMedia;
     const mix = opts.mix?.() ?? null;
+    if (!media) return;
     if (!mix) {
       // Room on, but nothing is being captured yet, so there is no outgoing mix to join. The
-      // presenter can still hand out the floor; the speaker's audio has nowhere to go until
-      // the broadcast starts. Saying so beats a silent no-op that looks like a broken mic on
-      // the speaker's side.
-      console.warn("[room] a speaker was called on before this broadcast had an audio mix; nobody will hear them yet");
+      // presenter can still hand out the floor; the guest reaches nobody until the broadcast
+      // starts. Saying so beats a silent no-op that looks like a broken guest.
+      console.warn("[room] a guest was called on before this broadcast had a mix; nobody will hear them yet");
       return;
     }
-    receiver = startVoiceReceiver(mix.audioContext);
-    detachMix = mix.attachAudioSource(receiver.node);
+    try {
+      receiver = await startGuestSubscribe({
+        media,
+        mix,
+        secret: opts.linkSecret(),
+        streamId: opts.streamId,
+        salt: opts.salt(),
+        guestId: floor ?? "",
+      });
+      opts.setGuestVideo?.(receiver.canvas);
+    } catch (e) {
+      console.error("[room] guest subscribe failed", e);
+    }
   };
 
   const stopHearing = () => {
-    detachMix?.();
-    detachMix = null;
+    opts.setGuestVideo?.(null);
     receiver?.stop();
     receiver = null;
   };
@@ -443,7 +523,7 @@ export function initRoomView(opts: {
     for (const [bid, b] of bubbles) b.el.classList.toggle("speaking", bid === id);
 
     const mine = id !== null && id === room.myId();
-    // OFFER, never open. startSpeaking() runs only from the Unmute button below.
+    // OFFER, never open. startSpeaking() runs only from the accept buttons below.
     if (mine) offerMic();
     else stopSpeaking();
 
@@ -452,7 +532,7 @@ export function initRoomView(opts: {
     // inherit the last one's scheduling lead.
     if (isHost) {
       stopHearing();
-      if (id) startHearing();
+      if (id) void startHearing();
     }
 
     // Holding the floor lowers your own hand — the server already removed it from the queue,
@@ -471,7 +551,8 @@ export function initRoomView(opts: {
   // The click that opens the microphone is also the user gesture that lets iOS resume an
   // AudioContext. Calling getUserMedia straight from this handler — rather than after an
   // await — keeps that activation intact; a suspended context captures silence.
-  inviteYes.addEventListener("click", () => void startSpeaking());
+  inviteYes.addEventListener("click", () => void startSpeaking(false));
+  inviteCam.addEventListener("click", () => void startSpeaking(true));
 
   // Declining releases the floor, so the presenter's queue moves on rather than waiting on
   // somebody who has stepped away. They keep their place in no queue — the hand is already
@@ -522,7 +603,10 @@ export function initRoomView(opts: {
         renderHands();
       },
       onFloor: applyFloor,
-      onAudio: (b64) => receiver?.push(b64),
+      // Audio no longer arrives here: a guest's voice rides their own moq.pro broadcast, which
+      // the host subscribes to. The DO's audio relay stays in the protocol for now but nothing
+      // sends on it; it is removed once the CDN path is confirmed live.
+      onAudio: () => {},
       onFull: (cap) => {
         joinBox.classList.remove("hidden");
         joinBtn.disabled = true;
