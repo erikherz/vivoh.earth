@@ -584,7 +584,13 @@ export function createCompositor(): Compositor {
     //
     // `naturalWidth` has no meaning for a canvas, so the readiness test is its own dimensions:
     // @moq/watch sizes its canvas when the first frame decodes, and drawing a 0x0 source throws.
-    if (guest && guest.width > 0 && guest.height > 0) {
+    // A canvas ALWAYS has dimensions — an unsized one is 300x150 by default — so "has width"
+    // was true with zero frames decoded and painted a black rectangle into the broadcast. It
+    // shipped that way, and the fix was claimed in a commit message before it was written.
+    // @moq/watch resizes its canvas to the video on the first decoded frame, so anything that
+    // is still exactly the HTML default has decoded nothing.
+    const guestReady = !!guest && !(guest.width === 300 && guest.height === 150) && guest.width > 0;
+    if (guest && guestReady) {
       const gw = insetW();
       const gh = Math.round(gw * (guest.height / guest.width));
       // Anchored to the camera inset when there is one, so moving the camera moves the pair.

@@ -129,6 +129,8 @@ export async function startGuestSubscribe(opts: {
   salt?: string;
   guestId: string;
   onError?: (e: unknown) => void;
+  /** Progress, in words a presenter can read. `ok` is true once frames are decoding. */
+  onStatus?: (text: string, ok: boolean) => void;
 }): Promise<GuestSubscription> {
   await deriveGuestKey(opts.secret, { streamId: opts.streamId, salt: opts.salt, guestId: opts.guestId }, "decrypt");
 
@@ -184,9 +186,53 @@ export async function startGuestSubscribe(opts: {
     }, 100);
   }
 
+  // WHAT IS ACTUALLY HAPPENING, reported where a person can see it.
+  //
+  // Two live tests have now failed with no signal beyond "no video", because everything on this
+  // path fails silently: a publisher that attaches nothing still connects, a subscriber with
+  // nothing to receive still reports connected, and an undecoded canvas still has dimensions.
+  // Guessing twice was worse than instrumenting once.
+  //
+  // The decisive question is whether a CATALOG arrives. The catalog is how a subscriber learns
+  // what tracks exist, so:
+  //   no connection   -> the token or the URL is wrong
+  //   no catalog      -> the guest is publishing NOTHING (this was the bug both times)
+  //   catalog, no size-> frames are arriving and failing to decode, i.e. the key is wrong
+  const peek = (obj: unknown, ...path: string[]): unknown => {
+    let cur: unknown = obj;
+    for (const k of path) {
+      if (!cur || typeof cur !== "object") return undefined;
+      cur = (cur as Record<string, unknown>)[k];
+    }
+    if (cur && typeof (cur as { peek?: unknown }).peek === "function") {
+      try { return (cur as { peek: () => unknown }).peek(); } catch { return undefined; }
+    }
+    return cur;
+  };
+
+  const started = Date.now();
+  const probe = setInterval(() => {
+    const secs = Math.round((Date.now() - started) / 1000);
+    const conn = peek(el, "connection", "status");
+    const catalog = peek(el, "broadcast", "catalog");
+    const sized = !(canvas.width === 300 && canvas.height === 150) && canvas.width > 0;
+
+    let verdict: string;
+    if (sized) verdict = "receiving video";
+    else if (catalog) verdict = "connected, catalog seen, no decoded frames yet — check the guest key";
+    else if (conn === "connected") verdict = "connected but NO CATALOG — the guest is publishing nothing";
+    else verdict = `not connected (status: ${String(conn ?? "unknown")})`;
+
+    opts.onStatus?.(verdict, sized);
+    console.log(`[guest-media] +${secs}s ${verdict} · canvas ${canvas.width}x${canvas.height}`);
+
+    if (sized || secs > 30) clearInterval(probe);
+  }, 2000);
+
   return {
     canvas,
     stop() {
+      clearInterval(probe);
       detach();
       try { sink.disconnect(); } catch { /* ignore */ }
       try { el.remove(); } catch { /* already gone */ }

@@ -490,6 +490,19 @@ export function initRoomView(opts: {
         streamId: opts.streamId,
         salt: opts.salt(),
         guestId: floor ?? "",
+        // Shown in the presenter's queue panel. Two live tests failed with nothing to go on but
+        // "no video"; the presenter is the one person who can see both ends, so they get the
+        // verdict rather than a console nobody was watching.
+        onStatus: (text, ok) => {
+          queueCount.title = text;
+          const el = queueList.querySelector(".room-queue-diag") ?? (() => {
+            const li = document.createElement("li");
+            li.className = "room-queue-diag";
+            queueList.appendChild(li);
+            return li;
+          })();
+          el.textContent = ok ? "Guest video is arriving." : text;
+        },
       });
       opts.setGuestVideo?.(receiver.canvas);
     } catch (e) {

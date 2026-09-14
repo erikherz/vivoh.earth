@@ -1754,6 +1754,14 @@
         }
         .room-queue-call:disabled { opacity: 0.55; cursor: default; }
         .room-queue-empty { color: var(--text-secondary); font-size: 0.85rem; padding: 0.3rem; }
+        /* The guest-subscription verdict. Amber rather than red: it is progress reporting, not
+           an error, and it is only ever visible to the presenter. */
+        .room-queue-diag {
+            color: #c9a227;
+            font-size: 0.8rem;
+            padding: 0.3rem;
+            line-height: 1.4;
+        }
 
         /* The accept step. Shown when someone is offered the floor, and it is the ONLY thing
            that opens a microphone — see offerMic() in room-view.ts. Styled to read as a
