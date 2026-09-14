@@ -93,6 +93,8 @@ export function initRoomView(opts: {
    * page, where there is no composite to draw into.
    */
   setGuestVideo?: (source: HTMLCanvasElement | null) => void;
+  /** What the compositor is holding, for the presenter-facing diagnostic. */
+  guestState?: () => string;
 }): RoomViewHandle {
   const { container, stage, user } = opts;
 
@@ -501,7 +503,13 @@ export function initRoomView(opts: {
             queueList.appendChild(li);
             return li;
           })();
-          el.textContent = ok ? "Guest video is arriving." : text;
+          // BOTH SIDES, always. The subscriber saying "arriving" while the compositor holds
+          // nothing is precisely the failure this line exists to make visible, so the draw
+          // layer's own answer is printed next to it rather than inferred from it.
+          const draw = opts.guestState?.() ?? "unknown";
+          el.textContent = ok
+            ? `Guest video arriving · compositor: ${draw}`
+            : `${text} · compositor: ${draw}`;
         },
       });
       opts.setGuestVideo?.(receiver.canvas);

@@ -156,6 +156,8 @@ export interface Compositor {
    * and the least coupled way to reach the pixels. Pass null to take the guest back off.
    */
   setGuest: (source: HTMLCanvasElement | null) => void;
+  /** What the DRAW layer holds, in words. The other half of the subscriber's own verdict. */
+  guestState: () => string;
   hasCamera: () => boolean;
   hasScreen: () => boolean;
   /**
@@ -593,9 +595,14 @@ export function createCompositor(): Compositor {
     if (guest && guestReady) {
       const gw = insetW();
       const gh = Math.round(gw * (guest.height / guest.width));
-      // Anchored to the camera inset when there is one, so moving the camera moves the pair.
-      const gx = camera ? Math.max(0, px - gw - 12) : CANVAS_W - gw - 24;
-      const gy = camera ? py : CANVAS_H - gh - 24;
+      // Anchored to the camera INSET when one exists — and the inset only exists when a screen
+      // share is the base layer. This said `camera ?` and was wrong: px/py are the inset's
+      // position and are only maintained inside the screen branch, so on a camera-only
+      // broadcast (the common case) they were still 0 and the guest was drawn at the very top
+      // left corner, half under the browser chrome and easy to read as "no video at all".
+      const hasInset = !!screen && !!camera;
+      const gx = hasInset ? Math.max(0, px - gw - 12) : CANVAS_W - gw - 24;
+      const gy = hasInset ? py : CANVAS_H - gh - 24;
       ctx.save();
       ctx.shadowColor = "rgba(0,0,0,0.5)";
       ctx.shadowBlur = 14;
@@ -911,6 +918,18 @@ export function createCompositor(): Compositor {
     audioContext: ac,
     setGuest(source) {
       guest = stopped ? null : source;
+      // "Guest video is arriving" was reported by the SUBSCRIBER while the compositor had
+      // never been handed the canvas at all — two true statements either side of a boundary
+      // nothing measured. This closes that: the draw layer says what it is holding.
+      console.log(
+        `[compositor] setGuest(${source ? `canvas ${source.width}x${source.height}` : "null"})` +
+          `${stopped ? " — IGNORED, compositor stopped" : ""}`
+      );
+    },
+    guestState() {
+      if (!guest) return "not handed to the compositor";
+      if (guest.width === 300 && guest.height === 150) return "held, but unsized (no frames decoded)";
+      return `drawing ${guest.width}x${guest.height}`;
     },
     attachAudioSource(node) {
       if (stopped) return () => {};

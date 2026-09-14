@@ -1425,6 +1425,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       // Same lateness applies: the compositor may not exist when a guest is called on, and a
       // guest with nowhere to be drawn is a warning, not a crash.
       setGuestVideo: (source) => activeComp?.setGuest(source),
+      guestState: () => activeComp?.guestState() ?? "no compositor yet (not capturing)",
     });
   };
   const closeRoom = () => {
