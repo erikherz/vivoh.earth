@@ -42,11 +42,22 @@
 // replaced used a fresh random 96-bit nonce per frame precisely to avoid needing any such
 // argument. Three things make the counter safe here:
 //
-//   1. ONE ENCRYPTOR. The publisher is the sole encryptor; the relay fans identical ciphertext
-//      out to every viewer, which is what preserves MoQ's single-encode fan-out. So CTR is a
-//      single-writer counter, incremented in one place (encryptFrame) with no await between
-//      read and increment. Audio, video and the datagram rendition share it rather than keeping
-//      one each — two counters over one key is exactly the collision to avoid.
+//   1. ONE ENCRYPTOR PER KEY. Each publication has a single encryptor; the relay fans identical
+//      ciphertext out to every viewer, which is what preserves MoQ's single-encode fan-out. So
+//      CTR is a single-writer counter, incremented in one place (encryptFrame) with no await
+//      between read and increment. Audio, video and the datagram rendition share it rather than
+//      keeping one each — two counters over one key is exactly the collision to avoid.
+//
+//      THIS USED TO SAY "ONE ENCRYPTOR", FULL STOP, and that stopped being true when the room
+//      gained voice turns: a called-on guest publishes their own broadcast alongside the host's.
+//      Two encryptors exist on one broadcast now. What keeps them apart is not coordination —
+//      they cannot see each other's counters and both start at KID 0, CTR 0 — but SEPARATE BASE
+//      KEYS. `deriveGuestKey` gives the guest track its own HKDF context, so a collision in
+//      (KID, CTR) between host and guest carries no meaning at all. That is the whole reason it
+//      is a distinct derivation rather than the media key with a different KID, and
+//      scripts/e2e/guest-channels.mjs holds it: same plaintext, same KID, same CTR, on both
+//      channels, asserting the ciphertexts differ. Sabotaged by pointing deriveGuestKey at
+//      HKDF_INFO, it reports "IDENTICAL — keystream reuse".
 //   2. KID IS MONOTONIC FOR THE LIFE OF THE PAGE and never reset (see `nextKid`). CTR restarts
 //      at 0 on every re-key, so the safety of a restart rests entirely on the KID having moved.
 //      Read this before concluding the hazard cannot arise here. This app has no passcode — the
@@ -140,32 +151,75 @@ function keyFor(ring: Keyring, kid: bigint): Promise<SframeKey> {
   return p;
 }
 
-// --- module state (one role per page: a broadcast page OR a watch page) ------
-let mode: Mode | null = null;
-let armed = false; // we KNOW this stream is encrypted; encrypt/decrypt is live
-let ring: Keyring | null = null;
+// --- module state: ONE CHANNEL PER DIRECTION ---------------------------------
+//
+// This was a single set of module globals with one `mode`, on the assumption stated in the
+// original comment here: "one role per page — a broadcast page OR a watch page". The room's
+// voice turns broke that assumption. A called-on guest publishes their own MoQ broadcast while
+// still watching the host's, so their page must DECRYPT one stream and ENCRYPT another at the
+// same time. The host is the mirror image: it encrypts the programme and decrypts the guest.
+//
+// With one global `mode`, arming as publisher switched decryption off — a guest's own screen
+// would have gone black the moment they accepted a turn. So direction, not page, is the unit.
+//
+// TWO CHANNELS, NEVER MORE:
+//
+//   outbound   what this page encrypts — its own publication
+//   inbound    what this page decrypts — the one stream it is consuming
+//
+// One inbound channel is enough only because there is exactly one floor at a time, so a host
+// ever decrypts at most one guest. A second concurrent guest needs inbound to become a map
+// keyed by broadcast, and the seam would have to learn which broadcast a frame came from —
+// today it is given a TRACK name, and two broadcasts both call their tracks "video". Do not
+// add a second guest without solving that; the failure would be a host decrypting guest B's
+// frames with guest A's key, which presents as corrupt video rather than as an error.
+interface Channel {
+  ring: Keyring | null;
+  /** We KNOW this direction is encrypted; its half of the seam is live. */
+  armed: boolean;
+  /**
+   * The next KID to hand out, for the lifetime of this channel. Deliberately NOT reset by
+   * anything — see point 2 of the nonce-uniqueness argument at the top of this file. Resetting
+   * it is the one edit here that would silently reintroduce keystream reuse, so it has no reset
+   * path at all rather than a carefully-placed one.
+   */
+  nextKid: bigint;
+  /** The generation this channel is encrypting under, and its frame counter. */
+  kid: bigint;
+  ctr: bigint;
+  // Frames can be produced before the key arrives (the encoder warms up while /assign and the
+  // key fetch are in flight). We arm immediately and make the per-frame work await this, so
+  // nothing is ever published in the clear.
+  keyReady: Promise<void>;
+  keyReadyResolve: (() => void) | null;
+}
+
+function newChannel(): Channel {
+  return {
+    ring: null,
+    armed: false,
+    nextKid: 0n,
+    kid: 0n,
+    ctr: 0n,
+    keyReady: Promise.resolve(),
+    keyReadyResolve: null,
+  };
+}
+
+const outbound: Channel = newChannel();
+const inbound: Channel = newChannel();
 
 /**
- * The next KID to hand out, for the lifetime of the page. Deliberately NOT reset by
- * armPublisher, resetMediaKey or anything else — see point 2 of the nonce-uniqueness argument
- * at the top of this file. Resetting it is the one edit here that would silently reintroduce
- * keystream reuse, so it has no reset path at all rather than a carefully-placed one.
+ * Which channel this page's PRIMARY role uses — the one `deriveMediaKey` keys.
+ *
+ * A broadcaster's primary publication is outbound; a viewer's primary subscription is inbound.
+ * The guest track is always the other one, which is what `deriveGuestKey` targets.
  */
-let nextKid = 0n;
+let primary: Mode | null = null;
 
-/** The generation this publisher is encrypting under, and its frame counter. */
-let kid = 0n;
-let ctr = 0n;
-
-// Frames can be produced before the key arrives (encoder warms up while the
-// /assign + key fetch is in flight). We arm encryption immediately and make the
-// per-frame work await this promise, so nothing is ever published in the clear.
-let keyReady: Promise<void> = Promise.resolve();
-let keyReadyResolve: (() => void) | null = null;
-
-function resetKeyReady(): void {
-  keyReady = new Promise<void>((resolve) => {
-    keyReadyResolve = resolve;
+function resetKeyReady(ch: Channel): void {
+  ch.keyReady = new Promise<void>((resolve) => {
+    ch.keyReadyResolve = resolve;
   });
 }
 
@@ -182,17 +236,18 @@ function b64urlToBytes(s: string): Uint8Array {
 }
 
 async function encryptFrame(frame: Uint8Array): Promise<Uint8Array> {
-  await keyReady;
+  const ch = outbound;
+  await ch.keyReady;
 
   // Snapshot the generation and take a counter SYNCHRONOUSLY, in one run of statements with no
   // await between them. Several chains encrypt concurrently — video groups run in parallel with
   // the audio track and with the datagram rendition — so this is the point where two frames
   // could otherwise be handed the same CTR, or one frame could be labelled with a KID and
   // encrypted under the key of the next. Everything after this line works from the snapshot.
-  const r = ring;
+  const r = ch.ring;
   if (!r) throw new Error("media-crypto: encrypt with no key");
-  const id = kid;
-  const c = ctr++;
+  const id = ch.kid;
+  const c = ch.ctr++;
 
   const vlen = varintLen(frame[0]);
   const ts = frame.subarray(0, vlen); // cleartext timestamp, authenticated as SFrame metadata
@@ -248,8 +303,9 @@ async function decryptFrame(
   trackName?: string,
   firstInGroup = false
 ): Promise<Uint8Array> {
-  await keyReady;
-  const r = ring;
+  const ch = inbound;
+  await ch.keyReady;
+  const r = ch.ring;
   if (!r) throw new Error("media-crypto: decrypt with no key");
   const track = trackName ?? "";
   const vlen = varintLen(frame[0]);
@@ -352,8 +408,11 @@ function requireFrame(frame: MoqFrame, where: string): void {
 
 function install(): void {
   const hooks: MediaCryptoHooks = {
-    shouldEncrypt: () => mode === "publisher" && armed,
-    shouldDecrypt: () => mode === "viewer" && armed,
+    // Direction, not page role. A guest page answers TRUE to both: it encrypts its own guest
+    // track and decrypts the broadcast it is watching. Before the channel split these were both
+    // read off one `mode`, so arming either silently disarmed the other.
+    shouldEncrypt: () => outbound.armed,
+    shouldDecrypt: () => inbound.armed,
     write(group, frame) {
       requireFrame(frame, "write");
       const { payload, timestamp } = frame;
@@ -431,22 +490,22 @@ function install(): void {
  * been fetched — frames produced in the meantime queue until {@link deriveMediaKey}.
  */
 export function armPublisher(): void {
-  if (mode === "publisher" && armed) return; // already armed — keep the pending keyReady
-  mode = "publisher";
-  armed = true;
-  ring = null;
-  resetKeyReady();
+  primary ??= "publisher";
+  if (outbound.armed) return; // already armed — keep the pending keyReady
+  outbound.armed = true;
+  outbound.ring = null;
+  resetKeyReady(outbound);
   install();
 }
 
 /** Arm viewer-side decryption BEFORE connecting to the relay. */
 export function armViewer(): void {
-  if (mode === "viewer" && armed) return; // already armed
-  mode = "viewer";
-  armed = true;
-  ring = null;
+  primary ??= "viewer";
+  if (inbound.armed) return; // already armed
+  inbound.armed = true;
+  inbound.ring = null;
   resetDecryptStats();
-  resetKeyReady();
+  resetKeyReady(inbound);
   install();
 }
 
@@ -456,9 +515,12 @@ export function armViewer(): void {
  * broadcast's frames are never encrypted with the previous session's key.
  */
 export function resetMediaKey(): void {
-  if (!armed) return;
-  ring = null;
-  resetKeyReady();
+  // The PRIMARY channel only. A guest track is torn down by clearGuestKey when the turn ends;
+  // clearing it from here would drop a live guest on an unrelated re-key.
+  const ch = primary === "viewer" ? inbound : outbound;
+  if (!ch.armed) return;
+  ch.ring = null;
+  resetKeyReady(ch);
 }
 
 /** Context version. Bumping it re-keys every stream, invalidating existing share links. */
@@ -568,16 +630,74 @@ export async function deriveMediaKey(secretB64url: string, opts: DeriveOpts): Pr
   // and no group boundary to wait for.
   // The KID must advance even when the base_key is one we have used before — see point 2 of
   // the nonce-uniqueness argument at the top of this file.
-  ring = keyringFor(base);
-  if (mode === "publisher") {
-    kid = nextKid++;
-    ctr = 0n;
+  const ch = primary === "viewer" ? inbound : outbound;
+  ch.ring = keyringFor(base);
+  if (primary === "publisher") {
+    ch.kid = ch.nextKid++;
+    ch.ctr = 0n;
   }
 
   // A viewer re-deriving has a new secret and is about to be judged on it; failures counted
   // against the previous key would otherwise make a correct link look wrong.
-  if (mode === "viewer") resetDecryptStats();
-  keyReadyResolve?.();
+  if (primary === "viewer") resetDecryptStats();
+  ch.keyReadyResolve?.();
+}
+
+/**
+ * Key the GUEST track — the other direction from this page's primary role.
+ *
+ * A called-on viewer publishes their own MoQ broadcast while still watching the host's; the
+ * host does the reverse. Either way the guest track lands in the channel the primary role is
+ * not using, which is what lets both run at once.
+ *
+ * WHY A SEPARATE HKDF CONTEXT, and not simply the media key with a fresh KID. Two publishers
+ * sharing a base_key is precisely the keystream reuse the whole comment at the top of this file
+ * is about, and the protection there — a monotonic KID — only works for a SINGLE writer that
+ * can see its own counter. A host and a guest cannot see each other's, so nothing would stop
+ * both from reaching KID 0, CTR 0 under the same base_key and producing two different frames
+ * with one keystream. Giving the guest track its own base_key makes the question moot: their
+ * KID spaces are unrelated because their keys are, so a collision is not a hazard to be managed
+ * but an event with no meaning.
+ *
+ * `guestId` is the room id of the speaker, which the Durable Object assigns per socket. It goes
+ * into the HKDF input so two guests in one broadcast — should the floor ever hold more than one
+ * — would still differ.
+ */
+export async function deriveGuestKey(
+  secretB64url: string,
+  opts: DeriveOpts & { guestId: string },
+  direction: "encrypt" | "decrypt"
+): Promise<void> {
+  const base = await deriveBitsFor(secretB64url, opts, `wallflower-guest-media-v1|${opts.guestId}`);
+  const ch = direction === "encrypt" ? outbound : inbound;
+
+  ch.armed = true;
+  ch.ring = keyringFor(base);
+  if (direction === "encrypt") {
+    // Same rule as the primary publisher: advance the generation rather than restarting a
+    // counter under a key this page may already have used.
+    ch.kid = ch.nextKid++;
+    ch.ctr = 0n;
+  }
+  ch.keyReadyResolve?.();
+  install();
+}
+
+/**
+ * Tear down the guest channel at the end of a turn.
+ *
+ * Takes the direction rather than guessing, because on a guest's page the guest track is
+ * outbound and on the host's it is inbound — and disarming the wrong one would either black out
+ * the guest's view of the broadcast or stop the host publishing entirely.
+ */
+export function clearGuestKey(direction: "encrypt" | "decrypt"): void {
+  const ch = direction === "encrypt" ? outbound : inbound;
+  ch.armed = false;
+  ch.ring = null;
+  ch.keyReadyResolve?.();
+  ch.keyReady = Promise.resolve();
+  ch.keyReadyResolve = null;
+  // nextKid survives, as everywhere else.
 }
 
 /**
@@ -740,13 +860,18 @@ export async function openText(k: CryptoKey, sealed: string): Promise<string | n
 
 /** Tear down: clears the key and removes the global so the library reverts to passthrough. */
 export function clearMediaCrypto(): void {
-  mode = null;
-  armed = false;
-  ring = null;
+  primary = null;
   starved.clear();
-  keyReadyResolve?.(); // unblock any awaiters so they don't hang
-  keyReady = Promise.resolve();
-  keyReadyResolve = null;
+  for (const ch of [outbound, inbound]) {
+    ch.armed = false;
+    ch.ring = null;
+    ch.keyReadyResolve?.(); // unblock any awaiters so they don't hang
+    ch.keyReady = Promise.resolve();
+    ch.keyReadyResolve = null;
+    // nextKid is deliberately NOT reset, here or anywhere. It is the only thing standing
+    // between a re-armed page and keystream reuse against a base_key it has used before —
+    // see point 2 of the nonce-uniqueness argument at the top of this file.
+  }
   delete (globalThis as unknown as { __VIVOH_MEDIA_CRYPTO__?: MediaCryptoHooks })
     .__VIVOH_MEDIA_CRYPTO__;
 }
