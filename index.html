@@ -1772,6 +1772,7 @@
         }
         .room-invite-text { flex: 1 1 14rem; min-width: 0; }
         .room-invite-yes,
+        .room-invite-cam,
         .room-invite-no {
             flex: 0 0 auto;
             min-height: 44px;
@@ -1786,6 +1787,17 @@
             border: 1px solid var(--stream-id-color);
             background: var(--stream-id-color);
             color: var(--bg-primary, #0a0a0a);
+            font-weight: 600;
+        }
+        /* A SECOND affirmative, deliberately outlined rather than filled. A camera is more
+           exposing than a microphone, so the lower-exposure choice keeps the filled emphasis
+           and this one reads as the deliberate extra step it is. It must still be plainly a
+           button: it shipped once with no rule at all, rendering as a browser default that was
+           easy to miss next to two styled controls. */
+        .room-invite-cam {
+            border: 1px solid var(--stream-id-color);
+            background: transparent;
+            color: var(--stream-id-color);
             font-weight: 600;
         }
         .room-invite-no {
