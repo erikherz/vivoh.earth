@@ -985,9 +985,9 @@ async function handleStreamRoutes(
       return new Response("expected websocket", { status: 426 });
     }
     const s = await env.DB
-      .prepare("SELECT room_enabled FROM streams WHERE stream_id = ?")
+      .prepare("SELECT user_id, room_enabled FROM streams WHERE stream_id = ?")
       .bind(streamId)
-      .first<{ room_enabled: number }>();
+      .first<{ user_id: number; room_enabled: number }>();
     if (s?.room_enabled !== 1) {
       return new Response("room disabled", { status: 403 });
     }
@@ -1003,8 +1003,31 @@ async function handleStreamRoutes(
       return new Response("offline", { status: 404 });
     }
 
+    // WHO IS THE HOST — the one claim in this room that is not self-asserted.
+    //
+    // The Durable Object cannot work this out for itself: it sees anonymous sockets carrying
+    // sealed blobs, which is the whole point of it, and "I am the broadcaster" inside a blob
+    // it cannot read would be a claim from the one party it must not take on trust. Handing
+    // out the floor, and cutting a speaker off, are the two powers in this room, so a viewer
+    // who could assert hostship could seize the microphone of the broadcast they are watching.
+    //
+    // So the Worker decides, because only the Worker holds both halves: the session cookie
+    // that says who is calling, and the streams row that says who owns this id.
+    //
+    // THE URL IS REBUILT, NOT FORWARDED. `fetch(request)` passes the caller's own headers and
+    // query string straight through, so a viewer appending `&host=1` themselves would arrive
+    // at the DO indistinguishable from the real broadcaster. Deleting the parameter before
+    // setting it is what makes that impossible — the value the DO reads is one this line
+    // wrote, never one the client sent.
+    const me = await getAuthenticatedUser(request, env);
+    const isHost = !!me && me.id === s.user_id;
+
+    const roomUrl = new URL(request.url);
+    roomUrl.searchParams.delete("host");
+    if (isHost) roomUrl.searchParams.set("host", "1");
+
     const id = env.WATCH_ROOMS.idFromName(streamId);
-    return env.WATCH_ROOMS.get(id).fetch(request);
+    return env.WATCH_ROOMS.get(id).fetch(new Request(roomUrl.toString(), request));
   }
 
   // GET /api/streams/:stream_id - Get stream settings (public)

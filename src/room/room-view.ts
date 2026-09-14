@@ -16,6 +16,7 @@
 import type { User } from "../auth";
 import { anonAvatar, avatarToDataUrl, giphyAvatar, oauthAvatar, type AvatarImage } from "./avatar";
 import { initRoom, type RoomHandle, type RoomMember, type RoomReaction } from "./room-client";
+import { startVoiceReceiver, startVoiceSender, type VoiceReceiver, type VoiceSender } from "./voice";
 
 // Shared with chat on purpose: a person who named themselves in chat should not have to do it
 // again to join the room, and vice versa.
@@ -56,6 +57,21 @@ export function initRoomView(opts: {
   user: User | null;
   routeTag: () => Promise<string>;
   roomKey: () => Promise<CryptoKey>;
+  /**
+   * The broadcaster's outgoing audio mix, when this page is the broadcaster.
+   *
+   * A called-on viewer's voice is decoded onto THIS context and connected here, so the whole
+   * audience hears the question through the normal encrypted stream. Returns null on a
+   * viewer's page, where there is nothing to mix into — and that is what makes a speaker's
+   * audio simply not play for anyone but the host: intended behaviour, not a missing feature.
+   *
+   * A GETTER, not a value, because the compositor does not exist yet when this runs. The
+   * broadcaster can switch the room on before ever going live, and the mix is only built when
+   * the first capture source starts. Captured once at construction, this would have been null
+   * for the whole session on exactly the ordinary path — room on, then go live — and the
+   * audience would never have heard a single question.
+   */
+  mix?: () => { audioContext: AudioContext; attachAudioSource: (node: AudioNode) => () => void } | null;
 }): RoomViewHandle {
   const { container, stage, user } = opts;
 
@@ -87,6 +103,22 @@ export function initRoomView(opts: {
       <div class="room-quick"></div>
       <button class="room-gif-btn" type="button" title="Choose a GIF as your picture">GIF</button>
       <button class="room-throw-btn" type="button" title="Throw your picture across the video">Throw</button>
+      <button class="room-hand-btn" type="button" title="Raise your hand to ask a question">✋ Raise hand</button>
+    </div>
+    <!-- The presenter's queue. Rendered only for the broadcaster, and the server re-checks
+         every action it offers — this panel being present is not what grants the power. -->
+    <div class="room-queue hidden">
+      <div class="room-queue-head">
+        <span class="room-queue-title">Hands up</span>
+        <span class="room-queue-count">0</span>
+      </div>
+      <ol class="room-queue-list"></ol>
+    </div>
+    <!-- Shown to whoever currently holds the floor, on their own screen. -->
+    <div class="room-speaking hidden" role="status" aria-live="polite">
+      <span class="room-speaking-dot"></span>
+      <span class="room-speaking-text"></span>
+      <button class="room-speaking-done" type="button">I'm done</button>
     </div>
     <div class="room-gif-panel hidden">
       <div class="room-gif-head">
@@ -111,6 +143,13 @@ export function initRoomView(opts: {
   const gifClose = container.querySelector(".room-gif-close") as HTMLButtonElement;
   const gifResults = container.querySelector(".room-gif-results") as HTMLElement;
   const gifNote = container.querySelector(".room-gif-note") as HTMLElement;
+  const handBtn = container.querySelector(".room-hand-btn") as HTMLButtonElement;
+  const queuePanel = container.querySelector(".room-queue") as HTMLElement;
+  const queueList = container.querySelector(".room-queue-list") as HTMLOListElement;
+  const queueCount = container.querySelector(".room-queue-count") as HTMLElement;
+  const speakingBar = container.querySelector(".room-speaking") as HTMLElement;
+  const speakingText = container.querySelector(".room-speaking-text") as HTMLElement;
+  const speakingDone = container.querySelector(".room-speaking-done") as HTMLButtonElement;
 
   nameInput.value = displayName;
 
@@ -226,6 +265,157 @@ export function initRoomView(opts: {
     flyReaction(r);
   };
 
+  // --- hands and the floor ----------------------------------------------------------------
+
+  let isHost = false;
+  let handUp = false;
+  let hands: string[] = [];
+  let floor: string | null = null;
+  let sender: VoiceSender | null = null;
+  let receiver: VoiceReceiver | null = null;
+  let detachMix: (() => void) | null = null;
+
+  const nameOf = (id: string) => bubbles.get(id)?.label.textContent || "Someone";
+
+  const renderHands = () => {
+    for (const [id, b] of bubbles) b.el.classList.toggle("hand-up", hands.includes(id));
+
+    queueCount.textContent = String(hands.length);
+    queueList.replaceChildren();
+    for (const id of hands) {
+      const li = document.createElement("li");
+      li.className = "room-queue-item";
+
+      const face = document.createElement("img");
+      face.className = "room-queue-face";
+      face.alt = "";
+      const av = knownAvatar(id);
+      if (av) face.src = avatarToDataUrl(av);
+
+      const label = document.createElement("span");
+      label.className = "room-queue-name";
+      label.textContent = nameOf(id); // textContent: another participant's chosen name
+
+      const call = document.createElement("button");
+      call.type = "button";
+      call.className = "room-queue-call";
+      call.textContent = floor === id ? "Speaking" : "Call on";
+      call.disabled = floor === id;
+      call.addEventListener("click", () => room.call(id));
+
+      li.append(face, label, call);
+      queueList.appendChild(li);
+    }
+
+    if (!hands.length) {
+      const li = document.createElement("li");
+      li.className = "room-queue-empty";
+      li.textContent = "No hands up.";
+      queueList.appendChild(li);
+    }
+  };
+
+  const knownAvatar = (id: string): AvatarImage | null => {
+    const b = bubbles.get(id);
+    const src = b?.img.getAttribute("src") ?? "";
+    if (!src.startsWith("data:")) return null;
+    const m = src.match(/^data:([^;]+);base64,(.*)$/);
+    return m ? { m: m[1], b: m[2], src: "anon" } : null;
+  };
+
+  const setHand = (up: boolean) => {
+    handUp = up;
+    room.setHand(up);
+    handBtn.classList.toggle("toggle-on", up);
+    handBtn.textContent = up ? "✋ Lower hand" : "✋ Raise hand";
+  };
+
+  /**
+   * Start or stop actually talking.
+   *
+   * The microphone opens ONLY for the person who holds the floor, and only after the server
+   * said so — `floor` is set from the DO's broadcast, never optimistically on the click that
+   * requested it. A speaker whose page decided locally that it had the floor would be a live
+   * microphone the presenter never granted.
+   */
+  const startSpeaking = async () => {
+    if (sender) return;
+    speakingText.textContent = "Connecting your microphone…";
+    speakingBar.classList.remove("hidden");
+    try {
+      sender = await startVoiceSender({
+        onFrame: (b64) => void room.sendAudio(b64),
+        onError: () => { /* a dropped frame; the turn continues */ },
+      });
+      speakingText.textContent = "You're live — everyone watching can hear you.";
+    } catch {
+      // A refused microphone must say so. Swallowed, this leaves a lit "you're live" badge
+      // over a dead mic, which is worse than either working or plainly failing.
+      speakingText.textContent =
+        "Your microphone was blocked, so nobody can hear you. Allow it and ask to be called on again, or type in chat.";
+      room.drop();
+    }
+  };
+
+  const stopSpeaking = () => {
+    sender?.stop();
+    sender = null;
+    speakingBar.classList.add("hidden");
+    speakingText.textContent = "";
+  };
+
+  /** The host's side: decode the speaker and put them into the outgoing broadcast. */
+  const startHearing = () => {
+    if (receiver) return;
+    const mix = opts.mix?.() ?? null;
+    if (!mix) {
+      // Room on, but nothing is being captured yet, so there is no outgoing mix to join. The
+      // presenter can still hand out the floor; the speaker's audio has nowhere to go until
+      // the broadcast starts. Saying so beats a silent no-op that looks like a broken mic on
+      // the speaker's side.
+      console.warn("[room] a speaker was called on before this broadcast had an audio mix; nobody will hear them yet");
+      return;
+    }
+    receiver = startVoiceReceiver(mix.audioContext);
+    detachMix = mix.attachAudioSource(receiver.node);
+  };
+
+  const stopHearing = () => {
+    detachMix?.();
+    detachMix = null;
+    receiver?.stop();
+    receiver = null;
+  };
+
+  const applyFloor = (id: string | null) => {
+    floor = id;
+    for (const [bid, b] of bubbles) b.el.classList.toggle("speaking", bid === id);
+
+    const mine = id !== null && id === room.myId();
+    if (mine) void startSpeaking();
+    else stopSpeaking();
+
+    // The host decodes whoever is up. Torn down and rebuilt between speakers rather than
+    // reused: a fresh decoder starts with an empty jitter buffer, so the next person does not
+    // inherit the last one's scheduling lead.
+    if (isHost) {
+      stopHearing();
+      if (id) startHearing();
+    }
+
+    // Holding the floor lowers your own hand — the server already removed it from the queue,
+    // and leaving the button reading "Lower hand" would be the UI disagreeing with the room.
+    if (mine && handUp) {
+      handUp = false;
+      handBtn.classList.remove("toggle-on");
+      handBtn.textContent = "✋ Raise hand";
+    }
+    renderHands();
+  };
+
+  handBtn.addEventListener("click", () => setHand(!handUp));
+  speakingDone.addEventListener("click", () => room.drop());
+
   // --- the connection ---------------------------------------------------------------
 
   const room: RoomHandle = initRoom({
@@ -242,11 +432,32 @@ export function initRoomView(opts: {
         for (const m of members) upsert(m);
         placeholder();
       },
-      onJoin: upsert,
+      onJoin: (m) => { upsert(m); renderHands(); },
       onUpdate: upsert,
-      onLeave: remove,
+      onLeave: (id) => { remove(id); renderHands(); },
       onReaction,
       onStatus: (online) => container.classList.toggle("room-offline", !online),
+      onReady: (host) => {
+        isHost = host;
+        // The presenter sees the queue as soon as the socket is up, before joining — they
+        // need to watch hands go up whether or not they put their own face in the grid.
+        queuePanel.classList.toggle("hidden", !host);
+        if (host) renderHands();
+      },
+      onHands: (ids) => {
+        hands = ids;
+        // Trust the server's list over the local button. If a reconnect or a call-on dropped
+        // this client's hand, the queue is the truth and the button follows it.
+        const stillUp = ids.includes(room.myId());
+        if (stillUp !== handUp) {
+          handUp = stillUp;
+          handBtn.classList.toggle("toggle-on", stillUp);
+          handBtn.textContent = stillUp ? "✋ Lower hand" : "✋ Raise hand";
+        }
+        renderHands();
+      },
+      onFloor: applyFloor,
+      onAudio: (b64) => receiver?.push(b64),
       onFull: (cap) => {
         joinBox.classList.remove("hidden");
         joinBtn.disabled = true;
@@ -379,6 +590,11 @@ export function initRoomView(opts: {
       if (gifTimer) clearTimeout(gifTimer);
       for (const b of bubbles.values()) if (b.timer) clearTimeout(b.timer);
       bubbles.clear();
+      // Before the socket goes: releasing the microphone is the one piece of teardown with a
+      // consequence outside this page. A closed room that leaves getUserMedia running keeps
+      // the browser's recording indicator lit, which reads as "this site is still listening".
+      stopSpeaking();
+      stopHearing();
       room.destroy();
       container.replaceChildren();
       for (const el of Array.from(stage.querySelectorAll(".room-fly"))) el.remove();

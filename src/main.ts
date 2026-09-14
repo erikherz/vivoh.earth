@@ -1389,6 +1389,15 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   // reactions fly over the preview they are already watching.
   const broadcastRoomPanel = document.getElementById("broadcast-room") as HTMLElement | null;
   const broadcastStage = document.getElementById("broadcast-stage") as HTMLElement | null;
+  /**
+   * The live compositor, for the room's speaker turns.
+   *
+   * A second reference to the `comp` declared far below, kept here because this block runs
+   * before that one exists and a called-on viewer has to reach the outgoing audio mix. It is
+   * written at the two points where `comp` changes and nowhere else; anything that reads it
+   * must tolerate null, which is the ordinary state before the broadcaster starts capturing.
+   */
+  let activeComp: Compositor | null = null;
   let roomHandle: RoomViewHandle | null = null;
   let roomEnabled = false;
   let roomBtn: HTMLButtonElement | null = null;
@@ -1404,6 +1413,13 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       // once go-live has happened, and rotating the id re-keys everything mid-session.
       routeTag: () => deriveRouteTag(linkSecret, streamId),
       roomKey: () => deriveRoomKey(linkSecret, { streamId, salt: activeSalt }),
+      // Read at the moment someone is called on, not captured now — see the `mix` option's
+      // comment. Turning the room on before going live is the ordinary order of operations,
+      // and at this point there is no compositor at all.
+      mix: () =>
+        activeComp
+          ? { audioContext: activeComp.audioContext, attachAudioSource: activeComp.attachAudioSource }
+          : null,
     });
   };
   const closeRoom = () => {
@@ -2043,6 +2059,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       if (!comp) return;
       comp.stop();
       comp = null;
+      activeComp = null;
       boundVideo = false;
       boundAudio = false;
       bcast.video.source.set(undefined);
@@ -2079,6 +2096,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
           try {
             if (!comp) {
               comp = createCompositor();
+              activeComp = comp;
               const v = publisher.querySelector("video") as HTMLElement | null;
               if (v) v.style.display = "none";
               comp.canvas.className = "pip-canvas";

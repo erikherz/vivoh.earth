@@ -26,6 +26,15 @@ interface Attachment {
   tp: number;
   /** Last accepted reaction, for the reaction throttle. */
   tr: number;
+  /**
+   * This socket is the broadcaster.
+   *
+   * Set from a query parameter the WORKER writes after checking the session cookie against the
+   * streams row, never from anything the client said — see the room route in worker/index.ts.
+   * It is recorded on the attachment at accept time so it survives hibernation and cannot be
+   * changed for the life of the socket: there is no message below that sets it.
+   */
+  host: boolean;
 }
 
 // Sized for a sealed presence payload carrying a small animated GIF: the client caps the raw
@@ -51,6 +60,25 @@ const MAX_MEMBERS = 200;
 // Durable Object storage accepts at most 128 keys per bulk get.
 const BULK_LIMIT = 128;
 
+/**
+ * One frame of a called-on viewer's voice.
+ *
+ * Opus at conversational bitrate is tens of bytes per 20ms frame; this is two orders of
+ * magnitude of headroom, sized to reject anything that is plainly not speech rather than to
+ * trim anything real.
+ */
+const MAX_AUDIO = 4 * 1024;
+
+/**
+ * Storage keys for the two pieces of floor state.
+ *
+ * `hands` is an ORDERED array — the queue a presenter reads top-down, so the person who
+ * raised first is called first. Order is the entire value of the structure; a Set would have
+ * lost it and made "who's next" unanswerable.
+ */
+const HANDS_KEY = "hands";
+const FLOOR_KEY = "floor";
+
 /** Storage key for one participant's sealed presence blob. */
 const pkey = (id: string) => `p:${id}`;
 /**
@@ -65,8 +93,48 @@ const IDS_KEY = "ids";
 export class WatchRoom {
   private state: DurableObjectState;
 
+  /**
+   * Who currently holds the floor, cached in memory.
+   *
+   * Every audio frame has to be checked against this, and a storage read per frame at fifty
+   * frames a second would be the most expensive thing in the room. `undefined` means "not
+   * loaded yet" and is distinct from `null`, which means "loaded, and nobody is speaking" —
+   * collapsing the two would make a revived object re-read storage on every silent frame.
+   *
+   * Safe to hold in memory despite hibernation: the object cannot hibernate while audio is
+   * flowing through it, and the first message after any revival reloads it from storage.
+   */
+  private floor: string | null | undefined = undefined;
+
   constructor(state: DurableObjectState) {
     this.state = state;
+  }
+
+  private async currentFloor(): Promise<string | null> {
+    if (this.floor === undefined) {
+      this.floor = (await this.state.storage.get<string>(FLOOR_KEY)) ?? null;
+    }
+    return this.floor;
+  }
+
+  private async setFloor(id: string | null): Promise<void> {
+    this.floor = id;
+    if (id) await this.state.storage.put(FLOOR_KEY, id);
+    else await this.state.storage.delete(FLOOR_KEY);
+    this.broadcast(JSON.stringify({ t: "floor", id }));
+  }
+
+  /** Send to the broadcaster's sockets only. Used for the one-to-one voice path. */
+  private toHosts(payload: string): void {
+    for (const sock of this.state.getWebSockets()) {
+      const a = sock.deserializeAttachment() as Attachment | null;
+      if (!a?.host) continue;
+      try {
+        sock.send(payload);
+      } catch {
+        // socket going away; ignore
+      }
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -80,14 +148,22 @@ export class WatchRoom {
     this.state.acceptWebSocket(server);
 
     const id = crypto.randomUUID().slice(0, 8);
+    // `host` comes from the query string the WORKER rebuilt, never from a header or a message.
+    // See the Attachment field's comment and the room route in worker/index.ts.
+    const host = new URL(request.url).searchParams.get("host") === "1";
+
     // Deliberately NOT derived from anything about the person. A room id is per-socket and
     // per-session: reconnecting gets you a new one, and two ids can never be shown to be the
     // same human. That is the same rule watch_events lives under, applied here.
-    server.serializeAttachment({ id, tp: 0, tr: 0 } satisfies Attachment);
+    server.serializeAttachment({ id, tp: 0, tr: 0, host } satisfies Attachment);
 
     // No roster yet. A socket that connects is WATCHING; it joins the roster only when it
     // sends a hello, which is the client-side opt-in. Lurking is the default.
-    server.send(JSON.stringify({ t: "hi", id, cap: MAX_MEMBERS }));
+    //
+    // `host` is echoed back so the client knows to render the queue controls. It is a
+    // CONVENIENCE for the UI, not the authority — every host-only action below is re-checked
+    // against the attachment, so a client that lied to itself about this gains nothing.
+    server.send(JSON.stringify({ t: "hi", id, cap: MAX_MEMBERS, host }));
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -114,7 +190,7 @@ export class WatchRoom {
 
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
     if (typeof raw !== "string") return;
-    let data: { t?: unknown; p?: unknown };
+    let data: { t?: unknown; p?: unknown; up?: unknown; id?: unknown };
     try {
       data = JSON.parse(raw);
     } catch {
@@ -125,6 +201,76 @@ export class WatchRoom {
     if (!att?.id) return;
     const now = Date.now();
     const type = String(data.t ?? "");
+
+    // --- Voice ----------------------------------------------------------------------------
+    //
+    // First, because it is by far the most frequent message and everything below it would be
+    // wasted work on a path that runs fifty times a second.
+    //
+    // THE FLOOR CHECK IS THE ACCESS CONTROL. Without it any socket could stream audio into the
+    // broadcaster's mix and be heard by the entire audience — the loudest possible failure in
+    // this file. It is deliberately not a throttle: a throttle would let an interloper through
+    // at a slower rate, and the correct number of interlopers is none.
+    //
+    // Sent to HOSTS ONLY, never fanned out. The broadcaster mixes the speaker into the
+    // outgoing stream, so the audience hears the question over the ordinary encrypted CDN
+    // path. Relaying to everyone here would be N sockets of egress per speaker and would cap
+    // the room at the size where that stops being affordable, which is the opposite of what
+    // this transport exists to do.
+    if (type === "a") {
+      if (att.id !== (await this.currentFloor())) return;
+      const p = String(data.p ?? "");
+      if (!p || p.length > MAX_AUDIO) return;
+      this.toHosts(JSON.stringify({ t: "a", id: att.id, p }));
+      return;
+    }
+
+    // --- Raising a hand -------------------------------------------------------------------
+    //
+    // No sealed payload: "this socket wants to speak" is a message TYPE, not content, and the
+    // object already knows which socket sent it. Putting a blob here would have added bytes
+    // and disclosed nothing extra, since a client still has to map the id to a face using the
+    // presence it already holds.
+    if (type === "hand") {
+      const up = data.up === true;
+      const hands = ((await this.state.storage.get<string[]>(HANDS_KEY)) ?? []).slice();
+      const at = hands.indexOf(att.id);
+      if (up && at === -1) hands.push(att.id);
+      else if (!up && at !== -1) hands.splice(at, 1);
+      else return; // already in the state being asked for; do not churn a broadcast
+
+      await this.state.storage.put(HANDS_KEY, hands);
+      // The whole ordered queue goes out, not a delta. It is a couple of hundred bytes at the
+      // participant cap, and it means no client can drift out of agreement about who is next —
+      // which is the one thing a presenter reading the queue aloud has to be able to trust.
+      this.broadcast(JSON.stringify({ t: "hands", ids: hands }));
+      return;
+    }
+
+    // --- Handing out and taking back the floor --------------------------------------------
+    if (type === "call" || type === "drop") {
+      const target = typeof data.id === "string" ? data.id : null;
+
+      // A speaker may always put themselves down; only the host may call someone up, or cut
+      // someone off. Letting a speaker end their own turn matters more than it looks: without
+      // it, somebody who has finished talking stays hot-miced until the presenter notices.
+      const selfRelease = type === "drop" && att.id === (await this.currentFloor());
+      if (!att.host && !selfRelease) return;
+
+      if (type === "drop") {
+        await this.setFloor(null);
+        return;
+      }
+
+      if (!target) return;
+      // Calling someone lowers their hand: the queue is what is still outstanding, and a
+      // presenter should not have to clear it by hand after every question.
+      const hands = ((await this.state.storage.get<string[]>(HANDS_KEY)) ?? []).filter((x) => x !== target);
+      await this.state.storage.put(HANDS_KEY, hands);
+      this.broadcast(JSON.stringify({ t: "hands", ids: hands }));
+      await this.setFloor(target);
+      return;
+    }
 
     if (type === "r") {
       if (now - att.tr < REACTION_INTERVAL_MS) return;
@@ -161,7 +307,17 @@ export class WatchRoom {
       // The joiner gets everyone; everyone gets the joiner. An update (`p`) is the same
       // message without the roster, so a participant swapping their picture mid-stream costs
       // one fanout rather than a rebuild on every screen.
-      if (joining) ws.send(JSON.stringify({ t: "roster", members: await this.roster(ids, att.id) }));
+      // The roster carries the floor state with it. A late joiner who only got the member list
+      // would show no raised hands and no live speaker until the next change — so someone
+      // joining mid-question would see a silent room and a presenter with an empty queue.
+      if (joining) {
+        ws.send(JSON.stringify({
+          t: "roster",
+          members: await this.roster(ids, att.id),
+          hands: (await this.state.storage.get<string[]>(HANDS_KEY)) ?? [],
+          floor: await this.currentFloor(),
+        }));
+      }
       this.broadcast(JSON.stringify({ t: joining ? "join" : "p", id: att.id, p }), ws);
       return;
     }
@@ -201,8 +357,23 @@ export class WatchRoom {
     const att = ws.deserializeAttachment() as Attachment | null;
     if (!att?.id) return;
 
+    // THE HOT MIC. Release the floor before anything else, and do it even for a socket that
+    // never joined the roster. A speaker whose connection drops mid-sentence would otherwise
+    // leave the floor assigned to an id that no longer exists — and because the audio check
+    // above compares against exactly that id, nobody else could be called on until the object
+    // happened to restart. The presenter's only visible symptom would be a Call button that
+    // did nothing.
+    if (att.id === (await this.currentFloor())) await this.setFloor(null);
+
+    const hands = (await this.state.storage.get<string[]>(HANDS_KEY)) ?? [];
+    if (hands.includes(att.id)) {
+      const next = hands.filter((x) => x !== att.id);
+      await this.state.storage.put(HANDS_KEY, next);
+      this.broadcast(JSON.stringify({ t: "hands", ids: next }), ws);
+    }
+
     const ids = (await this.state.storage.get<string[]>(IDS_KEY)) ?? [];
-    if (!ids.includes(att.id)) return; // never joined the roster; nothing to announce
+    if (!ids.includes(att.id)) return; // never joined the roster; nothing further to announce
 
     const next = ids.filter((x) => x !== att.id);
     await this.state.storage.delete(pkey(att.id));
@@ -212,6 +383,9 @@ export class WatchRoom {
       // trace of having been occupied — the "presence is live-only" promise in migration 0019
       // is this line.
       await this.state.storage.deleteAll();
+      // deleteAll wipes storage but not this object's memory, and `floor` is cached there. Left
+      // stale, a revived room would believe a long-departed id still held the microphone.
+      this.floor = null;
     } else {
       await this.state.storage.put(IDS_KEY, next);
     }

@@ -43,6 +43,18 @@ export interface RoomHandle {
   react: (emoji: string) => Promise<void>;
   /** Throw your own picture. Costs nothing on the wire beyond the marker. */
   reactWithAvatar: () => Promise<void>;
+  /** Raise or lower your hand. */
+  setHand: (up: boolean) => void;
+  /** Host only: give someone the floor. Ignored by the server from anyone else. */
+  call: (id: string) => void;
+  /** Host: cut the speaker off. Speaker: end your own turn. Anyone else: ignored. */
+  drop: () => void;
+  /** Send one Opus frame. Only accepted while you hold the floor. */
+  sendAudio: (b64: string) => Promise<void>;
+  /** Am I the broadcaster? Decided by the Worker, not by this page. */
+  isHost: () => boolean;
+  /** My own room id, once the socket has said hello. */
+  myId: () => string;
   destroy: () => void;
 }
 
@@ -55,6 +67,14 @@ export interface RoomCallbacks {
   onStatus: (online: boolean) => void;
   /** The room hit its participant cap; this client watches but is not in the roster. */
   onFull: (cap: number) => void;
+  /** The raised-hand queue, in the order people raised. Always the WHOLE list. */
+  onHands: (ids: string[]) => void;
+  /** Who holds the floor now, or null. Fires on every change, including self. */
+  onFloor: (id: string | null) => void;
+  /** One Opus frame from the current speaker. Only the broadcaster receives these. */
+  onAudio: (b64: string) => void;
+  /** The socket is up and the Worker has said whether this page is the broadcaster. */
+  onReady: (host: boolean) => void;
 }
 
 interface PresencePlain {
@@ -81,6 +101,7 @@ export function initRoom(opts: {
   let retry = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let myId = "";
+  let host = false;
 
   /**
    * The last presence we published, replayed after every reconnect.
@@ -93,6 +114,16 @@ export function initRoom(opts: {
 
   /** Everyone's last known presence, so a `{ref:"av"}` reaction can be drawn. */
   const known = new Map<string, RoomMember>();
+
+  /**
+   * Serialises audio frame decryption.
+   *
+   * Opening a frame is async, and fifty of them a second launched as independent promises
+   * would resolve in whatever order the crypto happened to finish — handing the Opus decoder
+   * a shuffled stream, which it renders as garbled speech rather than as an error. Chaining
+   * costs nothing at this rate and makes out-of-order delivery impossible.
+   */
+  let audioChain: Promise<void> = Promise.resolve();
 
   const parsePresence = (id: string, plain: string): RoomMember | null => {
     let p: PresencePlain;
@@ -147,7 +178,17 @@ export function initRoom(opts: {
     });
 
     ws.addEventListener("message", (ev) => {
-      let data: { t?: string; id?: string; p?: string; cap?: number; members?: Array<{ id: string; p: string }> };
+      let data: {
+        t?: string;
+        id?: string;
+        p?: string;
+        cap?: number;
+        host?: boolean;
+        ids?: unknown;
+        hands?: unknown;
+        floor?: unknown;
+        members?: Array<{ id: string; p: string }>;
+      };
       try {
         data = JSON.parse(ev.data as string);
       } catch {
@@ -156,9 +197,42 @@ export function initRoom(opts: {
 
       if (data.t === "hi") {
         myId = String(data.id ?? "");
+        host = data.host === true;
+        callbacks.onReady(host);
         // Re-announce after a reconnect. A first connection has nothing to replay yet;
         // setPresence() sends it when the caller has assembled a picture.
+        //
+        // The raised hand is deliberately NOT replayed. A reconnect gives you a new id and
+        // puts you at the back of a queue you were already in, so silently re-raising would
+        // quietly reorder the room in your favour — and if you had already been called on,
+        // it would raise a hand you had lowered by speaking.
         if (mine) void publish(mine.name, mine.avatar);
+        return;
+      }
+
+      if (data.t === "hands" && Array.isArray(data.ids)) {
+        callbacks.onHands(data.ids as string[]);
+        return;
+      }
+
+      if (data.t === "floor") {
+        callbacks.onFloor(typeof data.id === "string" ? data.id : null);
+        return;
+      }
+
+      if (data.t === "a" && typeof data.p === "string") {
+        const sealed = data.p;
+        // Opened HERE, not in the caller. Every other payload in this file crosses the
+        // encryption boundary at exactly this layer, and handing the view a sealed string to
+        // deal with would have put a second decrypt site in the UI — which is how one of them
+        // eventually gets forgotten. The cost is that frames become order-dependent on a
+        // promise chain; see the note on `audioChain`.
+        audioChain = audioChain
+          .then(async () => {
+            const plain = await openText(await opts.roomKey(), sealed);
+            if (plain) callbacks.onAudio(plain);
+          })
+          .catch(() => { /* one unopenable frame must not break the chain */ });
         return;
       }
 
@@ -169,6 +243,8 @@ export function initRoom(opts: {
 
       if (data.t === "roster" && Array.isArray(data.members)) {
         const list = data.members;
+        const hands = Array.isArray(data.hands) ? (data.hands as string[]) : [];
+        const floor = typeof data.floor === "string" ? data.floor : null;
         void (async () => {
           const out: RoomMember[] = [];
           for (const m of list) {
@@ -176,6 +252,10 @@ export function initRoom(opts: {
             if (parsed) out.push(parsed);
           }
           callbacks.onRoster(out);
+          // After the roster, never before: both of these are rendered ONTO member bubbles,
+          // and a hand delivered first would be attached to a grid that does not exist yet.
+          callbacks.onHands(hands);
+          callbacks.onFloor(floor);
         })();
         return;
       }
@@ -248,6 +328,23 @@ export function initRoom(opts: {
     async reactWithAvatar() {
       send({ t: "r", p: await sealText(await opts.roomKey(), JSON.stringify({ ref: "av" })) });
     },
+    setHand(up) {
+      send({ t: "hand", up });
+    },
+    call(id) {
+      send({ t: "call", id });
+    },
+    drop() {
+      send({ t: "drop" });
+    },
+    async sendAudio(b64) {
+      // Sealed like everything else, so the Durable Object relaying a speaker's voice to the
+      // broadcaster is carrying ciphertext — the room's audio is exactly as private as its
+      // video, and for the same reason.
+      send({ t: "a", p: await sealText(await opts.roomKey(), b64) });
+    },
+    isHost: () => host,
+    myId: () => myId,
     destroy() {
       closed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);

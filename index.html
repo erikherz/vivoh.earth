@@ -1664,6 +1664,149 @@
         .room-gif-note { margin: 0.5rem 0 0; color: var(--text-secondary); font-size: 0.85rem; }
         .room-gif-note:empty { display: none; }
 
+        /* ---- Raising a hand, the queue, and the live speaker ---------------------------- */
+
+        /* A raised hand rides on the bubble rather than replacing it, unlike a reaction: the
+           presenter has to be able to see WHO is asking while the hand is up. */
+        .room-bubble.hand-up::after {
+            content: "✋";
+            position: absolute;
+            top: -4px;
+            right: -4px;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-active);
+            font-size: 0.75rem;
+            line-height: 22px;
+            text-align: center;
+            z-index: 2;
+        }
+        /* The person currently holding the floor. A ring, not a badge — it must stay legible
+           while a reaction badge is covering the same circle. */
+        .room-bubble.speaking {
+            box-shadow: 0 0 0 3px var(--stream-id-color);
+            border-radius: 50%;
+        }
+
+        .room-queue {
+            margin-top: 0.9rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.75rem 0.9rem;
+        }
+        .room-queue-head {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .room-queue-title { font-size: 0.85rem; color: var(--text-secondary); }
+        .room-queue-count {
+            min-width: 1.4rem;
+            padding: 0 0.4rem;
+            border-radius: 999px;
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 0.75rem;
+            text-align: center;
+            font-variant-numeric: tabular-nums;
+        }
+        .room-queue-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            max-height: 30vh;
+            overflow-y: auto;
+        }
+        .room-queue-item {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            padding: 0.3rem;
+            border-radius: 6px;
+            background: var(--bg-tertiary);
+        }
+        .room-queue-face { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
+        .room-queue-name {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 0.9rem;
+        }
+        .room-queue-call {
+            flex: 0 0 auto;
+            min-height: 36px;
+            padding: 0 0.8rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-active);
+            background: transparent;
+            color: var(--text-primary);
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+        .room-queue-call:disabled { opacity: 0.55; cursor: default; }
+        .room-queue-empty { color: var(--text-secondary); font-size: 0.85rem; padding: 0.3rem; }
+
+        /* Shown only on the speaker's own screen. Deliberately loud: a hot microphone that is
+           easy to forget about is the failure this bar exists to prevent. */
+        .room-speaking {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            margin-top: 0.9rem;
+            padding: 0.6rem 0.9rem;
+            border-radius: 8px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--stream-id-color);
+            font-size: 0.9rem;
+        }
+        .room-speaking-dot {
+            flex: 0 0 auto;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--stream-id-color);
+            animation: room-pulse 1.6s ease-in-out infinite;
+        }
+        @keyframes room-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+        @media (prefers-reduced-motion: reduce) {
+            .room-speaking-dot { animation: none; }
+        }
+        .room-speaking-text { flex: 1 1 auto; min-width: 0; }
+        .room-speaking-done {
+            flex: 0 0 auto;
+            min-height: 40px;
+            padding: 0 0.9rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-active);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        .room-hand-btn {
+            min-height: 44px;
+            padding: 0 0.9rem;
+            border-radius: 999px;
+            border: 1px solid var(--border-active);
+            background: transparent;
+            color: var(--text-primary);
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        .room-hand-btn.toggle-on {
+            border-color: var(--stream-id-color);
+            color: var(--stream-id-color);
+        }
+
         /* A reaction in flight. Absolutely positioned inside #watch-stage; `left` and the
            --drift custom property are set per element so a burst spreads instead of stacking
            into one column. */

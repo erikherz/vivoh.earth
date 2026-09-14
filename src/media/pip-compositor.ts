@@ -130,6 +130,24 @@ export interface Compositor {
   readonly videoTrack: MediaStreamTrack; // stable: the canvas composite
   readonly audioTrack: MediaStreamTrack; // stable: the WebAudio mix destination
   readonly canvas: HTMLCanvasElement; // publisher preview; drag the camera inset to move it
+  /**
+   * The context the outgoing mix runs on.
+   *
+   * Exposed so a called-on viewer's decoded voice can be built on the SAME context and joined
+   * to this mix. A node from a different AudioContext cannot connect to this one, and while
+   * that fails loudly at connect time, the shape of the mistake is worse than the error: a
+   * second context would play the speaker to the broadcaster and to nobody else, which looks
+   * like it works until somebody asks whether the audience actually heard the question.
+   */
+  readonly audioContext: AudioContext;
+  /**
+   * Add an extra source to the outgoing audio; returns the way to remove it again.
+   *
+   * Used for the room's speaker turns. Deliberately ADDITIVE: it touches neither the mic nor
+   * the system-audio inputs, so the path with a history of going silent under a lit button is
+   * not modified at all to support this.
+   */
+  attachAudioSource: (node: AudioNode) => () => void;
   hasCamera: () => boolean;
   hasScreen: () => boolean;
   /**
@@ -843,6 +861,22 @@ export function createCompositor(): Compositor {
     videoTrack,
     audioTrack,
     canvas,
+    audioContext: ac,
+    attachAudioSource(node) {
+      if (stopped) return () => {};
+      node.connect(dest);
+      // A speaker's turn is itself a gesture-driven moment on the host's side (they pressed
+      // Call), so this is a reasonable place to nudge a context that never got resumed —
+      // otherwise the guest is mixed into a destination publishing silence, and the symptom
+      // is a live badge with nothing coming out of it.
+      void ac.resume().catch(() => {});
+      let detached = false;
+      return () => {
+        if (detached) return;
+        detached = true;
+        try { node.disconnect(dest); } catch { /* already gone */ }
+      };
+    },
     hasCamera: () => !!camera,
     hasScreen: () => !!screen,
 
