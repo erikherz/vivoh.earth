@@ -5,8 +5,15 @@
   Every "cannot" here is a structural property with a test behind it, and the limits section
   exists because a page that only lists strengths is not trustworthy.
 
-  Kept deliberately in sync with ~/Desktop/vivoh-security-*.pdf. If they disagree, the
-  PDF is the audited one and this is wrong.
+  Kept deliberately in sync with the dated security posture review (~/Desktop/vivoh-earth-*.pdf).
+  If they disagree, the PDF is the reviewed one and this is wrong.
+
+  WHEN A FEATURE SHIPS, COME HERE FIRST. Three claims on this page went stale without anyone
+  noticing until a review caught them: "viewers cannot see anything else" (false the moment the
+  room shipped), and an entire "You are not an account" section carried over from Wallflower —
+  which links to a /request page that 404s here, and says broadcasts are not linkable to each
+  other when every one of them hangs off an account row. Stale reassurance is worse than no
+  page at all, because a reader has no way to tell which sentences are still true.
 -->
 <html lang="en">
 <head>
@@ -51,8 +58,8 @@
 
   <h1>How you're protected</h1>
   <p class="lede">
-    What Vivoh.Earth can and cannot see when you broadcast — and the parts we can't protect you
-    from, stated as plainly as the parts we can.
+    What Vivoh.Earth can and cannot see when you broadcast, what your audience can see of each
+    other — and the parts we can't protect you from, stated as plainly as the parts we can.
   </p>
 
   <div class="key">
@@ -84,8 +91,9 @@
     </tr>
     <tr>
       <td>Your viewers</td>
-      <td>The stream, if you gave them the link &mdash; and, when sign-in is required, if they are signed in</td>
-      <td>Anything else</td>
+      <td>The stream, if you gave them the link &mdash; and, when sign-in is required, if they are
+          signed in. <strong>In a room, also each other</strong> (see below)</td>
+      <td>Anything outside the broadcast and its room</td>
     </tr>
     <tr>
       <td>Everyone else</td>
@@ -101,19 +109,35 @@
     because you sent them the link.
   </p>
 
-  <h2>You are not an account</h2>
+  <h2>Broadcasters have accounts. Viewers do not have to.</h2>
 
   <p>
-    There is no sign-up, no email address, no password, and no profile. Broadcasting needs a
-    <strong>publish code</strong>, which you can <a href="/request">request in a few seconds</a>
-    without telling us anything about yourself. We don't store the code, so there is no record
-    connecting you to anything you broadcast — nothing for us to look up, and nothing for anyone
-    to compel from us.
+    This is the place where Vivoh.Earth differs most from the anonymous-publishing tools it
+    shares code with, so it is worth being exact rather than flattering.
   </p>
   <p>
-    Each broadcast also identifies itself with a fresh cryptographic key that is created in your
-    browser and never leaves it. That means your broadcasts are not linkable to each other, even
-    by us.
+    <strong>To broadcast, you sign in</strong> — with Google, Microsoft or Discord — and an
+    operator has to have granted your email address permission to publish. That means we hold an
+    account for you: your email, the name and picture your provider gives us, and a row for every
+    broadcast you start. <strong>Your broadcasts are therefore linkable to each other, and to
+    you, by us.</strong> That is the direct cost of the model, and no amount of encryption
+    changes it.
+  </p>
+  <p>
+    What we do <em>not</em> hold is what you broadcast. The account tells us that you went live,
+    when, and for how long. It gives us no way to see a single frame, because the key was never
+    ours to begin with.
+  </p>
+  <p>
+    <strong>To watch, an account is needed only if the broadcaster asks for one.</strong>
+    <em>Require sign-in</em> is on by default precisely so a broadcaster knows who is in the room,
+    but it is the broadcaster's switch, not ours. With it off, a viewer holding the link watches
+    without telling us anything about themselves.
+  </p>
+  <p>
+    If you need to publish without an account at all, that is a real requirement and this is the
+    wrong service for it. <a href="https://wallflower.tv">Wallflower.tv</a> runs the same code
+    with sign-in switched off and a passcode mixed into the key itself.
   </p>
 
   <h2>We collect no location data</h2>
@@ -196,10 +220,71 @@
     there is nothing there for us to read.
   </p>
 
+  <h2>The room: when your audience can see each other</h2>
+
+  <p>
+    A broadcast can be an ordinary one-way stream, or it can be a <strong>room</strong>, where the
+    people watching appear to one another as a wall of faces, send reactions, raise a hand, and be
+    called on to speak. The room is <strong>off unless you turn it on</strong>, per broadcast.
+  </p>
+  <p>
+    Everything in it is encrypted exactly like the video: names, pictures, reactions and the voice
+    of anyone called on all travel sealed under keys derived from the same share link. The server
+    that relays them holds nothing it can read, and nothing about a room is written to our
+    database — when the last person leaves, there is no roster left behind, because none was ever
+    stored.
+  </p>
+  <p>
+    <strong>But this is a genuine change in who learns something, and encryption is not the right
+    lens for it.</strong> Everywhere else on this page the question is what <em>we</em> can see. A
+    room changes what your <em>viewers</em> can see: their names and chosen pictures go to
+    everyone else holding the link. That is the entire point of the feature, and it is also its
+    one real cost. <strong>If your audience cannot afford to be visible to each other, leave the
+    room off.</strong> Nothing else about your broadcast changes when you do.
+  </p>
+  <p>
+    Joining is deliberately opt-in twice: you have to enable the room, and each viewer has to
+    press <em>Join</em> before their own name and picture go anywhere. Opening the page makes
+    someone a spectator, not a participant.
+  </p>
+
+  <h3>Nobody can turn on your microphone but you</h3>
+  <p>
+    When a host calls on you, your microphone does <strong>not</strong> open. You are asked, and
+    nothing is captured until you press <em>Unmute</em>. This matters more than it sounds: browsers
+    remember microphone permission per site, so a page that simply called for the microphone would
+    get no prompt at all from anyone who had ever allowed it once.
+  </p>
+  <p>
+    The property that follows is worth stating plainly, because it is unusual: <strong>a host
+    cannot unmute anybody. Only a viewer can.</strong> It holds regardless of who the host chose
+    or why — and it holds against us as well, since the prompt is in your browser and not
+    something we can answer on your behalf.
+  </p>
+  <p>
+    If you do speak, your voice is mixed into the broadcast, so everyone watching hears it. It is
+    part of the programme from that moment: as recordable by any viewer as the rest of the stream,
+    and within reach of the same reporting process. The host can drop you at any time, and you can
+    end your own turn whenever you like.
+  </p>
+  <p>
+    The same limit as chat applies, and more sharply. We cannot moderate a room, because we cannot
+    see or hear any of it. Stopping the whole broadcast remains the only lever, for rooms as for
+    everything else.
+  </p>
+  <p>
+    One honest note about GIF reactions: searching for a GIF sends your search words to us, so
+    that your browser never has to contact Giphy directly and Giphy never learns that you are
+    watching anything. We attach nothing to those words — no stream, no session, no account — and
+    do not log them, but we do see them in the moment, which we would rather say than leave you to
+    discover.
+  </p>
+
   <h2>Moderation, and what it costs</h2>
 
   <p>
-    Because we can't see what anyone broadcasts, we can't police content. What we can do is
+    Because we can't see what anyone broadcasts — or says in its chat, or shows as their face in
+    its room — we can't police content. What we can do is
     <strong>stop</strong> a stream: viewers can report one, and an operator can terminate it.
     Terminating takes effect for people already watching — it doesn't merely stop new ones — and
     it works whether or not the software they're using cooperates.
@@ -262,15 +347,28 @@
     <li>Watch what the chat server actually receives, and confirm the text isn't in it.</li>
     <li>Terminate a stream while a deliberately uncooperative viewer is watching, and confirm it stops anyway.</li>
     <li>Read the database directly after a report is filed, and confirm no key is in it.</li>
+    <li>Try to join a room for a broadcast whose link we don't hold, and be refused.</li>
+    <li>As an ordinary viewer, try to take the floor, take it from someone else, or push audio into a broadcast without being given it — and fail at all three.</li>
+    <li>Confirm in the code that a microphone can be opened from exactly one place: the button the speaker presses.</li>
   </ul>
+  <p>
+    Those negative tests share a weakness worth naming, because it is the kind of thing this page
+    exists to be honest about: a test that only ever checks that something was <em>refused</em>
+    passes just as happily when it is broken and checking nothing. So each one also proves it can
+    succeed — the same connection that is refused the microphone is first shown doing something it
+    is genuinely allowed to do. A run where only the refusals pass is treated as a failed run.
+  </p>
   <p>
     A fuller written assessment, including every known weakness and its severity, is kept as a
     dated security posture document. Ask and we'll send you the current one.
   </p>
 
   <p class="foot">
-    Last reviewed 15 August 2026. This describes Vivoh.Earth as it runs today; it will be
-    rewritten when that changes rather than quietly left standing.
+    Last reviewed 14 September 2026, when the room, reactions and voice questions shipped. Three
+    claims on the previous version of this page had gone stale and were corrected: that viewers
+    could see nothing but the stream, that broadcasting needed no account, and that a person's
+    broadcasts were not linkable to each other. This describes Vivoh.Earth as it runs today; it
+    will be rewritten when that changes rather than quietly left standing.
   </p>
 
 </main>
