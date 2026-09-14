@@ -6,9 +6,16 @@
 // protects is structural, and the thing most likely to break it is an ordinary-looking edit
 // rather than a runtime condition.
 //
-// The property: `getUserMedia` lives behind exactly one door. It is called in exactly one place,
-// inside `startSpeaking()`, and `startSpeaking()` is reachable ONLY from the accept buttons.
-// Being granted the floor must only ever OFFER a device, never open one.
+// The property: nothing in our room code opens a device, and the ONE thing that causes a device
+// to open — creating a capturing <moq-publish> element — happens in exactly one function, which
+// is reachable only from the accept buttons. Being granted the floor must only ever OFFER.
+//
+// RESTATED AGAIN 14 Sep 2026, after the first live test. We had been handing @moq a MediaStream
+// obtained ourselves; that API does not exist. `source` is an attribute taking "camera" |
+// "screen" | "file", and the element calls getUserMedia itself. So `getUserMedia` left our code
+// entirely and this guard's first assertion — "appears in exactly one place" — became FALSE by
+// being satisfied zero times. The consent boundary did not move; only the thing that crosses it
+// did, so the assertion had to follow it rather than be relaxed.
 //
 // RESTATED 14 Sep 2026, when the guest leg moved onto moq.pro. This guard went red on that
 // change and it was right to: capture moved out of voice.ts into room-view.ts, and a second
@@ -92,24 +99,33 @@ const publishCode = codeLines(publish);
 
 console.log("microphone consent — the call site is the control\n");
 
-// 1. getUserMedia has exactly one home. guest-media.ts is included precisely because it MUST
-//    NOT contain one: it publishes a stream the consent step already obtained.
+// 1. We open no devices ourselves. The element does, which is why the check is for ABSENCE:
+//    a getUserMedia reappearing here would be a second, unguarded way in.
 const gumLines = [...viewCode, ...publishCode].filter((l) => l.line.includes("getUserMedia"));
 check(
-  "getUserMedia appears in exactly one place in the room code",
-  gumLines.length === 1,
-  gumLines.map((l) => `line ${l.n}`).join(", ") || "none found"
+  "no getUserMedia anywhere in the room code",
+  gumLines.length === 0,
+  gumLines.map((l) => `line ${l.n}`).join(", ") || "none"
 );
 
-// 2. ...and that home is room-view, not the publishing module.
-const gumInPublish = publishCode.filter((l) => l.line.includes("getUserMedia"));
+// 2. Exactly one place creates a capturing element. `source="camera"` is what makes it capture,
+//    so that attribute and the element's creation are the thing to count.
+const capturing = publishCode.filter((l) => /setAttribute\("source", *"camera"\)/.test(l.line));
 check(
-  "guest-media.ts never opens a device itself",
-  gumInPublish.length === 0,
-  gumInPublish.map((l) => `line ${l.n}`).join(", ") || "none"
+  "exactly one place makes the element capture",
+  capturing.length === 1,
+  capturing.map((l) => `line ${l.n}`).join(", ") || "none found"
 );
 
-// 3. THE ONE THAT MATTERS. startSpeaking is invoked once, and only by the Unmute handler.
+// 3. ...and it is reached from exactly one call site, in room-view.
+const publishCalls = viewCode.filter((l) => /startGuestPublish\(/.test(l.line));
+check(
+  "startGuestPublish is called from exactly one place",
+  publishCalls.length === 1,
+  publishCalls.map((l) => `line ${l.n}`).join(", ")
+);
+
+// 4. THE ONE THAT MATTERS. startSpeaking is invoked only by the accept handlers.
 //    A definition (`const startSpeaking = `) is not an invocation and must not count.
 const speakInvocations = viewCode.filter(
   (l) => /\bstartSpeaking\(/.test(l.line) && !/const\s+startSpeaking/.test(l.line)

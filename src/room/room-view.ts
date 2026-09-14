@@ -307,7 +307,6 @@ export function initRoomView(opts: {
   let hands: string[] = [];
   let floor: string | null = null;
   let sender: GuestPublication | null = null;
-  let senderStream: MediaStream | null = null;
   let receiver: GuestSubscription | null = null;
   /** Set for the length of a turn, on the speaker's page and the host's. Null everywhere else. */
   let guestMedia: GuestMedia | null = null;
@@ -420,7 +419,7 @@ export function initRoomView(opts: {
     const media = guestMedia;
     if (!media) {
       // The floor was granted but no token came with it, which means the CDN is unconfigured on
-      // this deployment. Say so rather than opening a microphone that leads nowhere.
+      // this deployment. Say so rather than pretending a turn is running.
       speakingText.textContent =
         "This broadcast cannot carry live questions right now. Ask in chat instead.";
       room.drop();
@@ -428,24 +427,12 @@ export function initRoomView(opts: {
     }
 
     try {
-      senderStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: withVideo ? { width: { ideal: 480 }, height: { ideal: 270 }, frameRate: { ideal: 20 } } : false,
-      });
-    } catch {
-      // A refused device must say so. Swallowed, this leaves a lit "you're live" badge over a
-      // dead microphone, which is worse than either working or plainly failing.
-      speakingText.textContent =
-        "Your microphone or camera was blocked, so nobody can hear you. Allow it and ask to be " +
-        "called on again, or type in chat.";
-      room.drop();
-      return;
-    }
-
-    try {
+      // The <moq-publish> element opens the devices itself; this call is what puts it on the
+      // page, so it is the thing that must stay behind the accept click. The browser's own
+      // permission prompt follows it.
       sender = await startGuestPublish({
         media,
-        stream: senderStream,
+        withVideo,
         secret: opts.linkSecret(),
         streamId: opts.streamId,
         salt: opts.salt(),
@@ -455,26 +442,28 @@ export function initRoomView(opts: {
             "Something went wrong publishing your turn — the presenter may not be able to hear you.";
         },
       });
-      speakingText.textContent = withVideo
-        ? "You're live with video — everyone watching can see and hear you."
-        : "You're live — everyone watching can hear you.";
     } catch (e) {
       console.error("[room] guest publish failed", e);
       speakingText.textContent = "Could not start your turn. Try asking to be called on again.";
-      senderStream?.getTracks().forEach((t) => t.stop());
-      senderStream = null;
       room.drop();
+      return;
     }
+
+    // DO NOT CLAIM "you're live" HERE. The first version did, on the strength of the publish
+    // call having resolved — and it resolved happily while nothing was attached and nothing was
+    // being published, so a guest was told they were on air and was not. The bar now says only
+    // what is known, and upgrades itself when the presenter's subscription actually starts
+    // carrying frames, which is the first moment anyone can honestly say it.
+    speakingText.textContent = withVideo
+      ? "Starting your microphone and camera…"
+      : "Starting your microphone…";
   };
 
   const stopSpeaking = () => {
+    // Removing the element releases the devices it opened, which is what clears the browser's
+    // recording indicator. A turn that ends without that reads as "this site is still listening".
     sender?.stop();
     sender = null;
-    // The stream is stopped HERE and not inside guest-media, because this is the layer that
-    // asked for it. A turn that ends without releasing the devices leaves the browser's
-    // recording indicator lit, which reads as "this site is still listening".
-    senderStream?.getTracks().forEach((t) => t.stop());
-    senderStream = null;
     hideInvite();
     speakingBar.classList.add("hidden");
     speakingText.textContent = "";

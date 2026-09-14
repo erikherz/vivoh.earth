@@ -37,19 +37,21 @@ function hiddenHost(): HTMLElement {
 }
 
 export interface GuestPublication {
+  /** Removes the element, which releases the devices it opened. */
   stop: () => void;
 }
 
 /**
  * The speaker's side: publish this turn.
  *
- * `stream` is the guest's own camera/microphone capture, already obtained behind the consent
- * prompt. This function never calls getUserMedia — the accept step owns that, and keeping the
- * only call site in one place is what mic-consent.mjs asserts.
+ * Called only from the consent step, and only after the guest pressed an accept button. The
+ * element opens the devices, so the browser's own permission prompt is the second gate — which
+ * is why creating this element at all is the thing that must stay behind a click.
  */
 export async function startGuestPublish(opts: {
   media: GuestMedia;
-  stream: MediaStream;
+  /** true to publish the camera as well as the microphone. */
+  withVideo: boolean;
   secret: string;
   streamId: string;
   salt?: string;
@@ -64,46 +66,40 @@ export async function startGuestPublish(opts: {
   await import("@moq/publish/element");
   const host = hiddenHost();
   const el = document.createElement("moq-publish") as HTMLElement & {
-    video?: { source?: { set?: (v: unknown) => void } };
-    audio?: { source?: { set?: (v: unknown) => void } };
-    source?: { set?: (v: unknown) => void };
+    controls?: { source?: { set?: (v: unknown) => void } };
   };
+
+  // THE ELEMENT CAPTURES; WE DO NOT.
+  //
+  // The first version of this function obtained a MediaStream itself and tried to hand it over
+  // as `el.source.set(stream)`. That API does not exist. `source` is a plain setter taking one
+  // of "camera" | "screen" | "file", and `sources.video` / `sources.audio` take Source.Camera /
+  // Source.Microphone objects — classes that call getUserMedia THEMSELVES. So a stream was
+  // never attached, nothing was ever published, and the guard that was supposed to catch that
+  // matched one of the shapes it probed and reported success. Setting the documented attribute
+  // is both correct and the only shape that cannot drift silently: it is in `observedAttributes`.
+  //
+  // "camera" captures microphone AND camera; `muted` is how audio-only is expressed, so a
+  // guest who chose voice alone publishes the camera track muted rather than not at all. That
+  // is a real difference from not requesting it, and the consent prompt says video explicitly,
+  // so audio-only takes the narrower path below instead.
   el.setAttribute("name", "");
   el.setAttribute("url", moqUrl(opts.media.relay, opts.media.path, opts.media.jwt));
+  // `source` waits for real media before announcing, which is what we want: an announced
+  // broadcast with no tracks is a guest the host subscribes to and never hears.
+  el.setAttribute("announce", "source");
+  el.setAttribute("source", "camera");
+  if (!opts.withVideo) {
+    // Audio-only: keep the element's capture but suppress the picture. `invisible` is the
+    // element's own term for "do not publish video".
+    el.setAttribute("invisible", "");
+  }
   host.appendChild(el);
-
-  // The element's source surface moved once already in this codebase's history (0.4.7 turned
-  // `broadcast` into a registry). Try the shapes we know, and SAY SO if none took, because a
-  // guest who is live in every visible sense and publishing nothing is the failure that looks
-  // most like success.
-  const track = opts.stream.getVideoTracks()[0] ?? null;
-  const audio = opts.stream.getAudioTracks()[0] ?? null;
-  let attached = false;
-  try {
-    if (typeof el.source?.set === "function") {
-      el.source.set(opts.stream);
-      attached = true;
-    } else {
-      if (track && typeof el.video?.source?.set === "function") { el.video.source.set(track); attached = true; }
-      if (audio && typeof el.audio?.source?.set === "function") { el.audio.source.set(audio); attached = true; }
-    }
-  } catch (e) {
-    opts.onError?.(e);
-  }
-  if (!attached) {
-    const err = new Error(
-      "[guest-media] could not attach a source to <moq-publish>; the element's source API moved. " +
-        "Nothing is being published."
-    );
-    console.error(err);
-    opts.onError?.(err);
-  }
 
   return {
     stop() {
       try { el.remove(); } catch { /* already gone */ }
       try { host.remove(); } catch { /* already gone */ }
-      // The caller stops the MediaStream: it owns the tracks and the recording indicator.
       clearGuestKey("encrypt");
     },
   };
