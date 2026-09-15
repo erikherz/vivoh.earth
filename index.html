@@ -1522,15 +1522,122 @@
             font-size: 0.9rem;
         }
 
+        /* Bubble size is set by JS on the grid, from the headcount — see fitGrid() in
+           src/room/room-view.ts. 58px is the small-room size and the fallback if the script
+           never runs; the floor is 28px, below which a face stops being a face and the grid
+           overflows into a "+N" chip instead of shrinking further.
+
+           The var lives on .room-grid rather than on each bubble so one write re-lays the
+           whole wall, and so a bubble created mid-room inherits the current size instead of
+           appearing at 58px next to everyone else's 34px. */
         .room-bubble {
             position: relative;
-            width: 58px;
-            height: 58px;
+            width: var(--room-bubble, 58px);
+            height: var(--room-bubble, 58px);
             flex: 0 0 auto;
             border-radius: 50%;
             overflow: visible;
             background: var(--bg-tertiary);
         }
+        /* Past the floor: the tail of the room is hidden rather than removed, so nothing has
+           to be rebuilt when the count drops back and a reaction still finds its bubble. */
+        .room-bubble.room-overflow { display: none; }
+
+        .room-more {
+            width: auto;
+            min-width: var(--room-bubble, 58px);
+            height: var(--room-bubble, 58px);
+            flex: 0 0 auto;
+            padding: 0 0.5rem;
+            border-radius: 999px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            font: inherit;
+            font-size: 0.82rem;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .room-more:hover { color: var(--text-primary); border-color: #00d4aa; }
+
+        /* The roster. A list with names is the right shape for "who is here?" — the wall of
+           faces answers "how many", and those are different questions. */
+        .room-roster-back {
+            position: fixed;
+            inset: 0;
+            z-index: 60;
+            background: rgba(0, 0, 0, 0.55);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+        }
+        .room-roster {
+            width: min(28rem, 100%);
+            max-height: min(32rem, 80vh);
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .room-roster-head {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            padding: 0.85rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .room-roster-title { font-weight: 600; color: var(--text-primary); }
+        .room-roster-close {
+            margin-left: auto;
+            border: 0;
+            background: none;
+            color: var(--text-secondary);
+            font: inherit;
+            font-size: 1.3rem;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .room-roster-search {
+            margin: 0.75rem 1rem 0;
+            padding: 0.5rem 0.7rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font: inherit;
+            /* 16px: under it, iOS zooms the viewport on focus. */
+            font-size: 16px;
+        }
+        .room-roster-list {
+            list-style: none;
+            margin: 0.6rem 0 0;
+            padding: 0 0 0.6rem;
+            overflow-y: auto;
+        }
+        .room-roster-list li {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            padding: 0.4rem 1rem;
+            color: var(--text-primary);
+            font-size: 0.92rem;
+        }
+        .room-roster-list img {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            object-fit: cover;
+            background: var(--bg-tertiary);
+            flex: none;
+        }
+        .room-roster-empty { padding: 0.6rem 1rem; color: var(--text-muted); font-size: 0.9rem; }
         .room-bubble-img {
             width: 100%;
             height: 100%;
@@ -1553,7 +1660,10 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 1.8rem;
+            /* Scales with the bubble. A fixed 1.8rem emoji inside a 28px circle overflows it
+               and the wall turns into a row of clipped squares at exactly the headcount where
+               reactions matter most. */
+            font-size: calc(var(--room-bubble, 58px) * 0.62);
             line-height: 1;
         }
 

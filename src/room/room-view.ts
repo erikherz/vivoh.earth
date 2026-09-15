@@ -250,6 +250,210 @@ export function initRoomView(opts: {
     placeholder();
   };
 
+  // --- fitting the wall ---------------------------------------------------------------
+  //
+  // The room holds up to 200 (MAX_MEMBERS in watch-room.ts), and a 58px bubble seats 13 to a
+  // row on a 1440px desktop — 65 before the panel starts scrolling — or 5 to a row on a
+  // phone. Measured on the shipped CSS, not estimated. So at any real town-hall size the wall
+  // must either shrink or hide people; showing 200 recognisable faces is not an option that
+  // exists.
+  //
+  // It shrinks, down to a floor. That keeps the thing the wall is FOR — the sense that a room
+  // is full — at every headcount, and it avoids paging, which asks somebody to navigate a
+  // display nobody has a task in. Past the floor the tail collapses into a single "+N" chip
+  // that opens a roster, because a list with names answers "who is here" far better than
+  // page three of a face grid.
+  //
+  // Reactions are unaffected either way: they fly over the video from anyone, on screen or
+  // not. What a hidden member loses is the highlight ring on their own bubble, nothing more.
+  const BUBBLE_SIZES = [58, 48, 40, 34, 28];
+
+  let moreBtn: HTMLButtonElement | null = null;
+
+  const fitGrid = () => {
+    const count = bubbles.size;
+    if (!count) return;
+
+    // clientWidth is 0 while this panel or any ancestor is hidden, and flex then reports every
+    // bubble on a single row — a capacity of "everything", dressed up as a measurement. Bail
+    // rather than act on it; fitGrid runs again on the next roster or resize.
+    const width = grid.clientWidth;
+    if (width <= 0) return;
+
+    const styles = getComputedStyle(grid);
+    const gap = parseFloat(styles.columnGap || styles.gap) || 0;
+    // Read the height ceiling from the stylesheet instead of repeating `42vh` here. Two
+    // constants that must agree is a bug waiting for the day one of them moves, and this one
+    // would fail silently — the wall would just quietly start scrolling again.
+    const maxH = parseFloat(styles.maxHeight);
+    const height = Number.isFinite(maxH) ? maxH : grid.clientHeight;
+
+    const capacity = (size: number) => {
+      const perRow = Math.max(1, Math.floor((width + gap) / (size + gap)));
+      const rows = Math.max(1, Math.floor((height + gap) / (size + gap)));
+      return perRow * rows;
+    };
+
+    let size = BUBBLE_SIZES[BUBBLE_SIZES.length - 1];
+    for (const s of BUBBLE_SIZES) {
+      if (capacity(s) >= count) { size = s; break; }
+    }
+    const fits = capacity(size);
+
+    grid.style.setProperty("--room-bubble", `${size}px`);
+
+    // One slot goes to the chip itself. Without that the "+N" pushes a face off the bottom
+    // and the count is wrong by one, in the direction that reads as a bug.
+    const overflowing = count > fits;
+    const shown = overflowing ? Math.max(1, fits - 1) : count;
+
+    let i = 0;
+    for (const b of bubbles.values()) {
+      b.el.classList.toggle("room-overflow", i >= shown);
+      i++;
+    }
+
+    if (!overflowing) {
+      moreBtn?.remove();
+      moreBtn = null;
+      return;
+    }
+
+    if (!moreBtn) {
+      moreBtn = document.createElement("button");
+      moreBtn.type = "button";
+      moreBtn.className = "room-more";
+      moreBtn.addEventListener("click", openRoster);
+    }
+    let visible = shown;
+    const paintChip = () => {
+      const hidden = count - visible;
+      moreBtn!.textContent = `+${hidden}`;
+      moreBtn!.setAttribute("aria-label", `${hidden} more people — show everyone`);
+      moreBtn!.title = `${hidden} more watching`;
+      // Always last. appendChild on an element already in the grid MOVES it, which is exactly
+      // what is wanted when somebody joins and the chip would otherwise sit mid-wall.
+      grid.appendChild(moreBtn!);
+    };
+    paintChip();
+
+    // The chip is WIDER THAN A BUBBLE — it is a pill carrying "+120", not a 28px circle — so
+    // reserving one bubble-sized slot for it is not always enough. On a 390px phone at the
+    // 28px floor it wrapped onto a tenth row and the wall scrolled again, which is the exact
+    // failure this whole function exists to prevent, arriving one step later.
+    //
+    // Measured rather than predicted: the chip's width depends on its own text, its padding
+    // and the font, and any arithmetic here would be a second copy of the stylesheet that
+    // drifts the first time one of those changes. Hide one more face, re-measure, repeat.
+    // Bounded at three because that is already more slack than a pill can need, and an
+    // unbounded loop reading scrollHeight is a hang rather than a bug.
+    for (let guard = 0; guard < 3 && grid.scrollHeight > grid.clientHeight + 1 && visible > 1; guard++) {
+      visible--;
+      let j = 0;
+      for (const b of bubbles.values()) {
+        b.el.classList.toggle("room-overflow", j >= visible);
+        j++;
+      }
+      paintChip();
+    }
+  };
+
+  // --- the roster ---------------------------------------------------------------------
+
+  let rosterBack: HTMLElement | null = null;
+
+  function onRosterKey(e: KeyboardEvent): void {
+    if (e.key === "Escape") closeRoster();
+  }
+
+  function closeRoster(): void {
+    window.removeEventListener("keydown", onRosterKey);
+    rosterBack?.remove();
+    rosterBack = null;
+  }
+
+  function openRoster(): void {
+    closeRoster();
+
+    const back = document.createElement("div");
+    back.className = "room-roster-back";
+    back.innerHTML = `
+      <div class="room-roster" role="dialog" aria-modal="true" aria-label="Everyone watching">
+        <div class="room-roster-head">
+          <span class="room-roster-title">In the room</span>
+          <span class="room-roster-count"></span>
+          <button type="button" class="room-roster-close" aria-label="Close">&times;</button>
+        </div>
+        <input type="text" class="room-roster-search" placeholder="Search names" autocomplete="off">
+        <ul class="room-roster-list"></ul>
+      </div>`;
+
+    const list = back.querySelector(".room-roster-list") as HTMLElement;
+    const search = back.querySelector(".room-roster-search") as HTMLInputElement;
+    (back.querySelector(".room-roster-count") as HTMLElement).textContent = String(bubbles.size);
+
+    const paint = (q: string) => {
+      const needle = q.trim().toLowerCase();
+      list.replaceChildren();
+      let shown = 0;
+      for (const b of bubbles.values()) {
+        const name = b.label.textContent ?? "";
+        if (needle && !name.toLowerCase().includes(needle)) continue;
+        const li = document.createElement("li");
+        const img = document.createElement("img");
+        // Reuse the bubble's already-decoded data URL rather than re-opening the sealed
+        // avatar: identical bytes, and opening it twice is work for nothing.
+        img.src = b.img.getAttribute("src") ?? "";
+        img.alt = "";
+        const span = document.createElement("span");
+        // textContent, never innerHTML — this name came from another participant.
+        span.textContent = name;
+        li.append(img, span);
+        list.append(li);
+        shown++;
+      }
+      if (!shown) {
+        const p = document.createElement("p");
+        p.className = "room-roster-empty";
+        p.textContent = needle ? "Nobody by that name." : "Nobody has joined yet.";
+        list.append(p);
+      }
+    };
+
+    paint("");
+    search.addEventListener("input", () => paint(search.value));
+    back.querySelector(".room-roster-close")?.addEventListener("click", closeRoster);
+    // Dismiss on the backdrop, and only the backdrop: a click inside the dialog that lands on
+    // padding must not close it out from under someone mid-search.
+    back.addEventListener("click", (e) => { if (e.target === back) closeRoster(); });
+
+    document.body.appendChild(back);
+    rosterBack = back;
+    window.addEventListener("keydown", onRosterKey);
+    search.focus();
+  }
+
+  // Re-fit on a window change, not only on a roster change: rotating a phone or dragging a
+  // window narrower changes how many fit per row, and without this the bubbles keep the size
+  // chosen for the old width and the panel quietly starts scrolling again.
+  let fitTimer: number | undefined;
+  const onResize = () => {
+    window.clearTimeout(fitTimer);
+    fitTimer = window.setTimeout(fitGrid, 120);
+  };
+  window.addEventListener("resize", onResize);
+
+  // A window listener alone is not enough, and the gap is the ordinary path rather than an
+  // edge case. The room panel is built while it is still `.hidden`, so the first roster
+  // arrives at zero width and fitGrid() correctly refuses to measure — and then nothing ever
+  // asks it again, because showing the panel fires no window resize. The wall would sit at
+  // the default 58px however many people were in it.
+  //
+  // Watching the grid itself catches both: the width it gains when the panel is revealed, and
+  // any later change from the window being dragged narrower.
+  const gridObserver = new ResizeObserver(onResize);
+  gridObserver.observe(grid);
+
   // --- reactions --------------------------------------------------------------------
 
   /** Screenshot #95: the reaction takes over the sender's circle for a few seconds. */
@@ -587,10 +791,14 @@ export function initRoomView(opts: {
         bubbles.clear();
         for (const m of members) upsert(m);
         placeholder();
+        fitGrid();
       },
-      onJoin: (m) => { upsert(m); renderHands(); },
+      onJoin: (m) => { upsert(m); fitGrid(); renderHands(); },
+      // onUpdate cannot change the headcount — a name or picture changed on somebody already
+      // here — so it deliberately does not re-fit. Re-fitting would read layout on every
+      // avatar change, which in a busy room is a great many forced reflows for no move.
       onUpdate: upsert,
-      onLeave: (id) => { remove(id); renderHands(); },
+      onLeave: (id) => { remove(id); fitGrid(); renderHands(); },
       onReaction,
       onStatus: (online) => container.classList.toggle("room-offline", !online),
       onReady: (host) => {
@@ -747,6 +955,12 @@ export function initRoomView(opts: {
     destroy() {
       destroyed = true;
       if (gifTimer) clearTimeout(gifTimer);
+      window.clearTimeout(fitTimer);
+      window.removeEventListener("resize", onResize);
+      gridObserver.disconnect();
+      // The roster lives on <body>, not in `container`, so replaceChildren() below would
+      // leave it on screen over a room that no longer exists.
+      closeRoster();
       for (const b of bubbles.values()) if (b.timer) clearTimeout(b.timer);
       bubbles.clear();
       // Before the socket goes: releasing the microphone is the one piece of teardown with a
