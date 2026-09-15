@@ -43,25 +43,41 @@ This is the part worth reading carefully, because it is the difference between t
 most video products — and because Vivoh.Earth makes a **different trade than its sibling
 [Wallflower.tv](https://wallflower.tv)**, which shares this codebase.
 
-**The content key never reaches the server.** It is derived in the browser from the secret
-after the `#` in the share link, and browsers never transmit a fragment. There is no content
-key in D1 — the column was dropped in migration `0010`. We could not decrypt your broadcast
-if we were compelled to.
+**Media is encrypted browser to browser.** Frames are sealed before they leave the publisher
+and opened in the viewer; the relay, the CDN and every network between them carry ciphertext
+only. That part is structural and nothing here can weaken it.
 
-**Who may watch is a separate question, and we answer it.** With *Require sign-in* on (the
-default), the Worker refuses to mint a viewer token to anyone without a session. That is real
-access control, and unlike the encryption it **depends on us**: we are in a position to grant
-it, and in principle to be compelled to.
+**The key is in D1, as of migration `0020` (2026-09-15).** This reversed the deployment's
+central property, deliberately. Until that date the secret lived in the `#k=` fragment of the
+share link, browsers never transmitted it, and we genuinely could not decrypt a broadcast. Now
+`stream_keys` holds it and `GET /api/streams/:id/access` releases it to callers who pass the
+gate.
 
-Wallflower makes the opposite trade — it mixes a passcode into key derivation, so that nobody,
-including its operators, can let a viewer in. That is right for an anonymous audience and
-wrong here, where broadcasters need to know who is in the room. **Vivoh.Earth has no
-passcode.**
+What it bought: a link a person can be handed. `https://vivoh.earth/mooed` survives a calendar
+invite, a Slack paste and being read down a phone, none of which a 43-character fragment does
+— and a scheduled event's link has to work weeks before the broadcast exists. What it cost: we
+could produce a key under compulsion, and a breach of this database combined with a captured
+stream would yield plaintext.
+
+**So access control is now load-bearing rather than supplementary.** With *Require sign-in* on
+— the default, and the answer for any stream with no settings row — the Worker releases
+neither the key nor a viewer token without a session. It **depends on us**: we are in a
+position to grant it, and in principle to be compelled to.
+
+**Wallflower.tv and e2emoq.com still make the other trade**, and share this codebase. Both keep
+the key in the link fragment; Wallflower additionally mixes a passcode into derivation, so that
+nobody, including its operators, can admit a viewer. That is right for an anonymous audience
+and wrong for a company town hall, where the organiser needs to know who is in the room and the
+link has to survive being emailed around. **Vivoh.Earth has no passcode.**
+
+**Do not port migration 0020 back to either of them.** It removes the one property they exist
+for.
 
 Consequences worth stating plainly:
 
-- Anyone the share link reaches can decrypt the video. Treat forwarding the link as granting
-  access.
+- The share link is an address, not a secret. Forwarding it grants nothing on its own; whether
+  the recipient can watch is the sign-in gate's answer, which the broadcaster can change
+  mid-broadcast without changing the link.
 - Viewing is **attributed**: `watch_events` carries a real account id, so "who watched what,
   and when" is answerable by anyone holding the database. Still not collected: IP, IP hashes,
   fingerprints, location. See [`public/audience.html`](./public/audience.html).

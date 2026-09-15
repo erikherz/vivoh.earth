@@ -148,34 +148,54 @@ try {
   STEP(`broadcaster preview ${pub.w}x${pub.h} (${pub.tag})`);
 
   // Take the share link the way a broadcaster does — from the copy button — rather than
-  // rebuilding it. The link now carries the content key in its `#k=` fragment, so a
-  // reconstructed URL would be undecryptable and this would test the wrong thing.
+  // rebuilding it. Even now that the link is predictable, reading it off the button is what
+  // proves the BUTTON gives out the right thing, which is the only copy anyone actually sends.
   const shareUrl = await bc.evaluate(
     () => document.getElementById("copy-btn")?.getAttribute("data-share-url") ?? ""
   );
-  if (!/#k=/.test(shareUrl)) throw new Error(`share link carries no #k= secret: ${shareUrl}`);
-  STEP(`share link carries a key (${shareUrl.split("#")[0]}#k=…)`);
 
-  // THERE IS NO PASSCODE ON THIS DEPLOYMENT, and the link must say so by omission.
+  // THE LINK MUST CARRY NO SECRET — and note that this assertion is the exact INVERSE of what
+  // stood here until 15 September 2026. That inversion is the change, so it is spelled out
+  // rather than quietly relaxed.
   //
-  // What stood here asserted the opposite — that every share link carries `p=1` and every
-  // viewer is prompted — because it was ported from Wallflower, where that was true. It stopped
-  // being true here when the passcode was removed from key derivation and the UI entirely; see
-  // src/main.ts, "there is no passcode here, so the link carries the content key and nothing
-  // else". The assertion outlived the thing it described and failed the whole gate on a
-  // difference that is deliberate.
+  // Until then the key rode in `#k=` and this test demanded its presence. The key now lives
+  // server-side (migration 0020) and the link is a bare address, which is what lets it survive
+  // a calendar invite. A `#k=` reappearing here would mean the old path had been resurrected
+  // somewhere, and that half the site's copy had silently become wrong again.
   //
-  // Asserted positively rather than just deleted: `#k=` present, `p=1` absent. If a passcode is
-  // ever reintroduced, this fails loudly right here instead of the viewer silently hanging on a
-  // prompt that the rest of the test has no idea how to answer.
-  if (!/[#&]k=/.test(shareUrl)) throw new Error(`share link carries no content key: ${shareUrl}`);
-  if (/[#&]p=1/.test(shareUrl)) {
-    throw new Error(
-      `share link signals a passcode, but this deployment has none. If that is intentional, ` +
-        `this test needs the passcode-entry steps back: ${shareUrl}`
-    );
+  // `p=1` stays forbidden for the older reason: this deployment has no passcode, and a link
+  // that signalled one would hang the viewer on a prompt the rest of this test cannot answer.
+  const expected = new URL(shareUrl);
+  if (expected.hash) throw new Error(`share link carries a fragment, so a key has leaked back into it: ${shareUrl}`);
+  if (expected.search) throw new Error(`share link carries a query string: ${shareUrl}`);
+  if (!/^\/[a-z0-9]{5}$/.test(expected.pathname)) {
+    throw new Error(`share link is not a bare /<id> path: ${shareUrl}`);
   }
-  STEP("share link carries a key and signals no passcode, as this deployment intends");
+  STEP(`share link is the bare address (${shareUrl}) — no key in it`);
+
+  // And the key really was STORED. The viewer half is proved below by actually decoding; this
+  // is the narrower check, because a go-live that stored no key fails in the worst possible
+  // way — the broadcaster sees a healthy broadcast and every viewer sees nothing.
+  //
+  // POLLED, not sampled once. The share link exists on the page from the moment the view
+  // renders, but the key is written during go-live, which is several async steps later — a
+  // single immediate check raced it and reported a 404 for a broadcast that was merely still
+  // starting. Thirty seconds is far longer than go-live takes and short enough that a genuine
+  // failure to store still fails the gate rather than hanging it.
+  const liveId = expected.pathname.slice(1);
+  let keyOk = "never checked";
+  for (let i = 0; i < 30; i++) {
+    keyOk = await bc.evaluate(async (id) => {
+      const res = await fetch(`/api/streams/${id}/access`);
+      if (!res.ok) return `HTTP ${res.status}`;
+      const body = await res.json();
+      return /^[A-Za-z0-9_-]{43}$/.test(body?.secret ?? "") ? true : "malformed secret";
+    }, liveId);
+    if (keyOk === true) break;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  if (keyOk !== true) throw new Error(`the broadcast went live with no retrievable key: ${keyOk}`);
+  STEP("the content key is on the server and retrievable by the broadcaster");
 
   // Give the relay a beat to accept the first group before a viewer subscribes.
   await new Promise((r) => setTimeout(r, 5000));
@@ -216,8 +236,13 @@ try {
   STEP(`opening the share link as a viewer`);
   await vw.goto(shareUrl, { waitUntil: "networkidle2", timeout: 60000 });
 
-  // No passcode step: the `#k=` fragment in the link is the whole secret here, and the viewer
-  // subscribes as soon as the page reads it. The prompt this used to fill in does not exist.
+  // No passcode step and no fragment to carry. The viewer fetches the key from /access under
+  // its own session, then subscribes.
+  //
+  // Which is why the viewer context above HAS to be signed in: `require_auth` defaults on, and
+  // a signed-out viewer would now be refused the key rather than merely refused a token. If
+  // that sign-in is ever dropped from this suite, what follows tests nothing at all — it would
+  // sit on a sign-in screen and fail the frame check for the wrong reason entirely.
 
   // 640 rather than >0: a blank <canvas> reports 300x150 and would pass a naive check.
   await vw.waitForFunction(

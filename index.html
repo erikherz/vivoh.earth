@@ -2125,6 +2125,122 @@
             box-shadow: 0 4px 14px rgba(0, 212, 170, 0.3);
         }
         .cta-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0, 212, 170, 0.4); }
+        .cta-secondary {
+            background: transparent;
+            color: var(--text-primary);
+            border-color: var(--border-color);
+        }
+        .cta-secondary:hover { transform: translateY(-2px); border-color: #00d4aa; color: #00d4aa; }
+        :root.light .cta-secondary:hover { color: #00997e; border-color: #00997e; }
+        .cta-row { display: flex; gap: 0.85rem; justify-content: center; flex-wrap: wrap; }
+
+        /* ── Scheduling ────────────────────────────────────────────────────────────────
+           The form follows the label-left / fields-right shape Erik supplied as the target
+           UX, and collapses to stacked labels under 640px — a date, a time and a zone in a
+           row do not fit a phone, and shrinking them to fit produces three controls too
+           small to tap. */
+        .sched-page { max-width: 46rem; margin: 0 auto; padding: 1.5rem 0 3rem; }
+        .sched-page h2 { font-size: 1.6rem; margin-bottom: 0.4rem; }
+        .sched-intro { color: var(--text-secondary); line-height: 1.6; margin-bottom: 2rem; }
+        .sched-row {
+            display: grid;
+            grid-template-columns: 7.5rem 1fr;
+            gap: 1rem;
+            align-items: start;
+            margin-bottom: 1.4rem;
+        }
+        .sched-row > label:first-child {
+            padding-top: 0.6rem;
+            font-size: 0.92rem;
+            color: var(--text-secondary);
+        }
+        .sched-field { display: flex; flex-direction: column; gap: 0.35rem; }
+        .sched-page input[type="text"],
+        .sched-page input[type="date"],
+        .sched-page input[type="time"],
+        .sched-page textarea,
+        .sched-page select {
+            width: 100%;
+            padding: 0.6rem 0.75rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            /* 16px exactly. Anything smaller and iOS zooms the viewport on focus, which
+               shoves the rest of the form off-screen mid-entry. See the standing note about
+               input zoom — headless Chrome cannot reproduce it, so this is asserted, not seen. */
+            font: inherit;
+            font-size: 16px;
+        }
+        .sched-page textarea { min-height: 5.5rem; resize: vertical; }
+        .sched-page input:focus, .sched-page textarea:focus, .sched-page select:focus {
+            outline: 2px solid #00d4aa;
+            outline-offset: 1px;
+            border-color: transparent;
+        }
+        .sched-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+        .sched-sub { font-size: 0.8rem; color: var(--text-muted); }
+        .sched-legend { font-size: 0.85rem; font-weight: 600; color: var(--text-primary); margin-bottom: 0.4rem; }
+        .sched-toggle { display: flex; align-items: center; gap: 0.6rem; font-size: 0.92rem; }
+        .sched-error {
+            color: #ff6b6b;
+            font-size: 0.88rem;
+            line-height: 1.5;
+            margin: 0 0 1rem;
+        }
+        .sched-actions { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 2rem; }
+        .sched-btn {
+            padding: 0.65rem 1.4rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: transparent;
+            color: var(--text-primary);
+            font: inherit;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .sched-btn-primary { background: #00d4aa; border-color: #00d4aa; color: #06231d; }
+        .sched-btn:disabled { opacity: 0.55; cursor: default; }
+
+        .event-card {
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: var(--bg-secondary);
+            padding: 1rem 1.15rem;
+            margin-bottom: 0.85rem;
+        }
+        .event-card.canceled { opacity: 0.55; }
+        .event-card h3 { font-size: 1.05rem; margin: 0 0 0.3rem; }
+        .event-when { font-size: 0.9rem; color: var(--text-secondary); margin: 0 0 0.5rem; }
+        .event-desc { font-size: 0.9rem; color: var(--text-muted); line-height: 1.5; margin: 0 0 0.7rem; }
+        .event-link {
+            font-family: monospace;
+            font-size: 0.86rem;
+            background: var(--bg-tertiary);
+            padding: 2px 7px;
+            border-radius: 4px;
+            color: var(--text-primary);
+        }
+        .event-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.7rem; }
+        .event-actions button, .event-actions a {
+            padding: 0.4rem 0.9rem;
+            border-radius: 7px;
+            border: 1px solid var(--border-color);
+            background: transparent;
+            color: var(--text-primary);
+            font: inherit;
+            font-size: 0.87rem;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .event-actions .go-live { background: #00d4aa; border-color: #00d4aa; color: #06231d; font-weight: 600; }
+        .event-empty { color: var(--text-muted); line-height: 1.6; }
+
+        @media (max-width: 640px) {
+            .sched-row { grid-template-columns: 1fr; gap: 0.4rem; }
+            .sched-row > label:first-child { padding-top: 0; font-weight: 600; color: var(--text-primary); }
+            .sched-pair { grid-template-columns: 1fr; }
+        }
 
         .promo-section { margin-bottom: 2.75rem; }
         .promo-heading {
@@ -2283,6 +2399,12 @@
         @media (max-width: 600px) {
             .hero-title { font-size: 1.9rem; }
             .nav-btn { padding: 0.5rem 0.9rem; font-size: 0.9rem; }
+            /* Adding Events to the header pushed the row 115px past a 390px viewport — the
+               whole page scrolled sideways, measured rather than guessed. Both nav buttons
+               drop to their icons here; the icons are distinct (broadcast waves, a calendar)
+               and the destinations are two of the three things this header does. */
+            #nav-broadcast, #nav-events { padding: 0.5rem 0.65rem; }
+            #nav-broadcast span.nav-label, #nav-events span.nav-label { display: none; }
             /* Tighten the feature box so "Sub-second video and chat" fits one line */
             .hero-features { padding: 0.85rem 1.1rem; font-size: 1rem; gap: 0.45rem; }
             .hero-features li { gap: 0.5rem; }
@@ -2306,9 +2428,18 @@
             </a>
             <span class="tagline" id="site-tagline">Encrypted live events, with no attendee cap</span>
             <div class="header-right">
-                <a href="/broadcast" class="btn btn-primary nav-btn" id="nav-broadcast">
+                <!-- aria-label, not just the inner text: below 600px the label is display:none
+                     and a screen reader would otherwise announce an unnamed link. -->
+                <a href="/broadcast" class="btn btn-primary nav-btn" id="nav-broadcast" aria-label="Broadcast now">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
-                    Broadcast
+                    <span class="nav-label">Broadcast</span>
+                </a>
+                <!-- Events sits beside Broadcast rather than inside a menu because it is the
+                     other half of the same decision — now, or later — and a broadcaster who
+                     has scheduled something needs to find it again from any page. -->
+                <a href="/events" class="btn nav-btn" id="nav-events" aria-label="Your scheduled events">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                    <span class="nav-label">Events</span>
                 </a>
 <!-- The "Watch" nav entry and its /watch dialler page were removed. There is nothing a
                  viewer can usefully type: a bare stream id carries no key and now cannot even
@@ -2354,12 +2485,15 @@
                 </p>
                 <ul class="hero-features">
                     <li>No attendee cap &mdash; relay fan-out, not licensed conference seats</li>
-                    <li>End-to-end encrypted &mdash; the key is in your link, never on our servers</li>
-                    <li>Sub-second latency, in any modern browser, including iPhone</li>
+                    <li>Encrypted in the browser &mdash; the CDN carries ciphertext it cannot read</li>
+                    <li>Join from one link &mdash; <code>vivoh.earth/mooed</code>, nothing to install</li>
                     <li>Raise a hand, get called on, speak on camera to the whole audience</li>
                 </ul>
                 <p style="margin-top: 1.75rem;">
-                    <a href="/broadcast" class="cta cta-primary">Start a broadcast</a>
+                    <span class="cta-row">
+                        <a href="/broadcast" class="cta cta-primary">Broadcast now</a>
+                        <a href="/schedule" class="cta cta-secondary">Schedule an event</a>
+                    </span>
                 </p>
             </section>
 
@@ -2387,12 +2521,12 @@
                             </tr>
                             <tr>
                                 <th scope="row">Encryption</th>
-                                <td class="us">End to end. Your browser encrypts every frame; the key is derived from the part of the share link after the <code>#</code>, which browsers never send to a server.</td>
+                                <td class="us">End to end between browsers. Frames are sealed before they leave and opened in the viewer; the CDN and every relay carry ciphertext only.</td>
                                 <td class="them">Encrypted in transit to the vendor, then decrypted on the vendor's servers. No end-to-end option.</td>
                             </tr>
                             <tr>
                                 <th scope="row">What the vendor can see</th>
-                                <td class="us">Ciphertext. We cannot watch your event, and could not produce it if we were asked to. <a href="/trust">What we can and cannot see &rarr;</a></td>
+                                <td class="us">Not the stream &mdash; it never passes through us, and we keep no recording. We do hold the key, so this is what we <em>don't</em> do rather than what we <em>can't</em>. <a href="/trust">Read the whole trade &rarr;</a></td>
                                 <td class="them">The full video, audio and chat, for as long as they retain it.</td>
                             </tr>
                             <tr>
@@ -2472,7 +2606,7 @@
                     <div class="info-card">
                         <span class="card-icon">🔒</span>
                         <h4><a href="/trust" class="card-link">How you're protected</a></h4>
-                        <p>Your browser encrypts every frame before it leaves. The key lives in your share link and never reaches us, so we cannot watch your broadcast and could not hand it over if we were asked. Who may watch is a separate question, and one you control: require sign-in and only people you can see get in. <a href="/trust">What we can and cannot see &rarr;</a></p>
+                        <p>Your browser encrypts every frame before it leaves and the viewer's browser opens it; nothing in between ever holds a frame it can read. We hold the key and release it to the people you let in &mdash; which is what makes a bare link enough to join, and is a trade worth understanding before you rely on it. Who may watch is yours to set: require sign-in, and only people you can see by name get in. <a href="/trust">Read the whole trade &rarr;</a></p>
                     </div>
                 </div>
             </div>
@@ -2573,6 +2707,12 @@
             <div id="watch-room" class="room-panel hidden"></div>
         </div>
 
+        <!-- Scheduling. Both are built entirely by src/main.ts — initScheduleView() and
+             initEventsView() — because both are forms whose contents depend on who is signed
+             in and what they already have booked. Empty containers, like #watch-room above. -->
+        <div id="schedule-view" class="hidden"></div>
+        <div id="events-view" class="hidden"></div>
+
         <!-- TinyMoQ is gone from here deliberately: streams ride moq.pro, and the fleet path
              is dormant config. Naming it in the footer of every page claimed a dependency
              that is not in the media path. -->
@@ -2584,8 +2724,8 @@
             <div id="howitworks-panel" class="server-panel hidden">
                 <div class="security-panel">
                     <p>When you go live, your browser captures and encodes the media with native <strong>WebCodecs</strong>, <strong>encrypts every frame</strong>, and publishes it to the <strong>moq.pro</strong> CDN over <strong>QUIC</strong>. Viewers subscribe from the nearest relay and decrypt in the page. The CDN carries only ciphertext it cannot read.</p>
-                    <p>The key never reaches us. It is derived in your browser from the part of the share link after the <code>#</code>, which browsers never send to a server. <strong>We could not watch your broadcast if we were asked to.</strong></p><p>The other side of that: the link <em>is</em> the key, so anyone it reaches can decrypt. What stops them is <strong>Require sign-in</strong>, which is on by default &mdash; we refuse to connect anyone who is not signed in, and you see exactly who is watching. Be clear about the difference: the encryption does not depend on us and cannot be undone by us, while the access control does and can. We are in a position to grant it, and in principle to be compelled to.</p>
-                    <p>Each broadcast is reached through a short-lived <strong>moq.pro</strong> access token minted by Vivoh.Earth's own Cloudflare Worker. It is signed with a key whose public half alone was given to moq.pro, so the CDN can check our tokens and cannot forge one. Live chat is encrypted the same way: messages and display names are sealed in your browser under a key derived from the same link, so the chat server relays text it cannot read. That also means there is no moderation of chat &mdash; there is nothing for us to moderate.</p>
+                    <p>The key is held by Vivoh.Earth and released to the people you let in. That is what makes your event joinable from a bare link like <code>vivoh.earth/mooed</code>, which survives a calendar invite and can be read down a phone &mdash; and it is a real trade, because <strong>we could produce your key if we were compelled to</strong>. Until 15 September 2026 we could not, and if that is what you need, <strong>e2emoq.com</strong> and <strong>wallflower.tv</strong> still work the old way.</p><p>So <strong>Require sign-in</strong> is doing the work, and it is on by default: we hand out neither the key nor a connection to anyone who is not signed in, and you see exactly who is watching, by name. A stream we have no settings for is treated as sign-in-required, so the failure direction is closed rather than open. <a href="/trust">Read the whole trade &rarr;</a></p>
+                    <p>Each broadcast is reached through a short-lived <strong>moq.pro</strong> access token minted by Vivoh.Earth's own Cloudflare Worker. It is signed with a key whose public half alone was given to moq.pro, so the CDN can check our tokens and cannot forge one. Live chat is encrypted the same way: messages and display names are sealed in your browser under a key derived from the same secret, so the chat server relays text it never sees in the clear and stores none of it. That also means there is no moderation of chat &mdash; nothing readable is ever written down for anyone to go back to.</p>
                     <!-- Both further-reading links sit at the foot of this panel rather than in
                          the footer row. Someone who has just read what the transport is and what
                          protects them is the person who might want either; a visitor scanning the

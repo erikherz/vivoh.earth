@@ -64,16 +64,35 @@
 
   <div class="key">
     <p>
-      <strong>We cannot watch your broadcast.</strong> Not as a policy we promise to keep, but
-      because the key doesn't exist on our side. Your browser encrypts every frame before it
-      leaves, using a key derived from a secret that lives only in the part of your share link
-      after the <code>#</code> — and browsers never send that part to a server.
+      <strong>Your video is encrypted in your browser and decrypted in your viewers'.</strong>
+      Nothing in between ever handles a frame it can read — not the CDN that carries it, not the
+      relays that fan it out, not the networks in the middle. That part is structural, and no
+      policy of ours can weaken it.
     </p>
     <p>
-      So it never reaches our servers, our database, our logs, or the CDN that carries your
-      video. If we were asked for your stream, by anyone, we would have nothing to give.
+      <strong>We hold the key, and you should know it.</strong> Vivoh.Earth stores the key for
+      each event and releases it to the people you let in. That is what makes an event joinable
+      from a plain link like <code>vivoh.earth/mooed</code>. It also means that if a court
+      ordered us to produce the key, and someone had captured the encrypted stream, we could not
+      truthfully say we were unable to help.
+    </p>
+    <p>
+      That is a deliberate trade, and it is <strong>not</strong> the one our sibling products
+      make. e2emoq.com and wallflower.tv put the key in the part of the link after the
+      <code>#</code>, which browsers never transmit, so their operators genuinely cannot decrypt
+      anything. They pay for it with a link that breaks the moment a calendar invite or a chat
+      client trims it, and a secret nobody can read down a phone. If that is the trade you want,
+      use one of those instead — we build them too, and we would rather you were on the right
+      one.
     </p>
   </div>
+
+  <p>
+    <strong>This changed on 15 September 2026.</strong> Before that date Vivoh.Earth worked the
+    way e2eMoQ and Wallflower still do, and this page said we could not decrypt your stream.
+    That was true then and is not true now. Links issued before the change carry their key in
+    the fragment and remain beyond our reach; every link issued since does not.
+  </p>
 
   <h2>What each party sees</h2>
 
@@ -81,8 +100,11 @@
     <tr><th>Who</th><th>Sees</th><th>Cannot see</th></tr>
     <tr>
       <td>Us</td>
-      <td>That a broadcast happened, when, and how long</td>
-      <td>Your video, your audio, your chat, your location</td>
+      <td>That a broadcast happened, when, and how long. The <strong>key</strong>, and the
+          title and description of a scheduled event. Not the video itself — we store no
+          recording and the stream does not pass through us</td>
+      <td>Your location. Your video and audio and chat <em>in practice</em> — we never receive
+          them — but this is now a matter of what we do, not what we are able to do</td>
     </tr>
     <tr>
       <td>The CDN</td>
@@ -171,32 +193,38 @@
 
   <h2>Controlling who watches</h2>
 
-  <h3>The link is the key</h3>
+  <h3>The link is an address, not a key</h3>
   <p>
-    Anyone holding your complete share link can watch. Anyone without it cannot — not even
-    someone who knows your stream's name, and not us. Treat the link the way you'd treat a door
-    key, and send it through a channel you trust.
+    Your event link is <code>vivoh.earth/</code> and five characters. It carries no secret, so
+    forwarding it is not the same as handing over a key — and losing it to the wrong person is
+    recoverable, which it was not before. What decides whether someone holding it can actually
+    watch is the sign-in requirement below.
+  </p>
+  <p>
+    Send it anywhere a link goes: a calendar invite, a Slack message, an intranet page, the
+    bottom of an email. It survives all of them, which is precisely why it was worth changing.
   </p>
 
-  <h3>Requiring sign-in is the second lock, and it is on by default</h3>
+  <h3>Requiring sign-in is now the lock, and it is on by default</h3>
   <p>
-    The link carries the key, so anyone it reaches can decrypt the video. What decides whether
-    they can <em>receive</em> it is <strong>Require sign-in</strong>, which is ticked for every
-    new broadcast: we refuse to connect anyone who is not signed in to Vivoh.Earth, and the
-    broadcaster can see exactly who is watching, by name.
+    <strong>Require sign-in</strong> is ticked for every new broadcast. We refuse to hand the
+    key, or a connection, to anyone who is not signed in to Vivoh.Earth, and the broadcaster can
+    see exactly who is watching, by name.
   </p>
   <p>
-    Be exact about the difference between the two locks, because it matters more than it looks.
-    The encryption does not depend on us and cannot be undone by us — the key never arrives here,
-    so we could not decrypt your stream if we were compelled to. The sign-in requirement is the
-    opposite: <strong>we</strong> enforce it, which means we are in a position to grant it, and in
-    principle to be compelled to.
+    Read that as load-bearing rather than supplementary, because since 15 September 2026 it is.
+    When the key rode in the link there were two independent locks, and the encryption one did
+    not depend on us at all. Now there is one lock and <strong>we</strong> enforce it — which
+    means we are in a position to grant it, and in principle to be compelled to. A stream we
+    have no settings row for is treated as sign-in-required, so the failure direction is closed
+    rather than open.
   </p>
   <p>
-    Wallflower.tv, which shares this code, makes the other trade: a passcode mixed into the key
-    itself, so that nobody — including its operators — can let a viewer in. That is the right
-    design for an anonymous audience and the wrong one here, where broadcasters need to know who
-    is in the room. Vivoh.Earth does not have a passcode.
+    Wallflower.tv, which shares this code, makes the opposite trade: a passcode mixed into the
+    key itself, so that nobody — including its operators — can let a viewer in. That is the right
+    design for an anonymous audience and the wrong one for a company town hall, where the
+    organiser needs to know who is in the room and the link has to survive being emailed around.
+    Vivoh.Earth has no passcode.
   </p>
   <p>
     Turning a viewer's access off stops them joining immediately. Someone already watching stops
@@ -216,8 +244,14 @@
   <h3>Chat is protected the same way</h3>
   <p>
     Messages and display names are encrypted in your browser under a key derived from the same
-    link. Our chat server relays text it cannot read. That also means we cannot moderate chat —
-    there is nothing there for us to read.
+    secret as the video, through a different derivation, and our chat server relays text it
+    never sees in the clear. We do not read chat and we store none of it.
+  </p>
+  <p>
+    The same caveat applies as to the video, and for the same reason: since the key is ours,
+    that is a description of what we do rather than a limit on what we could do. It does mean
+    we cannot <em>moderate</em> chat in any practical sense — nothing readable is ever written
+    down, and there is nothing to go back and look at.
   </p>
 
   <h2>The room: when your audience can see each other</h2>
@@ -316,13 +350,23 @@
 
   <div class="limit">
     <p>
-      <strong>A link can't be recalled.</strong> Once you've sent it, anyone who receives it —
-      or is forwarded it — can watch. We can't revoke it for one person, because we can't decrypt
-      it either. What you can do is cut off <em>everyone</em>: <strong>New link</strong> starts a
-      fresh broadcast under a new address and a new key, so every copy of the old link stops
-      working — including ours, if we had kept one. Requiring sign-in is the finer instrument: it
-      cuts off anyone without an account, and lets you see who the rest are, without changing
-      your link or interrupting the broadcast.
+      <strong>We hold your key.</strong> This is the most important limit on the page and the
+      newest. Because the key is on our servers, the protection your broadcast has against
+      <em>us</em> — and against anyone who can compel us or breach us — is an access rule we
+      enforce, not a mathematical impossibility. We do not watch broadcasts, we keep no
+      recordings, and the stream itself never passes through our servers; but "we don't" is a
+      weaker sentence than "we can't", and we are not going to print the stronger one now that
+      it is false. If you need the stronger one, e2emoq.com and wallflower.tv still provide it.
+    </p>
+  </div>
+
+  <div class="limit">
+    <p>
+      <strong>A link can't be un-sent, but access can be withdrawn.</strong> Anyone forwarded
+      your link can try to join; whether they succeed is the sign-in requirement's answer, and
+      you can change it mid-broadcast without changing your link. <strong>New link</strong> is
+      the blunt instrument: a fresh address and a fresh key, so every copy of the old one stops
+      working at once. Neither can reach someone already watching who simply keeps recording.
     </p>
   </div>
 
@@ -359,10 +403,10 @@
     tests that try to break a promise and must fail:
   </p>
   <ul>
-    <li>Open a live stream without the <code>#</code> part of the link — the position we're in — and nothing decodes.</li>
+    <li>Ask for a stream's key without being signed in, on a stream that requires it, and be refused — the position an outsider is in.</li>
     <li>Watch what the chat server actually receives, and confirm the text isn't in it.</li>
     <li>Terminate a stream while a deliberately uncooperative viewer is watching, and confirm it stops anyway.</li>
-    <li>Read the database directly after a report is filed, and confirm no key is in it.</li>
+    <li>Read the database directly after a report is filed, and confirm the report carries no key — the reporter's evidence link is never stored.</li>
     <li>Try to join a room for a broadcast whose link we don't hold, and be refused.</li>
     <li>As an ordinary viewer, try to take the floor, take it from someone else, or push audio into a broadcast without being given it — and fail at all three.</li>
     <li>Confirm in the code that a microphone can be opened from exactly one place: the button the speaker presses.</li>

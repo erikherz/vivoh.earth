@@ -767,6 +767,13 @@ import {
   checkStreamExists,
   getStreamSettings,
   updateStreamSettings,
+  getStreamAccess,
+  putStreamKey,
+  getStreamEvent,
+  listEvents,
+  createEvent,
+  cancelEvent,
+  type ScheduledEvent,
   getLiveStats,
   getStreamViewers,
   type User,
@@ -803,7 +810,7 @@ import { createGeoStamp, type GeoStamp } from "./media/geo-stamp";
 // and watching, which is exactly the identity this app no longer holds. Rather than keep pages
 // that could only render blanks, the surface is gone. The kill switch was never part of them
 // and survives at /api/admin/kill and friends.
-type View = "landing" | "broadcast" | "watch";
+type View = "landing" | "broadcast" | "watch" | "schedule" | "events";
 
 // Generate a random stream ID (5 lowercase alphanumeric characters)
 function generateRandomId(): string {
@@ -900,6 +907,12 @@ async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
     // on the landing page rather than on a form that cannot succeed.
     return { view: "landing", streamId: "" };
   }
+
+  // The scheduling half of the product. Both are broadcaster-only pages and both are plain
+  // client routes — no stream id, nothing to resolve, so they short-circuit ahead of the id
+  // matching below.
+  if (path === "/schedule") return { view: "schedule", streamId: "" };
+  if (path === "/events") return { view: "events", streamId: "" };
 
   // Broadcast page: /broadcast — mint a fresh stream id and go live via the fleet. Rewrites
   // the URL to /?stream=<id> so a refresh keeps the same broadcast identity.
@@ -1144,14 +1157,22 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   // undefined and the viewer only fetches catalog.json, never video/hd).
   let streamName = `${NAMESPACE_PREFIX}/${streamId}.hang`;
 
-  // The content key's secret is minted HERE, in the browser, and travels only in the share
-  // link's `#…` fragment. Browsers never send a fragment to a server, so this value cannot
-  // reach our Worker, our database, our logs, or the CDN. That is what makes the guarantee
-  // structural rather than a promise: there is no code path by which we could decrypt a
-  // broadcast, because we never receive what would be required to.
+  // The content key's secret. Minted here in the browser, then sent to the Worker at go-live,
+  // which stores it in `stream_keys` and releases it to viewers who pass the access gate.
   //
-  // The corollary is that the link IS the access control. Anyone holding it can watch, and
-  // we cannot revoke that or recover it if the broadcaster loses it.
+  // This is Vivoh.Earth's deliberate divergence from e2emoq.com and wallflower.tv, where the
+  // same variable never leaves the page because it rides in the link's `#…` fragment. What it
+  // buys is a link a person can actually be GIVEN — https://vivoh.earth/mooed — which survives
+  // a calendar invite, a Slack paste, and being read down a phone. What it sells is the
+  // property that we could not decrypt even under compulsion. Migration 0020 states the trade
+  // in full; no page on this site claims the old property any more.
+  //
+  // So the access gate, not the link, is now the access control: `require_auth` is on by
+  // default and fails closed, and /access applies it before releasing this value.
+  //
+  // PROVISIONAL until go-live. A scheduled event already has a key — minted when the event was
+  // created, already sitting in everyone's invite — and that one wins. The go-live response
+  // says which key is in force, and the code below adopts it rather than this.
   let linkSecret = generateLinkSecret();
 
   // Public HKDF salt, handed to us at go-live and to viewers by /route. Held here so that a
@@ -1167,15 +1188,17 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   // there is nothing to reseal before a link has been set.
   let resealLink: () => void = () => {};
 
-  // No `&p=1`. Wallflower appends it to tell a viewer to ask for a passcode; there is no
-  // passcode here, so the link carries the content key and nothing else.
+  // The share link is now the bare URL. No `#k=` fragment, and no `&p=1` passcode marker
+  // either — Wallflower has both, this deployment has neither.
   //
-  // Which means the link is now the whole of the CRYPTOGRAPHIC story, and `require_auth` —
-  // on by default, see the checkbox below — is the access control. Anyone the link is
-  // forwarded to can decrypt the media; whether they can obtain a viewer token to receive it
-  // in the first place is a question the Worker answers, and it answers no without a session.
-  const shareUrl = () =>
-    `${window.location.origin}/${streamId}#k=${linkSecret}`;
+  // That makes it paste-safe in a way the old link was not. A fragment is silently dropped by
+  // plenty of the places an event link actually travels through, and when it was dropped the
+  // recipient got a link that looked perfect, loaded, connected, and decrypted nothing.
+  //
+  // It also moves the entire access question onto `require_auth` — on by default, see the
+  // checkbox below. Anyone who can pass that gate can watch; anyone who cannot, cannot,
+  // however the link reached them.
+  const shareUrl = () => `${window.location.origin}/${streamId}`;
 
   console.log(`MoQplay Broadcast - Stream: ${streamId}`);
 
@@ -1648,11 +1671,37 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       // prompt for here, because there is nothing a broadcaster can type to admit themselves.
       goLivePromise = buildPublisherClaim(streamId).then(async (claim) => {
         if (!claim) return null;
-        // Register the proof-of-link tag for this broadcast, so the Worker can require viewers
-        // to demonstrate they hold the share link before it mints them a token. Derived here
-        // because `linkSecret` never leaves this page in any other form.
+
+        // Settle the content key BEFORE deriving anything from it.
+        //
+        // This call is ordered ahead of go-live for one specific reason: the route tag below
+        // is derived from the secret, and viewers derive theirs from whatever /access hands
+        // them. On a SCHEDULED event those are different values — the event's key was minted
+        // weeks ago and wins — so deriving the tag from this page's freshly minted secret
+        // would register a tag no legitimate viewer could ever reproduce. /route would then
+        // answer "offline" to every single attendee of an event that was plainly live.
+        //
+        // putStreamKey(..., rotate: false) writes only if the stream has no key, and always
+        // returns the one actually on file. Adopting it here makes every later derivation —
+        // media, chat, room, the Link watermark — agree with what viewers will get.
+        const authoritative = await putStreamKey(streamId, linkSecret, false);
+        if (!authoritative) {
+          // Refusing to go live is the right failure. A broadcast whose key the server does
+          // not have is one nobody can join, and it would look completely healthy from here.
+          return {
+            eventId: null, relay: null, jwt: null, status: 0,
+            error: "Could not register this broadcast's key, so nobody would have been able to join.",
+          };
+        }
+        linkSecret = authoritative;
+
+        // Register the proof-of-link tag for this broadcast. It no longer proves possession of
+        // a secret only the viewer could have — the server hands that out now — so what it
+        // actually does here is stop a stranger sweeping the id space from collecting viewer
+        // tokens and pulling ciphertext onto our CDN bill. The access gate is what protects
+        // the content; this protects the egress.
         const routeTag = await deriveRouteTag(linkSecret, streamId);
-        return logBroadcastStart(streamId, getCdnOverride("publisher-cdn"), claim, routeTag);
+        return logBroadcastStart(streamId, getCdnOverride("publisher-cdn"), claim, routeTag, linkSecret);
       }).then(async (res) => {
         broadcastEventId = res?.eventId ?? null;
         const relay = res?.relay;
@@ -1696,6 +1745,10 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         if (res?.encrypted || streamEncrypted) {
           activeSalt = res?.salt ?? undefined;
           armPublisher(); // idempotent; covers the case where settings load lost the race
+          // The Worker is authoritative on the key, and says so twice — once to putStreamKey
+          // above and again here. Normally the same value; if the two ever disagree, this one
+          // is what /access will hand viewers, so this one wins.
+          if (res?.linkSecret) linkSecret = res.linkSecret;
           await deriveMediaKey(linkSecret, { streamId, salt: activeSalt });
           // The salt only exists NOW, so anything sealed before this moment was sealed under a
           // key no viewer can reproduce. A broadcaster who sets a link before going live would
@@ -2941,25 +2994,469 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
 }
 
 // Show login required overlay for watch
+// ── Scheduling ────────────────────────────────────────────────────────────────────────
+//
+// Vivoh.Earth's second way to start a broadcast. The ad hoc path is untouched and still the
+// fastest thing on the site: press Broadcast, you are live. This is the other case — the
+// all-hands three weeks out, whose link has to exist before the broadcast does so it can go
+// into a calendar invite.
+//
+// Both views are broadcaster-only and both are built here rather than in index.html, because
+// what they contain depends entirely on who is signed in.
+
+/** Zones offered in the picker, plus whatever the viewer's own browser reports. */
+const COMMON_TIMEZONES = [
+  "America/Los_Angeles", "America/Denver", "America/Chicago", "America/New_York",
+  "America/Sao_Paulo", "Europe/London", "Europe/Paris", "Europe/Berlin",
+  "Europe/Moscow", "Africa/Lagos", "Africa/Johannesburg", "Asia/Dubai",
+  "Asia/Kolkata", "Asia/Bangkok", "Asia/Manila", "Asia/Singapore",
+  "Asia/Shanghai", "Asia/Tokyo", "Australia/Sydney", "Pacific/Auckland", "UTC",
+];
+
+/** "Asia/Manila (GMT+08:00)" — the label shape in the reference UX. */
+function timezoneLabel(zone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: zone, timeZoneName: "longOffset" })
+      .formatToParts(new Date());
+    const offset = parts.find((p) => p.type === "timeZoneName")?.value ?? "";
+    return `${zone.replace(/_/g, " ")} (${offset || "GMT"})`;
+  } catch {
+    // An unknown zone is not worth throwing over — show the raw id and let the Worker judge.
+    return zone;
+  }
+}
+
 /**
- * A share link whose `#k=` fragment is missing or was stripped. Common causes: the link was
- * re-typed, passed through something that drops fragments, or only the stream id was shared.
- * Nothing here can be fixed by signing in — without the fragment the stream is undecryptable
- * by anyone, us included, so the only remedy is to obtain the complete link.
+ * A date and a time as the broadcaster typed them, in the zone they chose, as UTC.
+ *
+ * `new Date("2026-10-01T09:00")` uses the BROWSER's zone, which is the bug this exists to
+ * avoid: someone in London scheduling a 9am Manila town hall would have booked 9am London.
+ * There is no standard API for "parse this wall time in that zone", so the offset is measured
+ * — format the candidate instant in the target zone, see how far off it landed, and correct.
+ * One correction is enough except within an hour of a DST transition, so it runs twice.
+ */
+function wallTimeToUtcIso(date: string, time: string, zone: string): string | null {
+  if (!date || !time) return null;
+  const naive = Date.parse(`${date}T${time}:00Z`);
+  if (!Number.isFinite(naive)) return null;
+
+  let guess = naive;
+  for (let i = 0; i < 2; i++) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone, hour12: false,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    }).formatToParts(new Date(guess));
+    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? "0");
+    // Intl renders midnight as hour 24 in some engines; Date.UTC handles the rollover.
+    const asUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour") % 24, get("minute"), get("second"));
+    const drift = asUtc - guess;
+    if (drift === 0) break;
+    guess = naive - (drift - (naive - guess));
+  }
+  return new Date(guess).toISOString();
+}
+
+/** Show one of the top-level views and hide the rest. */
+function showOnly(id: string): HTMLElement | null {
+  for (const v of ["landing-view", "broadcast-view", "watch-view", "schedule-view", "events-view"]) {
+    document.getElementById(v)?.classList.toggle("hidden", v !== id);
+  }
+  return document.getElementById(id);
+}
+
+/**
+ * Broadcaster-only pages share one gate.
+ *
+ * Renders into the container it was GIVEN. The first version of this called
+ * showLoginRequired(), which writes into `#broadcast-view` — a container showOnly() has just
+ * hidden — so a signed-out visitor to /schedule got a header, a footer, and a completely empty
+ * page between them. It looked like the route was broken rather than like a sign-in prompt,
+ * and nothing in the source read as wrong; it only showed up in a screenshot.
+ */
+function requireBroadcaster(user: User | null, container: HTMLElement): boolean {
+  if (user) return true;
+
+  const panel = document.createElement("div");
+  panel.className = "login-required";
+  panel.style.cssText = "text-align:center;padding:2.5rem 1.5rem;max-width:34em;margin:0 auto;";
+  const h = document.createElement("h2");
+  h.textContent = "Sign in to schedule events";
+  const p = document.createElement("p");
+  p.style.cssText = "color:var(--text-secondary);line-height:1.55;";
+  p.textContent =
+    "Scheduling reserves a broadcast link and prepares its key, so it needs an account that is " +
+    "approved to broadcast.";
+  const cta = document.createElement("p");
+  cta.style.marginTop = "1.5rem";
+  const link = document.createElement("a");
+  link.href = "/api/auth/google/login";
+  link.className = "cta cta-primary";
+  link.textContent = "Sign in";
+  cta.append(link);
+  panel.append(h, p, cta);
+  container.replaceChildren(panel);
+  return false;
+}
+
+function initScheduleView(user: User | null): void {
+  const view = showOnly("schedule-view");
+  if (!view) return;
+  if (!requireBroadcaster(user, view)) return;
+
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const zones = [browserZone, ...COMMON_TIMEZONES.filter((z) => z !== browserZone)];
+
+  const page = document.createElement("div");
+  page.className = "sched-page";
+  page.innerHTML = `
+    <h2>Schedule an event</h2>
+    <p class="sched-intro">
+      You will get a link straight away. Put it in the invite &mdash; it works from now until
+      the event is over, and it is the same link you broadcast to on the day.
+    </p>
+    <p class="sched-error hidden" id="sched-error" role="alert"></p>
+    <div class="sched-row">
+      <label for="sched-title">Title</label>
+      <div class="sched-field">
+        <input type="text" id="sched-title" maxlength="128" autocomplete="off">
+        <span class="sched-sub"><span id="sched-title-count">0</span> / 128</span>
+      </div>
+    </div>
+    <div class="sched-row">
+      <label for="sched-desc">Description</label>
+      <div class="sched-field">
+        <textarea id="sched-desc" maxlength="2000"></textarea>
+        <span class="sched-sub">Shown to people who open the link before you go live.</span>
+      </div>
+    </div>
+    <div class="sched-row">
+      <label>Schedule</label>
+      <div class="sched-field">
+        <div class="sched-pair">
+          <div class="sched-field">
+            <span class="sched-legend">Start</span>
+            <input type="date" id="sched-start-date">
+            <input type="time" id="sched-start-time">
+          </div>
+          <div class="sched-field">
+            <span class="sched-legend">End</span>
+            <input type="date" id="sched-end-date">
+            <input type="time" id="sched-end-time">
+          </div>
+        </div>
+        <label class="sched-toggle" style="margin-top:0.9rem;">
+          <input type="checkbox" id="sched-recurring">
+          <span>Recurring event</span>
+        </label>
+        <select id="sched-recurrence" class="hidden" style="margin-top:0.5rem;">
+          <option value="daily">Every day</option>
+          <option value="weekly" selected>Every week</option>
+          <option value="monthly">Every month</option>
+        </select>
+        <div style="margin-top:0.9rem;">
+          <span class="sched-legend">Time zone</span>
+          <select id="sched-timezone"></select>
+        </div>
+      </div>
+    </div>
+    <div class="sched-actions">
+      <a href="/events" class="sched-btn">My events</a>
+      <button type="button" class="sched-btn sched-btn-primary" id="sched-save">Schedule it</button>
+    </div>`;
+  view.replaceChildren(page);
+
+  const tzSelect = page.querySelector("#sched-timezone") as HTMLSelectElement;
+  for (const z of zones) {
+    const opt = document.createElement("option");
+    opt.value = z;
+    opt.textContent = timezoneLabel(z);
+    tzSelect.append(opt);
+  }
+  tzSelect.value = browserZone;
+
+  const titleInput = page.querySelector("#sched-title") as HTMLInputElement;
+  const titleCount = page.querySelector("#sched-title-count") as HTMLElement;
+  titleInput.addEventListener("input", () => { titleCount.textContent = String(titleInput.value.length); });
+
+  const recurring = page.querySelector("#sched-recurring") as HTMLInputElement;
+  const recurrence = page.querySelector("#sched-recurrence") as HTMLSelectElement;
+  recurring.addEventListener("change", () => recurrence.classList.toggle("hidden", !recurring.checked));
+
+  const errorEl = page.querySelector("#sched-error") as HTMLElement;
+  const fail = (msg: string) => {
+    errorEl.textContent = msg;
+    errorEl.classList.remove("hidden");
+    errorEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
+
+  const saveBtn = page.querySelector("#sched-save") as HTMLButtonElement;
+  saveBtn.addEventListener("click", async () => {
+    errorEl.classList.add("hidden");
+
+    const title = titleInput.value.trim();
+    if (!title) return fail("Give the event a title — it is what attendees see before you go live.");
+
+    const zone = tzSelect.value;
+    const startsAt = wallTimeToUtcIso(
+      (page.querySelector("#sched-start-date") as HTMLInputElement).value,
+      (page.querySelector("#sched-start-time") as HTMLInputElement).value,
+      zone
+    );
+    if (!startsAt) return fail("Pick a start date and a start time.");
+
+    const endDate = (page.querySelector("#sched-end-date") as HTMLInputElement).value;
+    const endTime = (page.querySelector("#sched-end-time") as HTMLInputElement).value;
+    // A half-filled end is a mistake, not an omission: someone typed a date and moved on.
+    // Treating it as "no end" would silently discard what they entered.
+    if ((endDate && !endTime) || (!endDate && endTime)) {
+      return fail("The end needs both a date and a time, or neither.");
+    }
+    const endsAt = endDate && endTime ? wallTimeToUtcIso(endDate, endTime, zone) : null;
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Scheduling…";
+    const result = await createEvent({
+      title,
+      description: (page.querySelector("#sched-desc") as HTMLTextAreaElement).value.trim() || null,
+      starts_at: startsAt,
+      ends_at: endsAt,
+      timezone: zone,
+      recurrence: recurring.checked ? (recurrence.value as "daily" | "weekly" | "monthly") : null,
+    });
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Schedule it";
+
+    if (result.error || !result.event) return fail(result.error ?? "Could not schedule the event.");
+    // Straight to the list, where the new event's link is right there to copy. Staying on a
+    // cleared form would make a broadcaster wonder whether it saved.
+    window.location.href = "/events";
+  });
+}
+
+async function initEventsView(user: User | null): Promise<void> {
+  const view = showOnly("events-view");
+  if (!view) return;
+  if (!requireBroadcaster(user, view)) return;
+
+  const page = document.createElement("div");
+  page.className = "sched-page";
+  page.innerHTML = `
+    <h2>Your events</h2>
+    <p class="sched-intro">Each link works from now until the event is over.</p>
+    <div id="events-list"><p class="event-empty">Loading…</p></div>
+    <div class="sched-actions">
+      <a href="/broadcast" class="sched-btn">Broadcast now</a>
+      <a href="/schedule" class="sched-btn sched-btn-primary">Schedule an event</a>
+    </div>`;
+  view.replaceChildren(page);
+
+  const list = page.querySelector("#events-list") as HTMLElement;
+  const paint = (events: ScheduledEvent[]) => {
+    if (!events.length) {
+      list.innerHTML = `<p class="event-empty">Nothing scheduled yet.</p>`;
+      return;
+    }
+    list.replaceChildren();
+    for (const ev of events) {
+      const card = document.createElement("div");
+      card.className = `event-card${ev.canceled ? " canceled" : ""}`;
+
+      const h = document.createElement("h3");
+      h.textContent = ev.title;
+
+      const when = document.createElement("p");
+      when.className = "event-when";
+      const starts = new Date(ev.next_starts_at);
+      const recurring = ev.recurrence ? ` · repeats ${ev.recurrence}` : "";
+      when.textContent = ev.canceled
+        ? "Cancelled"
+        : starts.toLocaleString(undefined, {
+            weekday: "short", month: "short", day: "numeric",
+            hour: "numeric", minute: "2-digit", timeZoneName: "short",
+          }) + recurring;
+
+      card.append(h, when);
+
+      if (ev.description) {
+        const d = document.createElement("p");
+        d.className = "event-desc";
+        d.textContent = ev.description;
+        card.append(d);
+      }
+
+      const linkRow = document.createElement("p");
+      linkRow.style.cssText = "margin:0;font-size:0.88rem;";
+      const code = document.createElement("span");
+      code.className = "event-link";
+      code.textContent = `${location.origin}${ev.url}`;
+      linkRow.append(code);
+      card.append(linkRow);
+
+      const actions = document.createElement("div");
+      actions.className = "event-actions";
+
+      if (!ev.canceled) {
+        const copy = document.createElement("button");
+        copy.textContent = "Copy link";
+        copy.addEventListener("click", async () => {
+          // The tick means "it is on your clipboard", never "you clicked me" — the same rule
+          // the broadcast page's Copy follows, and for the same reason: a refused clipboard
+          // write is invisible, and the broadcaster pastes whatever was there before.
+          try {
+            await navigator.clipboard.writeText(`${location.origin}${ev.url}`);
+            copy.textContent = "Copied";
+          } catch {
+            copy.textContent = "Press ⌘C";
+            const sel = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(code);
+            sel?.removeAllRanges();
+            sel?.addRange(range);
+          }
+          window.setTimeout(() => { copy.textContent = "Copy link"; }, 2000);
+        });
+
+        const live = document.createElement("a");
+        live.className = "go-live";
+        // The broadcast view's own resume URL, so this opens the publishing page for THIS
+        // event's id rather than minting a new one.
+        live.href = broadcastUrl(ev.stream_id);
+        live.textContent = "Go live";
+
+        const cancel = document.createElement("button");
+        cancel.textContent = "Cancel event";
+        cancel.addEventListener("click", async () => {
+          if (!window.confirm(
+            `Cancel "${ev.title}"?\n\nAnyone who opens the link will be told it was cancelled. ` +
+            `You cannot un-cancel it, but you can schedule a replacement.`
+          )) return;
+          cancel.disabled = true;
+          if (await cancelEvent(ev.id)) paint(await listEvents());
+          else cancel.disabled = false;
+        });
+
+        actions.append(live, copy, cancel);
+      }
+
+      card.append(actions);
+      list.append(card);
+    }
+  };
+
+  paint(await listEvents());
+}
+
+/**
+ * A link with no key behind it.
+ *
+ * Rarer than it used to be, and it means something different now. When the key rode in the
+ * `#k=` fragment this was the everyday "your link got truncated" failure, and no amount of
+ * signing in could fix it. Since the key moved server-side (migration 0020) a viewer who is
+ * allowed in gets it automatically, so reaching this screen means the stream id itself has no
+ * key on file: a mistyped address, or a broadcast that was never actually started.
  */
 function showWatchKeyMissing() {
   const section = document.getElementById("watch-view")?.querySelector("section");
   if (!section) return;
   section.innerHTML = `
     <div class="login-required">
-      <h2>This link is missing its key</h2>
+      <h2>Nothing is set up at this link</h2>
       <p>
-        Vivoh.Earth streams are encrypted in the broadcaster's browser, and the key to decrypt
-        one travels only in the part of the link after the <code>#</code>. This link does not
-        carry it, so the stream cannot be played.
+        Vivoh.Earth streams are encrypted in the broadcaster's browser, and we release the key
+        to people the broadcaster lets in. There is no stream at this address for us to unlock
+        — most often that means the link was mistyped, or the broadcast was never started.
       </p>
-      <p>Ask the broadcaster for the complete link — and take care to copy all of it.</p>
+      <p>Check the link with whoever sent it to you.</p>
     </div>`;
+}
+
+/**
+ * The panel a viewer sees before a broadcast begins.
+ *
+ * Two quite different situations share it. Someone early to an ad hoc broadcast wants
+ * reassurance that the link works; someone who opened a calendar invite for next Thursday
+ * wants to know it is next Thursday and go away again. Passing the event (or null) is what
+ * separates them.
+ *
+ * Times are rendered in the VIEWER's own zone, not the broadcaster's. The event carries a
+ * timezone for the broadcaster's benefit, but a person in Manila reading "3pm New York" has
+ * been handed arithmetic rather than an answer.
+ */
+function renderWaitingRoom(event: ScheduledEvent | null): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "watch-waiting";
+  el.style.cssText = "text-align:center;padding:2rem 1.5rem;color:var(--text-muted);";
+
+  if (!event) {
+    el.textContent = "Waiting for broadcaster…";
+    return el;
+  }
+
+  if (event.canceled) {
+    const h = document.createElement("h2");
+    h.style.cssText = "margin:0 0 0.5rem;color:var(--text-primary);font-size:1.3rem;";
+    h.textContent = event.title;
+    const p = document.createElement("p");
+    p.style.cssText = "margin:0;line-height:1.55;";
+    p.textContent = "This event was cancelled.";
+    el.append(h, p);
+    return el;
+  }
+
+  const starts = new Date(event.next_starts_at);
+  const title = document.createElement("h2");
+  title.style.cssText = "margin:0 0 0.4rem;color:var(--text-primary);font-size:1.4rem;";
+  title.textContent = event.title;
+
+  const when = document.createElement("p");
+  when.style.cssText = "margin:0 0 0.75rem;color:var(--text-secondary);font-size:1rem;";
+  when.textContent = starts.toLocaleString(undefined, {
+    weekday: "long", month: "long", day: "numeric",
+    hour: "numeric", minute: "2-digit", timeZoneName: "short",
+  });
+
+  el.append(title, when);
+
+  if (event.description) {
+    const desc = document.createElement("p");
+    desc.style.cssText = "margin:0 auto 0.9rem;max-width:34em;line-height:1.55;";
+    desc.textContent = event.description;
+    el.append(desc);
+  }
+
+  const countdown = document.createElement("p");
+  countdown.style.cssText = "margin:0;font-size:0.92rem;";
+  el.append(countdown);
+
+  // setInterval, not requestAnimationFrame. A viewer waiting for an event that starts in an
+  // hour will switch tabs, and rAF stops in a background tab — the countdown would freeze at
+  // whatever it said when they looked away and be wrong when they came back. Same reasoning
+  // as the compositor's tick; see the hidden-tab fix.
+  const tick = () => {
+    const remaining = starts.getTime() - Date.now();
+    if (remaining <= 0) {
+      countdown.textContent = "Starting shortly — this page will begin playing on its own.";
+      return;
+    }
+    const mins = Math.floor(remaining / 60_000);
+    const days = Math.floor(mins / 1440);
+    const hours = Math.floor((mins % 1440) / 60);
+    const parts = [];
+    if (days) parts.push(`${days} day${days === 1 ? "" : "s"}`);
+    if (hours) parts.push(`${hours} hour${hours === 1 ? "" : "s"}`);
+    if (!days) parts.push(`${mins % 60} minute${mins % 60 === 1 ? "" : "s"}`);
+    countdown.textContent = `Starts in ${parts.join(", ")}.`;
+  };
+  tick();
+  const timer = window.setInterval(tick, 30_000);
+  // The waiting room is removed the moment the broadcast resolves, and an interval left
+  // running against a detached node is a leak that outlives the whole event.
+  new MutationObserver((_, obs) => {
+    if (!el.isConnected) { window.clearInterval(timer); obs.disconnect(); }
+  }).observe(document.body, { childList: true, subtree: true });
+
+  return el;
 }
 
 // promptPasscode() and its first/wrong/rotated variants lived here. There is no second
@@ -3366,17 +3863,19 @@ function openReportDialog(streamId: string, frame: CapturedFrame | null): void {
     }
   }
 
-  // There is no passcode variant to account for any more: the link carries `#k=` and that is
-  // the whole of the key material, so attaching it really does hand over the ability to
-  // decrypt. Wallflower has to hedge this text because on a passcode stream the link alone
-  // unlocks nothing — asking someone to share it under a false account of what it unlocks
-  // would be the wrong way round. Here the plain statement is the accurate one.
+  // Rewritten when the key moved server-side (migration 0020). The old text said "your link
+  // contains the key that decrypts this stream", which is now false — the link is an address.
+  // What the tick actually offers is different and has to be described as what it is: consent
+  // for an operator to open the stream with a key we already hold. Saying "shares your key"
+  // would overstate what the reporter is giving up; saying nothing would understate what they
+  // are authorising.
   const detail = card.querySelector("#report-evidence-detail");
   if (detail) {
     detail.textContent =
-      " Your link contains the key that decrypts this stream. Ticking this shares it with the " +
-      "operator, letting them see the stream before deciding. Leave it unticked and they will " +
-      "act on your description alone.";
+      " Ticking this lets an operator watch the stream while it is live, before deciding. We " +
+      "hold the key for this event, so what you are giving is permission rather than a secret " +
+      "— and we do not use it unless you tick. Leave it unticked and they act on your " +
+      "description alone.";
   }
 
   // Reconcile with the server. The evidence option appears only if there is a webhook to send
@@ -3805,31 +4304,81 @@ async function initWatchView(streamId: string, user: User | null) {
     // Worker skips Mode C and returns B/A — guaranteeing the viewer ends up watching.
     const noEnterprise = new URLSearchParams(window.location.search).get("noEnterprise") === "1";
 
-    // Prove we hold the share link before asking for a token. Derived here, ahead of the
-    // route call, because every /route request needs it — the first one, the offline polling
-    // loop, and each token renewal. A viewer without a fragment simply has no tag and gets
-    // "offline", which is the correct answer for someone who was never given the link.
-    const routeTag = await (async () => {
-      const secret = new URLSearchParams(location.hash.replace(/^#/, "")).get("k");
-      return secret ? deriveRouteTag(secret, streamId) : undefined;
-    })();
+    // Get the content key BEFORE anything else, because everything downstream derives from it:
+    // the route tag on the very first /route call, the media key, chat, the room.
+    //
+    // This is where Vivoh.Earth stops resembling its siblings. On e2emoq.com the same six
+    // lines read the `#k=` fragment and talk to nobody. Here the key is on the server and this
+    // is the request that asks for it — which means this is also where a viewer finds out they
+    // need to sign in, and it happens before a single relay byte is provisioned.
+    //
+    // A `#k=` fragment still WINS if one is present. Every link handed out before today
+    // carries one, and those recipients should not be told to go and sign in for a stream they
+    // could already decrypt.
+    const fragmentSecret = new URLSearchParams(location.hash.replace(/^#/, "")).get("k");
+    let watchSecret: string | null = fragmentSecret;
 
-    let routeInfo = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag });
+    if (!watchSecret) {
+      const access = await getStreamAccess(streamId);
+      if (access && "error" in access) {
+        if (access.error === "killed") {
+          stopForKill("viewer");
+          return;
+        }
+        // Signed out on a stream that requires it. Not a failure to explain — a door to open.
+        showWatchLoginRequired();
+        return;
+      }
+      watchSecret = access?.secret ?? null;
+    }
+
+    // No key yet is not the same as no key ever: an ad hoc broadcast writes its key at go-live,
+    // so an attendee who opened the link early is simply early. The waiting loop below handles
+    // it, and re-asks each time round.
+    const routeTag = watchSecret ? await deriveRouteTag(watchSecret, streamId) : undefined;
+
+    let routeInfo = routeTag
+      ? await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag })
+      : null;
     console.log(`[watch-timing] route resolved @ ${ms()} ->`, routeInfo?.relay ?? "(offline, polling)", routeInfo?.mode ? `(mode=${routeInfo.mode})` : "");
 
     if (!routeInfo) {
       const section = document.querySelector("#watch-view section");
-      const waitingEl = document.createElement("div");
-      waitingEl.className = "watch-waiting";
-      waitingEl.textContent = "Waiting for broadcaster…";
-      waitingEl.style.cssText = "text-align:center;padding:1.5rem;color:var(--text-muted);";
+
+      // Is this a scheduled event, or just an early arrival at an ad hoc broadcast?
+      //
+      // "Waiting for broadcaster…" is a fine answer to the second and a poor one to the first.
+      // Someone who opened a calendar invite for Thursday's all-hands on Tuesday deserves to
+      // be told it is Thursday, not left watching a spinner wondering if the link is broken.
+      const scheduled = await getStreamEvent(streamId);
+      const waitingEl = renderWaitingRoom(scheduled === "auth" ? null : scheduled);
       section?.appendChild(waitingEl);
 
       let stopped = false;
       window.addEventListener("beforeunload", () => { stopped = true; });
+      // Re-ask for the key each time round, not only for the route.
+      //
+      // An ad hoc broadcast has no key until its broadcaster goes live, so an attendee who
+      // arrived first got `watchSecret = null`, hence no route tag, hence a /route call that
+      // could never be answered — a viewer stuck forever on a broadcast that had by then
+      // started perfectly well. Whichever of the two appears first, this loop picks up the
+      // other on its next pass.
+      let currentTag = routeTag;
       while (!routeInfo && !stopped) {
         await new Promise((r) => setTimeout(r, 1500));
-        routeInfo = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag });
+        if (!watchSecret) {
+          const access = await getStreamAccess(streamId);
+          if (access && "error" in access) {
+            if (access.error === "killed") { waitingEl.remove(); stopForKill("viewer"); return; }
+            waitingEl.remove();
+            showWatchLoginRequired();
+            return;
+          }
+          watchSecret = access?.secret ?? null;
+          if (watchSecret) currentTag = await deriveRouteTag(watchSecret, streamId);
+        }
+        if (!currentTag) continue;
+        routeInfo = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag: currentTag });
       }
       waitingEl.remove();
       if (stopped) return;
@@ -3843,14 +4392,13 @@ async function initWatchView(streamId: string, user: User | null) {
     // The content key is per-broadcast and relay-independent, so it survives any
     // later relay change in the refresh loop without re-fetching.
     if (routeInfo.encrypted) {
-      // The key comes from OUR OWN URL fragment, never from the server response. The Worker
-      // has no content key to withhold or release, so this is not an access-control check —
-      // possessing the complete link simply is the ability to decrypt.
-      const frag = new URLSearchParams(location.hash.replace(/^#/, ""));
-      const linkSecret = frag.get("k");
+      // Settled above, before the route call: either the `#k=` fragment of a pre-2026-09-15
+      // link, or /access. Nothing re-reads the URL here — the waiting loop may have acquired
+      // the key on a later pass, and reading the fragment again would throw that away.
+      const linkSecret = watchSecret;
       watchLinkSecret = linkSecret ?? "";
       if (!linkSecret) {
-        console.warn("[crypto] share link carries no #k= secret; the stream cannot be decrypted");
+        console.warn("[crypto] no content key for this stream; it cannot be decrypted");
         showWatchKeyMissing();
         return;
       }
@@ -5045,6 +5593,10 @@ async function init() {
     initLandingView();
   } else if (view === "broadcast") {
     initBroadcastView(streamId, user);
+  } else if (view === "schedule") {
+    initScheduleView(user);
+  } else if (view === "events") {
+    await initEventsView(user);
   } else {
     await initWatchView(streamId, user);
   }

@@ -250,7 +250,11 @@ export default {
     const isStreamStatsPage = /^\/[a-z0-9]{5}\/stats$/.test(url.pathname);
     const isClearDataPage = url.pathname === "/cleardata";
     // Client-routed app pages (the SPA renders these; no matching asset file exists).
-    const isAppPage = url.pathname === "/broadcast" || url.pathname === "/watch";
+    const isAppPage =
+      url.pathname === "/broadcast" ||
+      url.pathname === "/watch" ||
+      url.pathname === "/schedule" ||
+      url.pathname === "/events";
 
     if (isStreamId || isStatsPage || isStreamStatsPage || isClearDataPage || isAppPage) {
       const indexUrl = new URL("/index.html", url.origin);
@@ -426,6 +430,13 @@ async function handleApiRoutes(
     // Stream settings routes.
     if (url.pathname.startsWith("/api/streams")) {
       return handleStreamRoutes(request, env, url);
+    }
+
+    // Scheduled events. Every route inside requires a session — the viewer-facing half lives
+    // at /api/streams/:id/event, under the stream routes above, because what a viewer needs
+    // is one event looked up by link, not a broadcaster's calendar.
+    if (url.pathname.startsWith("/api/events")) {
+      return handleEventRoutes(request, env, url);
     }
 
     // Admin routes
@@ -1119,6 +1130,150 @@ async function handleStreamRoutes(
     });
   }
 
+  // GET /api/streams/:stream_id/access — hand the content key to someone allowed to have it.
+  //
+  // This endpoint IS the divergence described in migration 0020. On e2emoq.com and
+  // wallflower.tv there is nothing here to serve: the key rides in the link's `#…` fragment
+  // and no server ever holds it. Here the key is ours, the link is only a name, and the gate
+  // below is therefore the whole of the access control rather than a supplement to a secret
+  // we could not see. It is written to fail closed, and to leak nothing on the way.
+  //
+  // The order of the checks is /route's order, for /route's reasons: existence, then
+  // termination, then identity. Every negative that is not a deliberate 410 answers 404, so a
+  // stranger sweeping the id space cannot tell a live event from a name never used.
+  const streamAccessMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/access$/);
+  if (method === "GET" && streamAccessMatch) {
+    const streamId = streamAccessMatch[1];
+
+    const keyRow = await env.DB
+      .prepare("SELECT link_secret FROM stream_keys WHERE stream_id = ?")
+      .bind(streamId)
+      .first<{ link_secret: string }>();
+    if (!keyRow) return new Response("not found", { status: 404 });
+
+    // Terminated streams get no key, checked before identity so the kill switch cannot be
+    // outlasted by simply signing in.
+    if (await streamIsKilled(env, streamId)) {
+      return Response.json({ error: "This stream has been terminated." }, { status: 410 });
+    }
+
+    // FAILS CLOSED on a missing row, and the `?? 1` is the point — see the identical
+    // expression in /route for why unknown has to mean required. It matters more here than it
+    // does there: what /route withholds is a relay token, what this withholds is the key.
+    const cfg = await env.DB
+      .prepare("SELECT require_auth FROM streams WHERE stream_id = ?")
+      .bind(streamId)
+      .first<{ require_auth: number }>();
+    if ((cfg?.require_auth ?? 1) === 1) {
+      const user = await getAuthenticatedUser(request, env);
+      if (!user) {
+        return Response.json({ error: "Authentication required" }, { status: 401 });
+      }
+    }
+
+    // No caching, by anyone, ever. This is key material moving over an ordinary GET; a shared
+    // cache holding the response would serve it to the next caller with the gate above
+    // skipped entirely.
+    return Response.json(
+      { secret: keyRow.link_secret },
+      { headers: { "Cache-Control": "no-store, private" } }
+    );
+  }
+
+  // GET /api/streams/:stream_id/event — what is scheduled at this link, for the waiting room.
+  //
+  // Gated exactly like /access, and deliberately so. Titles are plaintext to us (migration
+  // 0021 says why), which makes them plaintext to anyone we answer — so answering an
+  // unauthenticated stranger would hand the names of every company's internal town hall to
+  // whoever sweeps the id space. One rule, applied in both places: if you may not have the
+  // key, you may not have the title either.
+  const streamEventMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/event$/);
+  if (method === "GET" && streamEventMatch) {
+    const streamId = streamEventMatch[1];
+
+    const row = await env.DB
+      .prepare(`
+        SELECT id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+        FROM scheduled_events WHERE stream_id = ? ORDER BY id DESC LIMIT 1
+      `)
+      .bind(streamId)
+      .first<EventRow>();
+    // 404 is the ordinary answer for an ad hoc broadcast, which has no event. The client
+    // treats it as "nothing scheduled here" and falls back to the live-or-waiting view.
+    if (!row) return new Response("not found", { status: 404 });
+
+    const cfg = await env.DB
+      .prepare("SELECT require_auth FROM streams WHERE stream_id = ?")
+      .bind(streamId)
+      .first<{ require_auth: number }>();
+    if ((cfg?.require_auth ?? 1) === 1) {
+      const user = await getAuthenticatedUser(request, env);
+      if (!user) {
+        return Response.json({ error: "Authentication required" }, { status: 401 });
+      }
+    }
+
+    return Response.json({ event: eventJson(row, Date.now()) }, {
+      headers: { "Cache-Control": "no-store, private" },
+    });
+  }
+
+  // POST /api/streams/:stream_id/key — mint or rotate a stream's content key.
+  //
+  // Go-live calls it with the secret the broadcaster's browser just minted; New link calls it
+  // again with `rotate: true`. The distinction is load-bearing, not a convenience: without it
+  // a scheduled event would be re-keyed the moment its broadcaster went live, and every
+  // invite already sitting in someone's calendar would derive the wrong key and show nothing.
+  const streamKeyMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/key$/);
+  if (method === "POST" && streamKeyMatch) {
+    const streamId = streamKeyMatch[1];
+    const user = await getAuthenticatedUser(request, env);
+    if (!user) {
+      return Response.json({ error: "Authentication required" }, { status: 401 });
+    }
+    // Same admission as going live. Without it any signed-in account could write a key for any
+    // unused id and squat broadcast names it is not allowed to broadcast under — cheap to do
+    // in bulk, and invisible until a legitimate broadcaster could not schedule anything.
+    if (!(await canBroadcast(env.DB, user.email))) {
+      return Response.json({ error: "This account is not approved to broadcast." }, { status: 403 });
+    }
+
+    const body = await readJsonBody<{ link_secret?: string; rotate?: boolean }>(request);
+    if (!body?.link_secret || !isLinkSecret(body.link_secret)) {
+      return Response.json({ error: "link_secret required" }, { status: 400 });
+    }
+
+    const existing = await env.DB
+      .prepare("SELECT user_id FROM stream_keys WHERE stream_id = ?")
+      .bind(streamId)
+      .first<{ user_id: number | null }>();
+
+    // Only the account that minted a key may replace it. A null owner is a key from before
+    // this column meant anything; nobody has one yet, but treating null as "anyone" would be
+    // a re-key handed to whoever asked first.
+    if (existing && existing.user_id !== null && existing.user_id !== user.id) {
+      return Response.json({ error: "that broadcast name is not yours" }, { status: 403 });
+    }
+
+    if (existing && body.rotate) {
+      await env.DB
+        .prepare("UPDATE stream_keys SET link_secret = ?, user_id = ?, rotated_at = datetime('now') WHERE stream_id = ?")
+        .bind(body.link_secret, user.id, streamId)
+        .run();
+      return Response.json({ secret: body.link_secret, rotated: true }, {
+        headers: { "Cache-Control": "no-store, private" },
+      });
+    }
+
+    const stored = await resolveStreamKey(env, streamId, user.id, body.link_secret);
+    if (!stored) {
+      return Response.json({ error: "could not store the stream key" }, { status: 500 });
+    }
+    return Response.json({ secret: stored, rotated: false }, {
+      headers: { "Cache-Control": "no-store, private" },
+    });
+  }
+
   // GET /api/streams/:stream_id/route - Relay hosting the live broadcast (public).
   // 404 = no live broadcast. Viewers use this to co-locate on the publisher's relay.
   //
@@ -1218,8 +1373,9 @@ async function handleStreamRoutes(
     // THIS stream and return the connect path. Bypasses the fleet broker/direct logic below.
     const mp = await moqProAssign(env, streamId, "watch", viewerTtl);
     if (mp) {
-      // No content key to release: the viewer derives it from the `#k=` fragment of the link
-      // they were given. `encrypted` is a statement of fact about the stream, not a grant.
+      // No content key here, but not because there isn't one — /access holds that, behind the
+      // same gate this handler applies. Keeping them on separate endpoints keeps the key out
+      // of the response a viewer refetches on every reconnect and relay change.
       // The salt is the same public value the publisher got, so both derive the same key.
       return Response.json({
         relay: mp.relay,
@@ -1508,6 +1664,311 @@ const FALLBACK_FLEET_ENDPOINT = "https://cdn.gpcmoq.com";
 // siblings — is an allowed override target for ?publisher-cdn / ?viewer-cdn / cross-cluster
 // origin (see isFleetHost). This lets one deployment span multiple fleets on different
 // domains (e.g. ams.moqcdn.net default + ams.gpcmoq.com override) with no code change.
+// ── Scheduled events ──────────────────────────────────────────────────────────────────
+//
+// The other half of a virtual-events product. Ad hoc broadcasting is untouched: press
+// Broadcast, get an id, go live. This is for the town hall three weeks out, where the link
+// has to exist before the broadcast does so it can go in the invite.
+//
+// The ONE thing that makes this work is in resolveStreamKey(): a scheduled event's content
+// key is minted here, at creation, and the broadcaster's browser adopts it at go-live rather
+// than replacing it. Get that backwards and every invite already sent stops decrypting.
+
+const EVENT_TITLE_MAX = 128;
+const EVENT_DESCRIPTION_MAX = 2000;
+const EVENT_RECURRENCES = new Set(["daily", "weekly", "monthly"]);
+
+interface EventRow {
+  id: number;
+  stream_id: string;
+  title: string;
+  description: string | null;
+  starts_at: string;
+  ends_at: string | null;
+  timezone: string;
+  recurrence: string | null;
+  canceled_at: string | null;
+}
+
+/**
+ * A stream id nobody is using — not live, not already scheduled, and with no key on file.
+ *
+ * Wider than generateStreamId()'s check in the client, which only asks whether a broadcast is
+ * live right now. A scheduled event reserves its name for weeks, so "not currently live" is
+ * the wrong question: handing out a name that already has a key would silently point two
+ * events at one stream, and the second one's attendees would decrypt the first one's video.
+ */
+async function mintEventStreamId(env: Env): Promise<string | null> {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const bytes = crypto.getRandomValues(new Uint8Array(5));
+    let id = "";
+    for (const b of bytes) id += chars[b % chars.length];
+
+    const taken = await env.DB
+      .prepare(`
+        SELECT 1 AS hit FROM stream_keys WHERE stream_id = ?
+        UNION ALL
+        SELECT 1 AS hit FROM scheduled_events WHERE stream_id = ? AND canceled_at IS NULL
+        UNION ALL
+        SELECT 1 AS hit FROM broadcast_events WHERE stream_id = ? AND ended_at IS NULL
+        LIMIT 1
+      `)
+      .bind(id, id, id)
+      .first<{ hit: number }>();
+    if (!taken) return id;
+  }
+  return null;
+}
+
+/** ISO-8601 in, ISO-8601 UTC out. Null when the input is not a date we can place on a line. */
+function toUtcIso(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
+}
+
+/**
+ * When does this event next begin, at or after `from`?
+ *
+ * Recurrence is expanded on read rather than materialised as rows. The alternative — writing
+ * out occurrences — needs a horizon, and a standing weekly town hall would quietly stop
+ * appearing the week the horizon ran out. Computing it means a series has no end date and no
+ * maintenance job behind it.
+ *
+ * Month arithmetic is left to Date, which clamps: a 31st monthly series lands on the 28th in
+ * February rather than skidding into March.
+ */
+function nextOccurrence(startsAt: string, recurrence: string | null, from: number): string {
+  const first = Date.parse(startsAt);
+  if (!Number.isFinite(first) || !recurrence || first >= from) return startsAt;
+
+  if (recurrence === "monthly") {
+    const d = new Date(first);
+    const day = d.getUTCDate();
+    const cursor = new Date(first);
+    while (cursor.getTime() < from) {
+      const month = cursor.getUTCMonth();
+      cursor.setUTCDate(1);
+      cursor.setUTCMonth(month + 1);
+      // Clamp to the last day of the destination month, then restore the time of day.
+      const daysInMonth = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0)).getUTCDate();
+      cursor.setUTCDate(Math.min(day, daysInMonth));
+    }
+    return cursor.toISOString();
+  }
+
+  const stepMs = recurrence === "daily" ? 86_400_000 : 604_800_000;
+  const elapsed = from - first;
+  const steps = Math.ceil(elapsed / stepMs);
+  return new Date(first + steps * stepMs).toISOString();
+}
+
+/** The shape the client sees. `next_starts_at` is what a countdown should count to. */
+function eventJson(row: EventRow, now: number) {
+  return {
+    id: row.id,
+    stream_id: row.stream_id,
+    title: row.title,
+    description: row.description,
+    starts_at: row.starts_at,
+    next_starts_at: nextOccurrence(row.starts_at, row.recurrence, now),
+    ends_at: row.ends_at,
+    timezone: row.timezone,
+    recurrence: row.recurrence,
+    canceled: !!row.canceled_at,
+    url: `/${row.stream_id}`,
+  };
+}
+
+async function handleEventRoutes(
+  request: Request,
+  env: Env,
+  url: URL
+): Promise<Response> {
+  const method = request.method;
+  const path = url.pathname;
+  const now = Date.now();
+
+  const user = await getAuthenticatedUser(request, env);
+  if (!user) {
+    return Response.json({ error: "Authentication required" }, { status: 401 });
+  }
+
+  // GET /api/events — this broadcaster's own events.
+  //
+  // Scoped to user_id in the query itself rather than filtered afterwards. Cancelled ones are
+  // included: a cancelled event is something the broadcaster may want to see and explain, and
+  // hiding it makes the invite recipients' "this was cancelled" page look like a bug.
+  if (method === "GET" && path === "/api/events") {
+    const { results } = await env.DB
+      .prepare(`
+        SELECT id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+        FROM scheduled_events WHERE user_id = ? ORDER BY starts_at ASC LIMIT 200
+      `)
+      .bind(user.id)
+      .all<EventRow>();
+    return Response.json({ events: (results ?? []).map((r) => eventJson(r, now)) });
+  }
+
+  // POST /api/events — schedule one.
+  //
+  // Same admission as going live, and for the same reason: scheduling reserves a broadcast
+  // name and mints a key, so an account that may not publish must not be able to do it in
+  // advance either.
+  if (method === "POST" && path === "/api/events") {
+    if (!(await canBroadcast(env.DB, user.email))) {
+      return Response.json({ error: "This account is not approved to broadcast." }, { status: 403 });
+    }
+
+    const body = await readJsonBody<Record<string, unknown>>(request);
+    if (!body) return Response.json({ error: "invalid body" }, { status: 400 });
+
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    if (!title) return Response.json({ error: "A title is required." }, { status: 400 });
+    if (title.length > EVENT_TITLE_MAX) {
+      return Response.json({ error: `Title must be ${EVENT_TITLE_MAX} characters or fewer.` }, { status: 400 });
+    }
+
+    const description = typeof body.description === "string" ? body.description.trim().slice(0, EVENT_DESCRIPTION_MAX) : null;
+
+    const startsAt = toUtcIso(body.starts_at);
+    if (!startsAt) return Response.json({ error: "A start date and time is required." }, { status: 400 });
+    const endsAt = body.ends_at ? toUtcIso(body.ends_at) : null;
+    if (body.ends_at && !endsAt) {
+      return Response.json({ error: "That end date and time could not be read." }, { status: 400 });
+    }
+    // An end before its start is almost always a mis-keyed date, and it would render as a
+    // negative duration everywhere downstream. Refuse it at the door rather than storing it.
+    if (endsAt && Date.parse(endsAt) <= Date.parse(startsAt)) {
+      return Response.json({ error: "The event must end after it starts." }, { status: 400 });
+    }
+
+    const timezone = typeof body.timezone === "string" && /^[A-Za-z0-9_+\-/]{1,64}$/.test(body.timezone)
+      ? body.timezone
+      : "UTC";
+
+    const recurrence = typeof body.recurrence === "string" && EVENT_RECURRENCES.has(body.recurrence)
+      ? body.recurrence
+      : null;
+
+    const streamId = await mintEventStreamId(env);
+    if (!streamId) {
+      return Response.json({ error: "Could not reserve a broadcast name. Try again." }, { status: 503 });
+    }
+
+    // The key, minted now and not at go-live. This is the line the whole feature rests on —
+    // see resolveStreamKey(). Written BEFORE the event row so there is no window in which an
+    // event exists, its link is shareable, and /access 404s.
+    const secret = generateLinkSecretServerSide();
+    const stored = await resolveStreamKey(env, streamId, user.id, secret);
+    if (!stored) {
+      return Response.json({ error: "Could not prepare the event link. Try again." }, { status: 500 });
+    }
+
+    const row = await env.DB
+      .prepare(`
+        INSERT INTO scheduled_events (user_id, stream_id, title, description, starts_at, ends_at, timezone, recurrence)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+      `)
+      .bind(user.id, streamId, title, description, startsAt, endsAt, timezone, recurrence)
+      .first<EventRow>();
+    if (!row) return Response.json({ error: "Could not save the event." }, { status: 500 });
+
+    return Response.json({ event: eventJson(row, now) }, { status: 201 });
+  }
+
+  const eventIdMatch = path.match(/^\/api\/events\/(\d+)$/);
+  if (eventIdMatch) {
+    const id = Number(eventIdMatch[1]);
+    const owned = await env.DB
+      .prepare(`
+        SELECT id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+        FROM scheduled_events WHERE id = ? AND user_id = ?
+      `)
+      .bind(id, user.id)
+      .first<EventRow>();
+    // 404 rather than 403 for someone else's event: whether an id exists is not a fact a
+    // signed-in stranger needs.
+    if (!owned) return Response.json({ error: "not found" }, { status: 404 });
+
+    // PATCH — edit the details. The stream id and its key are deliberately NOT editable: they
+    // are what is already sitting in other people's calendars.
+    if (method === "PATCH") {
+      const body = await readJsonBody<Record<string, unknown>>(request);
+      if (!body) return Response.json({ error: "invalid body" }, { status: 400 });
+
+      const title = typeof body.title === "string" && body.title.trim()
+        ? body.title.trim().slice(0, EVENT_TITLE_MAX)
+        : owned.title;
+      const description = body.description === null
+        ? null
+        : typeof body.description === "string"
+          ? body.description.trim().slice(0, EVENT_DESCRIPTION_MAX)
+          : owned.description;
+      const startsAt = body.starts_at !== undefined ? toUtcIso(body.starts_at) : owned.starts_at;
+      if (!startsAt) return Response.json({ error: "That start date could not be read." }, { status: 400 });
+      const endsAt = body.ends_at === null
+        ? null
+        : body.ends_at !== undefined
+          ? toUtcIso(body.ends_at)
+          : owned.ends_at;
+      if (endsAt && Date.parse(endsAt) <= Date.parse(startsAt)) {
+        return Response.json({ error: "The event must end after it starts." }, { status: 400 });
+      }
+      const timezone = typeof body.timezone === "string" && /^[A-Za-z0-9_+\-/]{1,64}$/.test(body.timezone)
+        ? body.timezone
+        : owned.timezone;
+      const recurrence = body.recurrence === null
+        ? null
+        : typeof body.recurrence === "string" && EVENT_RECURRENCES.has(body.recurrence)
+          ? body.recurrence
+          : owned.recurrence;
+
+      const row = await env.DB
+        .prepare(`
+          UPDATE scheduled_events
+          SET title = ?, description = ?, starts_at = ?, ends_at = ?, timezone = ?, recurrence = ?,
+              updated_at = datetime('now')
+          WHERE id = ? AND user_id = ?
+          RETURNING id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+        `)
+        .bind(title, description, startsAt, endsAt, timezone, recurrence, id, user.id)
+        .first<EventRow>();
+      if (!row) return Response.json({ error: "Could not save the change." }, { status: 500 });
+      return Response.json({ event: eventJson(row, now) });
+    }
+
+    // DELETE — cancel, never erase. Somebody is holding this link; they are owed an
+    // explanation on the page rather than a stream that never starts.
+    if (method === "DELETE") {
+      await env.DB
+        .prepare("UPDATE scheduled_events SET canceled_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND user_id = ?")
+        .bind(id, user.id)
+        .run();
+      return Response.json({ canceled: true });
+    }
+  }
+
+  return Response.json({ error: "not found" }, { status: 404 });
+}
+
+/**
+ * The same 32 random bytes, base64url, that the browser's generateLinkSecret() produces.
+ *
+ * Duplicated rather than imported because src/crypto/media-crypto.ts is a browser module and
+ * pulling it into the Worker would drag WebCodecs-shaped code across the boundary. The two
+ * must agree on FORMAT only — isLinkSecret() is the check that says so.
+ */
+function generateLinkSecretServerSide(): string {
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  let bin = "";
+  for (const b of raw) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 function fleetEndpoints(env: Env): string[] {
   const list = (env.FLEET_ENDPOINT || FALLBACK_FLEET_ENDPOINT)
     .split(/[,\s]+/)
@@ -2242,6 +2703,9 @@ async function handleStatsRoutes(
       // Proof-of-link tag for this broadcast, derived by the publisher from the link secret.
       // Independent of the content key by construction — see deriveRouteTag().
       route_tag?: string;
+      // The content key this browser minted on page load. Only adopted if the stream does not
+      // already have one; the response says which key actually won. See resolveStreamKey().
+      link_secret?: string;
     };
     if (!body.stream_id) {
       return Response.json({ error: "stream_id required" }, { status: 400 });
@@ -2292,6 +2756,24 @@ async function handleStatsRoutes(
       return Response.json({ error: "could not resolve stream salt" }, { status: 500 });
     }
 
+    // ── 5. Settle the content key BEFORE any relay is provisioned. ───────────────────
+    //
+    // Ordered here on purpose. A broadcast that goes live with no key row is one nobody can
+    // join — a viewer's /access call 404s — and from the broadcaster's side it looks like a
+    // perfectly healthy broadcast, camera lit, bytes moving, audience of zero. So a failure
+    // to store the key has to fail the go-live, loudly, before anything is published.
+    //
+    // `storedKey` may not be what this browser offered: a scheduled event already has a key,
+    // and the stored one wins. The client MUST derive from what comes back, not from what it
+    // sent, or it will encrypt under a key none of its invited attendees hold.
+    if (!body.link_secret || !isLinkSecret(body.link_secret)) {
+      return Response.json({ error: "link_secret required" }, { status: 400 });
+    }
+    const storedKey = await resolveStreamKey(env, body.stream_id, user.id, body.link_secret);
+    if (!storedKey) {
+      return Response.json({ error: "could not store the stream key" }, { status: 500 });
+    }
+
     // Geo is resolved for the broadcaster's OWN "close to <city>" display and returned in
     // the response below. It is deliberately never persisted and never logged: coordinates
     // plus a timestamp identify a broadcaster far more precisely than an IP, and a VPN does
@@ -2303,14 +2785,19 @@ async function handleStatsRoutes(
     // (viewers key off it in /route). Unset the secret to fall back to the fleet path below
     // (see rollback.md).
     //
-    // Relay-blind E2E is MANDATORY and this Worker plays NO part in it. The content key is
-    // derived in the broadcaster's browser from a secret that lives only in the share link's
-    // `#…` fragment, which browsers never transmit. We therefore have nothing to mint, store,
-    // or hand out: `encrypted` is always true and `content_key` is always null.
+    // Encryption is MANDATORY on every path — the relay and the CDN see ciphertext and
+    // nothing else, and `encrypted` is always true.
     //
-    // This is the difference between not looking and not being able to. A subpoena, a rogue
-    // employee, or a breach of this database yields no way to decrypt any broadcast, past or
-    // present, because the material required never existed on this side.
+    // What changed in migration 0020, and what this comment used to claim otherwise: the key
+    // is ours now. It is stored in `stream_keys` above and handed to authorised viewers by
+    // /access, because a virtual event has to be joinable from a bare link in a calendar
+    // invite. So the honest statement is that we do not look, backed by an access gate that
+    // fails closed — not that we could not look, which is what the `#k=` fragment bought and
+    // this deployment has deliberately sold.
+    //
+    // `content_key` stays null: it named a DIFFERENT, older mechanism (a per-broadcast key
+    // minted server-side and pushed to the relay). Viewers get the link secret from /access
+    // and derive, exactly as they did from the fragment.
     const mp = await moqProAssign(env, body.stream_id, "publish", PUBLISHER_TOKEN_TTL);
     if (mp) {
       const result = await env.DB
@@ -2330,6 +2817,10 @@ async function handleStatsRoutes(
         jwt: mp.jwt,
         encrypted: true,
         content_key: null,
+        // The key this broadcast must actually encrypt under. Usually the one the browser
+        // offered; on a scheduled event, the one minted when the event was created. Deriving
+        // from anything else publishes a stream the invited audience cannot open.
+        link_secret: storedKey,
         // Public HKDF input. Viewers receive the identical value from /route, so both sides
         // derive the same key; rotating it re-keys the stream.
         salt: saltInfo.salt,
@@ -2345,14 +2836,13 @@ async function handleStatsRoutes(
     const relayHost = assigned?.host ?? null;
     const relayPort = assigned?.port ?? null;
 
-    // The fleet path is now on link-held keys too, like Mode A above. It previously minted a
-    // content key server-side and stored it on the broadcast row; that column no longer
-    // exists, so leaving it would have thrown on every insert. The client derives the key
-    // from the share link's #k= fragment regardless of which transport carried the stream,
-    // so `encrypted: true` with no key is the correct answer on every path.
+    // The fleet path shares Mode A's key handling: the secret was settled by resolveStreamKey
+    // above, before either branch, so which transport carries the stream changes nothing
+    // about how it is keyed. `content_key` names the older server-minted-and-pushed-to-relay
+    // mechanism and stays null on both paths.
     //
     // Still unreachable in production (MOQ_PRO_K is set, so Mode A returns first) and still
-    // unexercised end-to-end — but it no longer contradicts the guarantee.
+    // unexercised end-to-end.
     const encrypted = true;
     const contentKey = null;
 
@@ -2385,6 +2875,8 @@ async function handleStatsRoutes(
       jwt: publisherJwt,
       encrypted,
       content_key: contentKey,
+      // See the Mode A branch: the stored key wins, and the client derives from this.
+      link_secret: storedKey,
       // This was MISSING, and its absence was invisible rather than fatal.
       //
       // deriveFor() falls back to `wf-salt|<streamId>` when no salt is supplied. Publisher and
@@ -2935,6 +3427,48 @@ async function globalSalt(env: Env): Promise<string> {
     .bind(GLOBAL_SALT_ROW)
     .first<{ salt: string }>();
   return row?.salt ?? "genesis";
+}
+
+/**
+ * Does this look like a link secret we minted? 32 random bytes, base64url, unpadded.
+ *
+ * A shape check, not a security check — anyone authorised to write a key may write any 43
+ * characters they like, and it would still be their own broadcast they broke. Its job is to
+ * keep a truncated or half-encoded value out of the table, because the failure that causes
+ * arrives much later and looks like a decryption bug rather than a storage one.
+ */
+function isLinkSecret(value: string): boolean {
+  return /^[A-Za-z0-9_-]{43}$/.test(value);
+}
+
+/**
+ * Resolve a stream's content key, creating it from `offered` when the stream has none.
+ *
+ * The STORED key wins, and that rule is what makes scheduled events work. An event's key is
+ * minted the day the event is created; the invite goes into calendars carrying a bare link;
+ * weeks later the broadcaster's browser mints a fresh secret of its own on page load. If that
+ * fresh one were allowed to overwrite, every invite already sent would derive the wrong key
+ * and every attendee would sit in front of a black player. Rotation is a separate, explicit
+ * act — see `rotate` on POST /api/streams/:id/key.
+ *
+ * Re-reads rather than trusting the write: INSERT OR IGNORE is a no-op on conflict, so the
+ * caller needs the key that is in the table, not the one it hoped to put there.
+ */
+async function resolveStreamKey(
+  env: Env,
+  streamId: string,
+  userId: number | null,
+  offered: string
+): Promise<string | null> {
+  await env.DB
+    .prepare("INSERT OR IGNORE INTO stream_keys (stream_id, link_secret, user_id) VALUES (?, ?, ?)")
+    .bind(streamId, offered, userId)
+    .run();
+  const row = await env.DB
+    .prepare("SELECT link_secret FROM stream_keys WHERE stream_id = ?")
+    .bind(streamId)
+    .first<{ link_secret: string }>();
+  return row?.link_secret ?? null;
 }
 
 /**

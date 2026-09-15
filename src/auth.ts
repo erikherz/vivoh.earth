@@ -135,7 +135,16 @@ export interface BroadcastStart {
   jwt: string | null; // per-broadcast publisher token (scoped to this stream), or null
   path?: string | null; // moq.pro connect path "<root>/<stream>.hang" (Mode A); absent in fleet mode
   encrypted?: boolean; // true if this stream uses relay-blind E2E media encryption
-  contentKey?: string | null; // always null now: the key is derived from the link fragment
+  contentKey?: string | null; // always null: names an older server-minted-and-pushed mechanism
+  /**
+   * The key this broadcast must ACTUALLY encrypt under, as decided by the Worker.
+   *
+   * Usually the secret this page offered. On a scheduled event it is the one minted when the
+   * event was created, and already sitting in everyone's calendar invite — so the caller has
+   * to derive from this and discard its own. Deriving from the locally minted secret instead
+   * publishes a stream every invited attendee fails to open, with no error on either side.
+   */
+  linkSecret?: string | null;
   salt?: string | null;       // public HKDF salt; rotating it re-keys the stream
   /**
    * Why go-live failed, for the caller to show a person.
@@ -154,7 +163,8 @@ export async function logBroadcastStart(
   streamId: string,
   publisherCdn?: string,
   claim?: { pubkey: string; challenge: string; signature: string },
-  routeTag?: string
+  routeTag?: string,
+  linkSecret?: string
 ): Promise<BroadcastStart | null> {
   try {
     console.log("Attempting to log broadcast start for stream:", streamId, publisherCdn ? `(publisher CDN: ${publisherCdn})` : "");
@@ -179,6 +189,14 @@ export async function logBroadcastStart(
         // salt than the content key, so sending it here gives the Worker nothing to decrypt
         // with — see deriveRouteTag() in crypto/media-crypto.ts.
         route_tag: routeTag,
+        // The content key. On e2emoq.com and wallflower.tv this line would be a catastrophe —
+        // there the secret lives in the link fragment precisely so it can never be sent. Here
+        // it is the design: Vivoh.Earth holds the key so the link can be a bare URL that
+        // survives a calendar invite. See migration 0020 for the trade in full.
+        //
+        // The Worker may not accept it. A scheduled event already has a key and keeps it; the
+        // response says which one won, and the caller must use that.
+        link_secret: linkSecret,
       }),
     });
     if (!response.ok) {
@@ -203,6 +221,7 @@ export async function logBroadcastStart(
       path: data.path ?? null,
       encrypted: data.encrypted ?? false,
       contentKey: data.content_key ?? null,
+      linkSecret: data.link_secret ?? null,
       salt: data.salt ?? null,
     };
   } catch (e) {
@@ -210,6 +229,175 @@ export async function logBroadcastStart(
     // Never reached the Worker at all — offline, DNS, a captive portal. status 0 marks that
     // apart from a refusal, because the advice differs completely.
     return { eventId: null, relay: null, jwt: null, status: 0, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * The content key for a stream, from the server that now holds it.
+ *
+ * This function is the client half of the divergence in migration 0020, and it is the one
+ * call e2emoq.com and wallflower.tv do not have and must never gain. There the secret is in
+ * the link's `#…` fragment; a viewer reads it locally and no server is asked. Here the link
+ * is a bare URL and the key comes from us, behind the same sign-in gate as everything else.
+ *
+ * Distinguishes its failures, because the three mean completely different things to a person:
+ *   null      — no such stream, or it has no key (an id that was never used)
+ *   "auth"    — this stream requires sign-in and this browser has no session
+ *   "killed"  — an operator terminated it
+ */
+export type StreamAccess =
+  | { secret: string }
+  | { error: "auth" | "killed" }
+  | null;
+
+export async function getStreamAccess(streamId: string): Promise<StreamAccess> {
+  try {
+    const res = await fetch(`/api/streams/${streamId}/access`, { cache: "no-store" });
+    if (res.status === 401) return { error: "auth" };
+    if (res.status === 410) return { error: "killed" };
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data?.secret === "string" ? { secret: data.secret } : null;
+  } catch (e) {
+    console.error("Error fetching stream access:", e);
+    return null;
+  }
+}
+
+/**
+ * Store a stream's content key, or replace it.
+ *
+ * `rotate: false` is the polite form used before go-live — it writes only if the stream has no
+ * key yet, and returns whichever key is actually on file. `rotate: true` is New link, and it
+ * overwrites, which cuts off everyone holding the old link. The Worker, not this function,
+ * decides whether the caller is allowed to do either.
+ *
+ * Returns the key that is now in force, or null if the write was refused. The caller must
+ * treat null as a failure to go live rather than carrying on with its local secret: a
+ * broadcast encrypted under a key the server does not have is one nobody can join.
+ */
+export async function putStreamKey(
+  streamId: string,
+  linkSecret: string,
+  rotate: boolean
+): Promise<string | null> {
+  try {
+    const res = await fetch(`/api/streams/${streamId}/key`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ link_secret: linkSecret, rotate }),
+    });
+    if (!res.ok) {
+      console.error("Failed to store stream key:", res.status, await res.text());
+      return null;
+    }
+    const data = await res.json();
+    return typeof data?.secret === "string" ? data.secret : null;
+  } catch (e) {
+    console.error("Error storing stream key:", e);
+    return null;
+  }
+}
+
+// ── Scheduled events ──────────────────────────────────────────────────────────────────
+
+export interface ScheduledEvent {
+  id: number;
+  stream_id: string;
+  title: string;
+  description: string | null;
+  /** First occurrence, ISO-8601 UTC. */
+  starts_at: string;
+  /** The occurrence a countdown should count to — differs from starts_at on a series. */
+  next_starts_at: string;
+  ends_at: string | null;
+  timezone: string;
+  recurrence: "daily" | "weekly" | "monthly" | null;
+  canceled: boolean;
+  url: string;
+}
+
+export interface EventInput {
+  title: string;
+  description?: string | null;
+  starts_at: string;
+  ends_at?: string | null;
+  timezone: string;
+  recurrence?: "daily" | "weekly" | "monthly" | null;
+}
+
+/** The broadcaster's own events. Empty array on any failure — a list is not worth throwing over. */
+export async function listEvents(): Promise<ScheduledEvent[]> {
+  try {
+    const res = await fetch("/api/events", { cache: "no-store" });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.events) ? data.events : [];
+  } catch (e) {
+    console.error("Error listing events:", e);
+    return [];
+  }
+}
+
+/**
+ * Schedule an event. Returns the Worker's own refusal text on failure, never a generic one:
+ * "The event must end after it starts" is actionable and "Something went wrong" is not.
+ */
+export async function createEvent(input: EventInput): Promise<{ event?: ScheduledEvent; error?: string }> {
+  try {
+    const res = await fetch("/api/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return { error: data?.error || `Could not schedule the event (HTTP ${res.status}).` };
+    return { event: data?.event };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function updateEvent(id: number, input: Partial<EventInput>): Promise<{ event?: ScheduledEvent; error?: string }> {
+  try {
+    const res = await fetch(`/api/events/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return { error: data?.error || `Could not save the change (HTTP ${res.status}).` };
+    return { event: data?.event };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export async function cancelEvent(id: number): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/events/${id}`, { method: "DELETE" });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Is anything scheduled at this link?
+ *
+ * 404 is the ordinary answer for an ad hoc broadcast and means "nothing scheduled", not an
+ * error. 401 is distinguished because the waiting room has to say "sign in to see this event"
+ * rather than pretending there is no event.
+ */
+export async function getStreamEvent(streamId: string): Promise<ScheduledEvent | "auth" | null> {
+  try {
+    const res = await fetch(`/api/streams/${streamId}/event`, { cache: "no-store" });
+    if (res.status === 401) return "auth";
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.event ?? null;
+  } catch {
+    return null;
   }
 }
 
