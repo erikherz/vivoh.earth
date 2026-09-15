@@ -2486,7 +2486,7 @@
                 <ul class="hero-features">
                     <li>No attendee cap &mdash; relay fan-out, not licensed conference seats</li>
                     <li>Encrypted in the browser &mdash; the CDN carries ciphertext it cannot read</li>
-                    <li>Join from one link &mdash; <code>vivoh.earth/mooed</code>, nothing to install</li>
+                    <li>Join from one link &mdash; <code>vivoh.earth/abcde</code>, nothing to install</li>
                     <li>Raise a hand, get called on, speak on camera to the whole audience</li>
                 </ul>
                 <p style="margin-top: 1.75rem;">
@@ -2510,14 +2510,14 @@
                             <tr>
                                 <th scope="col"></th>
                                 <th scope="col" class="us">Vivoh.Earth</th>
-                                <th scope="col">Vimeo Venues &middot; Kaltura Virtual Events</th>
+                                <th scope="col">Virtual events platforms</th>
                             </tr>
                         </thead>
                         <tbody>
                             <tr>
                                 <th scope="row">Audience size</th>
                                 <td class="us">No cap. Viewers subscribe from the nearest relay, so the hundredth and the hundred-thousandth cost the same to serve.</td>
-                                <td class="them">Licensed attendee tiers with a hard ceiling &mdash; Venues is capped at 3,000.</td>
+                                <td class="them">Licensed attendee tiers with a hard ceiling &mdash; 3,000 is a common one.</td>
                             </tr>
                             <tr>
                                 <th scope="row">Encryption</th>
@@ -2551,9 +2551,14 @@
                      reader to "check before quoting this in a deal", which is advice for our own
                      sales side and reads as hedging to anyone else. Attribute the claims, date
                      them, and stop. -->
+                <!-- The column was named ("Vimeo Venues · Kaltura Virtual Events") until Erik
+                     genericised it on 2026-09-15. The 3,000 figure came with the naming, so it
+                     moved here rather than staying in a cell that no longer says whose ceiling
+                     it is — a number nobody can attribute is a number nobody has to believe. -->
                 <p class="compare-note">
                     The right-hand column describes conferencing-architecture event platforms as
-                    documented by their vendors, September 2026. Capabilities change; check theirs
+                    documented by their vendors, September 2026; the 3,000-attendee ceiling is
+                    Vimeo's published Venues limit. Capabilities change &mdash; check theirs
                     against ours directly.
                 </p>
             </div>
@@ -2724,7 +2729,7 @@
             <div id="howitworks-panel" class="server-panel hidden">
                 <div class="security-panel">
                     <p>When you go live, your browser captures and encodes the media with native <strong>WebCodecs</strong>, <strong>encrypts every frame</strong>, and publishes it to the <strong>moq.pro</strong> CDN over <strong>QUIC</strong>. Viewers subscribe from the nearest relay and decrypt in the page. The CDN carries only ciphertext it cannot read.</p>
-                    <p>The key is held by Vivoh.Earth and released to the people you let in. That is what makes your event joinable from a bare link like <code>vivoh.earth/mooed</code>, which survives a calendar invite and can be read down a phone &mdash; and it is a real trade, because <strong>we could produce your key if we were compelled to</strong>. Until 15 September 2026 we could not, and if that is what you need, <strong>e2emoq.com</strong> and <strong>wallflower.tv</strong> still work the old way.</p><p>So <strong>Require sign-in</strong> is doing the work, and it is on by default: we hand out neither the key nor a connection to anyone who is not signed in, and you see exactly who is watching, by name. A stream we have no settings for is treated as sign-in-required, so the failure direction is closed rather than open. <a href="/trust">Read the whole trade &rarr;</a></p>
+                    <p>The key is held by Vivoh.Earth and released to the people you let in. That is what makes your event joinable from a bare link like <code>vivoh.earth/abcde</code>, which survives a calendar invite and can be read down a phone &mdash; and it is a real trade, because <strong>we could produce your key if we were compelled to</strong>. Until 15 September 2026 we could not, and if that is what you need, <strong>e2emoq.com</strong> and <strong>wallflower.tv</strong> still work the old way.</p><p>So <strong>Require sign-in</strong> is doing the work, and it is on by default: we hand out neither the key nor a connection to anyone who is not signed in, and you see exactly who is watching, by name. A stream we have no settings for is treated as sign-in-required, so the failure direction is closed rather than open. <a href="/trust">Read the whole trade &rarr;</a></p>
                     <p>Each broadcast is reached through a short-lived <strong>moq.pro</strong> access token minted by Vivoh.Earth's own Cloudflare Worker. It is signed with a key whose public half alone was given to moq.pro, so the CDN can check our tokens and cannot forge one. Live chat is encrypted the same way: messages and display names are sealed in your browser under a key derived from the same secret, so the chat server relays text it never sees in the clear and stores none of it. That also means there is no moderation of chat &mdash; nothing readable is ever written down for anyone to go back to.</p>
                     <!-- Both further-reading links sit at the foot of this panel rather than in
                          the footer row. Someone who has just read what the transport is and what
