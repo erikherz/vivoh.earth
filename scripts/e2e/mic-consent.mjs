@@ -23,6 +23,21 @@
 // by loosening an assertion. The camera button is the reason the count is two and not one, and
 // it is checked BY NAME below so that "two call sites" cannot quietly become two of anything.
 //
+// RESTATED 15 Sep 2026, and this one reverses the September 14 restatement. `getUserMedia` is
+// back in our code, on purpose: a phone held in portrait published video lying on its side,
+// because where MediaStreamTrackProcessor is missing @moq/publish falls back to
+// `new VideoFrame(videoElement)`, which on iOS Safari returns un-rotated sensor pixels. The
+// cure is to capture ourselves and draw through a canvas, exactly as the broadcaster's
+// compositor already does — so `source="camera"` is gone and the count of getUserMedia calls
+// went from zero back to one.
+//
+// The consent boundary has still not moved, which is the only thing this file is about. What
+// changed is which side of it the device-opening call sits on, so the assertions below follow
+// it: instead of "no getUserMedia anywhere", it is now "exactly one, and it is inside
+// startGuestPublish" — a function already proven to be reachable from nowhere but the two
+// accept buttons. Loosening to "at most one, anywhere" would have been the wrong repair, and
+// deleting the check because it went red would have been worse.
+//
 // Why this needs guarding at all: browser microphone permission is per-origin and PERSISTS.
 // For anyone who has previously allowed the microphone on vivoh.earth, a stray
 // `startSpeaking()` in the floor handler produces no prompt, no error and no visible
@@ -99,22 +114,44 @@ const publishCode = codeLines(publish);
 
 console.log("microphone consent — the call site is the control\n");
 
-// 1. We open no devices ourselves. The element does, which is why the check is for ABSENCE:
-//    a getUserMedia reappearing here would be a second, unguarded way in.
-const gumLines = [...viewCode, ...publishCode].filter((l) => l.line.includes("getUserMedia"));
+// 1. EXACTLY ONE getUserMedia, and it is in the publish module — never in the view.
+//    room-view.ts is where the floor handlers and the reaction bar live, i.e. all the code
+//    that runs without anybody having agreed to anything. A device call appearing there is
+//    the specific accident this guard exists to catch.
+const viewGum = viewCode.filter((l) => l.line.includes("getUserMedia"));
 check(
-  "no getUserMedia anywhere in the room code",
-  gumLines.length === 0,
-  gumLines.map((l) => `line ${l.n}`).join(", ") || "none"
+  "no getUserMedia in room-view (the code that runs without consent)",
+  viewGum.length === 0,
+  viewGum.map((l) => `line ${l.n}`).join(", ") || "none"
 );
 
-// 2. Exactly one place creates a capturing element. `source="camera"` is what makes it capture,
-//    so that attribute and the element's creation are the thing to count.
-const capturing = publishCode.filter((l) => /setAttribute\("source", *"camera"\)/.test(l.line));
+const publishGum = publishCode.filter((l) => l.line.includes("getUserMedia"));
 check(
-  "exactly one place makes the element capture",
-  capturing.length === 1,
-  capturing.map((l) => `line ${l.n}`).join(", ") || "none found"
+  "exactly one getUserMedia, in the publish module",
+  publishGum.length === 1,
+  publishGum.map((l) => `line ${l.n}`).join(", ") || "none found"
+);
+
+// 2. ...and it is inside startGuestPublish, not merely somewhere in the same file. A helper
+//    added below that function would satisfy the count above while being callable from
+//    anywhere, which is exactly the hole the count alone cannot see.
+const startsAt = publishCode.findIndex((l) => /export async function startGuestPublish\(/.test(l.line));
+const nextExport = publishCode.findIndex(
+  (l, i) => i > startsAt && /^export (async )?function |^export const /.test(l.line)
+);
+const bodyEnd = nextExport === -1 ? publishCode.length : nextExport;
+const insideStart = publishGum.every((g) => {
+  const idx = publishCode.indexOf(g);
+  return idx > startsAt && idx < bodyEnd;
+});
+check(
+  "that getUserMedia is inside startGuestPublish, not a loose helper",
+  startsAt !== -1 && insideStart,
+  startsAt === -1
+    ? "startGuestPublish not found"
+    : startsAt !== -1 && insideStart
+      ? `body spans ${publishCode[startsAt].n}..${bodyEnd === publishCode.length ? "EOF" : publishCode[bodyEnd].n}`
+      : "found outside the function body"
 );
 
 // 3. ...and it is reached from exactly one call site, in room-view.

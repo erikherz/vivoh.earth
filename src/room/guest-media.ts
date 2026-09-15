@@ -22,6 +22,7 @@
 // only moves bytes.
 
 import { clearGuestKey, deriveGuestKey } from "../crypto/media-crypto";
+import { uprightVideoTrack, type UprightTrack } from "../media/upright-track";
 import type { GuestMedia } from "./room-client";
 
 /** Same shape main.ts uses for moq.pro Mode A: the path is in the URL, so `name` is empty. */
@@ -66,38 +67,81 @@ export async function startGuestPublish(opts: {
   await import("@moq/publish/element");
   const host = hiddenHost();
   const el = document.createElement("moq-publish") as HTMLElement & {
-    controls?: { source?: { set?: (v: unknown) => void } };
+    capture?: { in?: { source?: { set?: (v: unknown) => void } } };
+    audio?: { in?: { source?: { set?: (v: unknown) => void } } };
   };
 
-  // THE ELEMENT CAPTURES; WE DO NOT.
-  //
-  // The first version of this function obtained a MediaStream itself and tried to hand it over
-  // as `el.source.set(stream)`. That API does not exist. `source` is a plain setter taking one
-  // of "camera" | "screen" | "file", and `sources.video` / `sources.audio` take Source.Camera /
-  // Source.Microphone objects — classes that call getUserMedia THEMSELVES. So a stream was
-  // never attached, nothing was ever published, and the guard that was supposed to catch that
-  // matched one of the shapes it probed and reported success. Setting the documented attribute
-  // is both correct and the only shape that cannot drift silently: it is in `observedAttributes`.
-  //
-  // "camera" captures microphone AND camera; `muted` is how audio-only is expressed, so a
-  // guest who chose voice alone publishes the camera track muted rather than not at all. That
-  // is a real difference from not requesting it, and the consent prompt says video explicitly,
-  // so audio-only takes the narrower path below instead.
   el.setAttribute("name", "");
   el.setAttribute("url", moqUrl(opts.media.relay, opts.media.path, opts.media.jwt));
   // `source` waits for real media before announcing, which is what we want: an announced
   // broadcast with no tracks is a guest the host subscribes to and never hears.
   el.setAttribute("announce", "source");
-  el.setAttribute("source", "camera");
-  if (!opts.withVideo) {
-    // Audio-only: keep the element's capture but suppress the picture. `invisible` is the
-    // element's own term for "do not publish video".
-    el.setAttribute("invisible", "");
-  }
   host.appendChild(el);
+
+  // WE CAPTURE; THE ELEMENT DOES NOT — and this reverses what this comment said until
+  // 2026-09-15, so here is the whole reasoning rather than a note that it changed.
+  //
+  // The version before THAT tried `el.source.set(stream)`, an API which does not exist, and
+  // published nothing while a shape-probing guard reported success. The fix was to set the
+  // documented `source="camera"` attribute and let the element open the devices. Correct, and
+  // it worked — except on a phone held in portrait, where it produced video lying on its side.
+  //
+  // The cause is in @moq/publish and is not its fault: where MediaStreamTrackProcessor is
+  // missing (iOS Safari, exactly the platform with a camera rotation flag) it falls back to
+  // `new VideoFrame(videoElement)`, which returns the UN-ROTATED sensor pixels. Nothing
+  // downstream can recover that — the frames are correct, they are simply the wrong way up.
+  //
+  // So the guest now does what the BROADCASTER has always done: open the camera itself, draw
+  // it through a canvas (which renders as-displayed on every browser), and hand the resulting
+  // track to the element's encoder at `capture.in.source`. That is not a new or guessed seam —
+  // it is the same one src/main.ts publishes the compositor through, with the same
+  // settable-or-throw assertion, and it makes the two publish paths one shape instead of two.
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    // A guest is an inset a few hundred pixels wide. Asking for 1080p would spend a phone's
+    // battery and uplink on detail the compositor throws away when it scales the inset down.
+    video: opts.withVideo ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } } : false,
+  });
+
+  // Assert the seam rather than trust it. If upstream ever freezes these signals, the guest's
+  // media has nowhere to go and the turn would look live while sending nothing — which is
+  // precisely the failure the previous version of this code shipped. Fail at wiring time.
+  const settable = (v: unknown, where: string): { set(t: unknown): void } => {
+    if (!v || typeof (v as { set?: unknown }).set !== "function") {
+      throw new Error(
+        `[guest] ${where} is not a settable signal any more — @moq/publish moved or froze it. ` +
+          `The guest's media has nowhere to go, so the turn would look live and send nothing.`
+      );
+    }
+    return v as { set(t: unknown): void };
+  };
+
+  let upright: UprightTrack | null = null;
+  try {
+    const audioTrack = stream.getAudioTracks()[0];
+    if (audioTrack) settable(el.audio?.in?.source, "el.audio.in.source").set(audioTrack);
+
+    const cameraTrack = stream.getVideoTracks()[0];
+    if (opts.withVideo && cameraTrack) {
+      upright = await uprightVideoTrack(cameraTrack, 30);
+      settable(el.capture?.in?.source, "el.capture.in.source").set(upright.track);
+    }
+  } catch (e) {
+    // Never leave the camera light on after a failed turn. Releasing here is the one piece of
+    // teardown with a consequence outside this page.
+    for (const t of stream.getTracks()) t.stop();
+    upright?.stop();
+    try { el.remove(); } catch { /* already gone */ }
+    try { host.remove(); } catch { /* already gone */ }
+    clearGuestKey("encrypt");
+    throw e;
+  }
 
   return {
     stop() {
+      upright?.stop();
+      // The canvas wrapper does not own the camera; this does.
+      for (const t of stream.getTracks()) t.stop();
       try { el.remove(); } catch { /* already gone */ }
       try { host.remove(); } catch { /* already gone */ }
       clearGuestKey("encrypt");
