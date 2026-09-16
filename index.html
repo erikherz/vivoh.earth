@@ -2364,6 +2364,74 @@
         .vs-section td { padding-top: 0.7rem; }
         .vs-row-waiting { opacity: 0.75; }
 
+        /* ── Analytics ─────────────────────────────────────────────────────────────────
+           A list of named people and how long each stayed is the most sensitive screen in this
+           product. It is styled as a plain report rather than a dashboard: no sparklines, no
+           big numbers, nothing that invites reading it as a scoreboard. */
+        .an-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+        .an-head h2 { margin-bottom: 0.2rem; }
+        .an-all { font-size: 0.88rem; color: #00d4aa; text-decoration: none; white-space: nowrap; padding-top: 0.4rem; }
+        :root.light .an-all { color: #00997e; }
+        /* Wide tables scroll inside their own box; the page body never scrolls sideways. */
+        .an-scroll { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border-color); }
+        .an-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        .an-table th {
+            text-align: left;
+            padding: 0.55rem 0.8rem;
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            background: var(--bg-tertiary);
+            white-space: nowrap;
+        }
+        .an-table td { padding: 0.6rem 0.8rem; border-top: 1px solid var(--border-color); vertical-align: top; }
+        /* Digits line up, so two durations can be compared down the column. */
+        .an-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .an-who { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+        .an-face { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; flex: 0 0 24px; }
+        .an-name { color: var(--text-primary); }
+        .an-email, .an-sub { color: var(--text-muted); font-size: 0.8rem; display: block; }
+        .an-who .an-email { display: inline; }
+        .an-live {
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #00d4aa;
+        }
+        .an-anon td { color: var(--text-muted); font-style: italic; }
+        .an-link { color: var(--text-primary); text-decoration: none; border-bottom: 1px solid var(--border-color); }
+        .an-link:hover { color: #00d4aa; border-bottom-color: #00d4aa; }
+        .an-note { font-size: 0.82rem; color: var(--text-muted); line-height: 1.55; margin: 1rem 0 0; max-width: 46em; }
+        .an-run { margin-bottom: 0.9rem; }
+        .an-run > summary {
+            display: flex;
+            align-items: baseline;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            cursor: pointer;
+            padding: 0.6rem 0.8rem;
+            border-radius: 8px;
+            background: var(--bg-tertiary);
+            list-style: none;
+        }
+        .an-run > summary::-webkit-details-marker { display: none; }
+        .an-run > summary::before { content: "\25b8"; color: var(--text-muted); }
+        .an-run[open] > summary::before { content: "\25be"; }
+        .an-run > summary .an-sub { display: inline; }
+        .an-run > div { margin-top: 0.5rem; }
+        /* The way from the live badge to the history behind it. */
+        .an-header-link {
+            font-size: 0.82rem;
+            color: var(--text-secondary);
+            text-decoration: none;
+            border-bottom: 1px solid var(--border-color);
+            white-space: nowrap;
+        }
+        .an-header-link:hover { color: #00d4aa; border-bottom-color: #00d4aa; }
+
         /* ── Breakout rooms ────────────────────────────────────────────────────────────
            Three surfaces: the strip in the room panel (create / delegate), the invite prompt
            that lands on somebody else's screen, and the invite panel in the breakout tab. */
@@ -3308,6 +3376,9 @@
              in and what they already have booked. Empty containers, like #watch-room above. -->
         <div id="schedule-view" class="hidden"></div>
         <div id="events-view" class="hidden"></div>
+        <!-- Analytics: who came to an event and how long they stayed. Broadcaster-facing and
+             owner-scoped; /audience.html is the operator's console and a different credential. -->
+        <div id="analytics-view" class="hidden"></div>
 
         <!-- TinyMoQ is gone from here deliberately: streams ride moq.pro, and the fleet path
              is dormant config. Naming it in the footer of every page claimed a dependency

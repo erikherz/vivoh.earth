@@ -773,6 +773,8 @@ import {
   createBreakout,
   getBreakoutInfo,
   closeBreakout,
+  getAnalyticsOverview,
+  getAnalyticsForStream,
   listEvents,
   getEvent,
   createEvent,
@@ -818,7 +820,7 @@ import { createGeoStamp, type GeoStamp } from "./media/geo-stamp";
 // and watching, which is exactly the identity this app no longer holds. Rather than keep pages
 // that could only render blanks, the surface is gone. The kill switch was never part of them
 // and survives at /api/admin/kill and friends.
-type View = "landing" | "broadcast" | "watch" | "schedule" | "events";
+type View = "landing" | "broadcast" | "watch" | "schedule" | "events" | "analytics";
 
 // Generate a random stream ID (5 lowercase alphanumeric characters)
 function generateRandomId(): string {
@@ -924,6 +926,9 @@ async function getRouteInfo(): Promise<{ view: View; streamId: string }> {
   // matching below.
   if (path === "/schedule") return { view: "schedule", streamId: "" };
   if (path === "/events") return { view: "events", streamId: "" };
+  // `?stream=` picks one event; bare /analytics is the overview. Both are broadcaster-only and
+  // neither resolves a stream the way the watch path does, so they short-circuit here.
+  if (path === "/analytics") return { view: "analytics", streamId: "" };
 
   // Broadcast page: /broadcast — mint a fresh stream id and go live via the fleet. Rewrites
   // the URL to /?stream=<id> so a refresh keeps the same broadcast identity.
@@ -1702,6 +1707,20 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   // per-viewer list (location flag + watch duration). Polls the public viewers
   // endpoint every 5s; mirrors the /{stream}/stats renderer, inline for the broadcaster.
   const vsToggle = document.getElementById("viewer-stats-toggle");
+  // A way from the live badge to the history behind it. The badge answers "who is here now";
+  // this answers "who came", which is the question a host has ten minutes after they stop.
+  {
+    const header = document.querySelector("#broadcast-view .stream-header");
+    if (header && user) {
+      const link = document.createElement("a");
+      link.className = "an-header-link";
+      link.href = `/analytics?stream=${streamId}`;
+      link.textContent = "Analytics";
+      link.title = "Who watched this broadcast, and for how long";
+      header.append(link);
+    }
+  }
+
   const vsCount = document.getElementById("viewer-count");
   const vsPanel = document.getElementById("viewer-stats-panel");
   if (vsToggle && vsCount && vsPanel) {
@@ -3297,7 +3316,7 @@ function timezoneLabel(zone: string): string {
 
 /** Show one of the top-level views and hide the rest. */
 function showOnly(id: string): HTMLElement | null {
-  for (const v of ["landing-view", "broadcast-view", "watch-view", "schedule-view", "events-view"]) {
+  for (const v of ["landing-view", "broadcast-view", "watch-view", "schedule-view", "events-view", "analytics-view"]) {
     document.getElementById(v)?.classList.toggle("hidden", v !== id);
   }
   return document.getElementById(id);
@@ -3335,6 +3354,394 @@ function requireBroadcaster(user: User | null, container: HTMLElement): boolean 
   panel.append(h, p, cta);
   container.replaceChildren(panel);
   return false;
+}
+
+// ── Analytics ─────────────────────────────────────────────────────────────────────────
+//
+// `/analytics` lists everything this account has run; `/analytics?stream=<id>` is one event.
+// Both are broadcaster-facing — the operator console at /audience.html is a different thing
+// behind a different credential, and covers every account rather than yours.
+//
+// The page is deliberately plain about what it is. A list of named people and how long each
+// stayed is the most sensitive screen in this product, so it says where the names come from
+// and what is not collected, rather than presenting the numbers as if they arrived from
+// nowhere.
+
+interface AnalyticsPerson {
+  user_id: number | null;
+  name: string | null;
+  email: string | null;
+  avatar_url: string | null;
+  sessions: number;
+  watch_seconds: number;
+  standby_seconds: number;
+  first_seen: string;
+  last_seen: string;
+  live: boolean;
+}
+
+interface AnalyticsRun {
+  id: number;
+  started_at: string | null;
+  ended_at: string | null;
+  live: boolean;
+  seconds: number | null;
+  people: AnalyticsPerson[];
+  anonymous: { sessions: number; watch_seconds: number };
+  peak_concurrent: number;
+  watch_seconds: number;
+}
+
+/** "1h 04m", "12m 30s", "45s" — the shortest form that is still unambiguous. */
+function fmtSeconds(total: number | null | undefined): string {
+  const n = Math.max(0, Math.round(Number(total) || 0));
+  if (n < 60) return `${n}s`;
+  const m = Math.floor(n / 60);
+  if (m < 60) return `${m}m ${String(n % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+/** SQLite writes naive UTC; the Z is what stops it being read as local time. */
+function fmtWhen(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const ms = Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`);
+  if (!Number.isFinite(ms)) return "—";
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+}
+
+/** A row per person. textContent throughout: these names come from an OAuth provider. */
+function peopleTable(people: AnalyticsPerson[], anonymous: { sessions: number; watch_seconds: number }): HTMLElement {
+  const wrap = document.createElement("div");
+
+  if (!people.length && !anonymous.sessions) {
+    const p = document.createElement("p");
+    p.className = "event-empty";
+    p.textContent = "Nobody watched this one.";
+    wrap.append(p);
+    return wrap;
+  }
+
+  const table = document.createElement("table");
+  table.className = "an-table";
+  const head = document.createElement("thead");
+  head.innerHTML =
+    "<tr><th>Who</th><th>Watched</th><th>Sessions</th><th>Joined</th><th>Left</th></tr>";
+  const body = document.createElement("tbody");
+
+  for (const p of people) {
+    const tr = document.createElement("tr");
+
+    const who = document.createElement("td");
+    who.className = "an-who";
+    if (p.avatar_url) {
+      const img = document.createElement("img");
+      img.className = "an-face";
+      img.src = p.avatar_url;
+      img.alt = "";
+      img.referrerPolicy = "no-referrer";
+      who.append(img);
+    }
+    const name = document.createElement("span");
+    name.className = "an-name";
+    name.textContent = p.name || "Signed in";
+    who.append(name);
+    if (p.email) {
+      const em = document.createElement("span");
+      em.className = "an-email";
+      em.textContent = p.email;
+      who.append(em);
+    }
+    if (p.live) {
+      const dot = document.createElement("span");
+      dot.className = "an-live";
+      dot.textContent = "here now";
+      who.append(dot);
+    }
+
+    const watched = document.createElement("td");
+    watched.className = "an-num";
+    watched.textContent = fmtSeconds(p.watch_seconds);
+    if (p.standby_seconds > 0) {
+      const sb = document.createElement("span");
+      sb.className = "an-sub";
+      // Standby time is shown but NOT added to "watched". Somebody who sat behind the curtain
+      // for half an hour did not watch for half an hour, and one number covering both would be
+      // the flattering version of this table.
+      sb.textContent = `+${fmtSeconds(p.standby_seconds)} on standby`;
+      watched.append(sb);
+    }
+
+    const sessions = document.createElement("td");
+    sessions.className = "an-num";
+    sessions.textContent = String(p.sessions);
+
+    const joined = document.createElement("td");
+    joined.textContent = fmtWhen(p.first_seen);
+    const left = document.createElement("td");
+    left.textContent = p.live ? "—" : fmtWhen(p.last_seen);
+
+    tr.append(who, watched, sessions, joined, left);
+    body.append(tr);
+  }
+
+  if (anonymous.sessions) {
+    const tr = document.createElement("tr");
+    tr.className = "an-anon";
+    const who = document.createElement("td");
+    // Shown, never hidden. Anonymous rows only occur where the sign-in requirement was off,
+    // and omitting them would let the count and the list disagree — leaving a host convinced
+    // they knew who was there when they did not.
+    who.textContent = `${anonymous.sessions} anonymous ${anonymous.sessions === 1 ? "session" : "sessions"}`;
+    const watched = document.createElement("td");
+    watched.className = "an-num";
+    watched.textContent = fmtSeconds(anonymous.watch_seconds);
+    const rest = document.createElement("td");
+    rest.colSpan = 3;
+    rest.className = "an-sub";
+    rest.textContent = "Sign-in was off, so these cannot be attributed or de-duplicated.";
+    tr.append(who, watched, rest);
+    body.append(tr);
+  }
+
+  table.append(head, body);
+  const scroller = document.createElement("div");
+  scroller.className = "an-scroll";
+  scroller.append(table);
+  wrap.append(scroller);
+  return wrap;
+}
+
+/** The note under every report. Says where the names came from, and what is not collected. */
+function provenanceNote(retentionDays: number | null): HTMLElement {
+  const p = document.createElement("p");
+  p.className = "an-note";
+  p.textContent =
+    "Names come from the account each person signed in with — this is the visible half of " +
+    "Require sign-in. Not collected: IP addresses, fingerprints, or location. " +
+    (retentionDays
+      ? `Sessions are deleted after ${retentionDays} days.`
+      : "Sessions are kept until you delete them.");
+  return p;
+}
+
+async function initAnalyticsView(user: User | null): Promise<void> {
+  const view = showOnly("analytics-view");
+  if (!view) return;
+  if (!requireBroadcaster(user, view)) return;
+
+  const streamId = (new URLSearchParams(location.search).get("stream") ?? "").trim();
+  const page = document.createElement("div");
+  page.className = "sched-page wide";
+  view.replaceChildren(page);
+
+  if (/^[a-z0-9]{5}$/.test(streamId)) await paintOneEvent(page, streamId);
+  else await paintAllEvents(page);
+}
+
+async function paintAllEvents(page: HTMLElement): Promise<void> {
+  page.innerHTML = `
+    <h2>Analytics</h2>
+    <p class="sched-intro">Everything you have broadcast, newest first.</p>
+    <div id="an-body"><p class="event-empty">Loading…</p></div>
+    <div class="sched-actions"><a href="/events" class="sched-btn">Your events</a></div>`;
+  const body = page.querySelector("#an-body") as HTMLElement;
+
+  const data = await getAnalyticsOverview();
+  if (!data || !data.streams.length) {
+    body.innerHTML = `<p class="event-empty">Nothing has been broadcast yet. Once you go live, who watched shows up here.</p>`;
+    return;
+  }
+
+  const table = document.createElement("table");
+  table.className = "an-table";
+  // No Peak column here. It needs a sweep over every session interval, which the overview's
+  // single aggregate query deliberately does not load — see the note on /api/analytics. A
+  // column whose values are all `undefined` is worse than one that is absent, and that is
+  // exactly what shipped for one deploy: the field was dropped server-side and the header was
+  // left behind, which no API test could see.
+  table.innerHTML =
+    "<thead><tr><th>Event</th><th>People</th><th>Watched</th><th>Broadcasts</th><th>Last broadcast</th></tr></thead>";
+  const tbody = document.createElement("tbody");
+
+  for (const s of data.streams) {
+    const tr = document.createElement("tr");
+
+    const what = document.createElement("td");
+    const link = document.createElement("a");
+    link.className = "an-link";
+    link.href = `/analytics?stream=${s.stream_id}`;
+    link.textContent = s.title || `/${s.stream_id}`;
+    what.append(link);
+    if (s.title) {
+      const id = document.createElement("span");
+      id.className = "an-sub";
+      id.textContent = `/${s.stream_id}${s.recurrence ? ` · repeats ${s.recurrence}` : ""}`;
+      what.append(id);
+    }
+    if (s.live) {
+      const dot = document.createElement("span");
+      dot.className = "an-live";
+      dot.textContent = "live now";
+      what.append(dot);
+    }
+
+    const cell = (text: string, cls = "an-num") => {
+      const td = document.createElement("td");
+      td.className = cls;
+      td.textContent = text;
+      return td;
+    };
+
+    tr.append(
+      what,
+      cell(String(s.people) + (s.anonymous_sessions ? ` +${s.anonymous_sessions} anon` : "")),
+      cell(fmtSeconds(s.watch_seconds)),
+      cell(String(s.runs)),
+      cell(s.last_started ? fmtWhen(s.last_started) : "never", "")
+    );
+    tbody.append(tr);
+  }
+
+  table.append(tbody);
+  const scroller = document.createElement("div");
+  scroller.className = "an-scroll";
+  scroller.append(table);
+  body.replaceChildren(scroller, provenanceNote(data.retention_days));
+}
+
+async function paintOneEvent(page: HTMLElement, streamId: string): Promise<void> {
+  page.innerHTML = `
+    <div class="an-head">
+      <div>
+        <h2 id="an-title">Loading…</h2>
+        <p class="sched-intro" id="an-sub"></p>
+      </div>
+      <a class="an-all" href="/analytics">All events ↗</a>
+    </div>
+    <div id="an-body"><p class="event-empty">Loading…</p></div>
+    <div class="sched-actions">
+      <a href="/events" class="sched-btn">Your events</a>
+      <a href="/analytics" class="sched-btn sched-btn-primary">All events</a>
+    </div>`;
+  const body = page.querySelector("#an-body") as HTMLElement;
+
+  const data = await getAnalyticsForStream(streamId);
+  if (!data) {
+    (page.querySelector("#an-title") as HTMLElement).textContent = "That event is not here";
+    body.innerHTML =
+      `<p class="event-empty">It may have been removed, or it may belong to another account.</p>`;
+    return;
+  }
+
+  (page.querySelector("#an-title") as HTMLElement).textContent = data.event?.title || `/${streamId}`;
+  (page.querySelector("#an-sub") as HTMLElement).textContent =
+    `${data.totals.people} ${data.totals.people === 1 ? "person" : "people"}` +
+    (data.totals.anonymous_sessions ? ` and ${data.totals.anonymous_sessions} anonymous` : "") +
+    ` · ${fmtSeconds(data.totals.watch_seconds)} watched · peak ${data.totals.peak_concurrent} at once` +
+    ` · ${data.totals.runs} ${data.totals.runs === 1 ? "broadcast" : "broadcasts"}`;
+
+  body.replaceChildren();
+
+  if (!data.runs.length) {
+    const p = document.createElement("p");
+    p.className = "event-empty";
+    p.textContent = "This has not been broadcast yet.";
+    body.append(p);
+  }
+
+  // One section per run, newest first, the first expanded. A standing weekly town hall is read
+  // as "who came this week", and a single merged list cannot answer that.
+  data.runs.forEach((run: AnalyticsRun, i: number) => {
+    const det = document.createElement("details");
+    det.className = "an-run";
+    if (i === 0) det.open = true;
+
+    const sum = document.createElement("summary");
+    const when = document.createElement("strong");
+    when.textContent = fmtWhen(run.started_at);
+    const stat = document.createElement("span");
+    stat.className = "an-sub";
+    const heads = run.people.length + run.anonymous.sessions;
+    stat.textContent =
+      `${fmtSeconds(run.seconds)} · ${heads} ${heads === 1 ? "person" : "people"} · peak ${run.peak_concurrent}`;
+    sum.append(when, stat);
+    if (run.live) {
+      const dot = document.createElement("span");
+      dot.className = "an-live";
+      dot.textContent = "live now";
+      sum.append(dot);
+    }
+
+    det.append(sum, peopleTable(run.people, run.anonymous));
+    body.append(det);
+  });
+
+  if (data.before_any_broadcast) {
+    const p = document.createElement("p");
+    p.className = "an-note";
+    // A real category, not a rounding error: people who opened the link before the host went
+    // live. Attributing them to a broadcast that had not started would be inventing history.
+    p.textContent =
+      `${data.before_any_broadcast} ${data.before_any_broadcast === 1 ? "person" : "people"} ` +
+      `opened the link before any broadcast had started, so they are not counted in a run above.`;
+    body.append(p);
+  }
+
+  if (data.breakouts.length) {
+    const h = document.createElement("h3");
+    h.className = "sched-section";
+    h.textContent = "Breakout rooms";
+    const note = document.createElement("p");
+    note.className = "sched-section-note";
+    // Listed, never folded in. Time in a side room is not time at the main event, and adding
+    // them together would hide that somebody left the room.
+    note.textContent =
+      "Counted separately — time in a breakout is not time at the main event.";
+    body.append(h, note);
+
+    const table = document.createElement("table");
+    table.className = "an-table";
+    table.innerHTML = "<thead><tr><th>Opened by</th><th>People</th><th>Watched</th><th>Opened</th></tr></thead>";
+    const tbody = document.createElement("tbody");
+    for (const b of data.breakouts) {
+      const tr = document.createElement("tr");
+      const who = document.createElement("td");
+      const link = document.createElement("a");
+      link.className = "an-link";
+      link.href = `/analytics?stream=${b.stream_id}`;
+      link.textContent = b.owner_name || `/${b.stream_id}`;
+      who.append(link);
+      const cell = (t: string, cls = "an-num") => {
+        const td = document.createElement("td");
+        td.className = cls;
+        td.textContent = t;
+        return td;
+      };
+      tr.append(
+        who,
+        cell(String(b.people) + (b.anonymous_sessions ? ` +${b.anonymous_sessions}` : "")),
+        cell(fmtSeconds(b.watch_seconds)),
+        cell(fmtWhen(b.created_at), "")
+      );
+      tbody.append(tr);
+    }
+    table.append(tbody);
+    const scroller = document.createElement("div");
+    scroller.className = "an-scroll";
+    scroller.append(table);
+    body.append(scroller);
+  }
+
+  if (data.truncated) {
+    const p = document.createElement("p");
+    p.className = "an-note";
+    p.textContent = "This event has more sessions than one report can hold; the oldest are not shown.";
+    body.append(p);
+  }
+
+  body.append(provenanceNote(data.retention_days));
 }
 
 /**
@@ -3744,6 +4151,7 @@ async function initEventsView(user: User | null): Promise<void> {
     </div>
     <div id="events-body"><p class="event-empty">Loading…</p></div>
     <div class="sched-actions">
+      <a href="/analytics" class="sched-btn">Analytics</a>
       <a href="/broadcast" class="sched-btn">Broadcast now</a>
       <a href="/schedule" class="sched-btn sched-btn-primary">Schedule an event</a>
     </div>`;
@@ -3875,6 +4283,13 @@ async function initEventsView(user: User | null): Promise<void> {
       edit.href = `/schedule?event=${ev.id}`;
       edit.textContent = "Edit";
 
+      // Who came, and for how long. Present on every card including one that has never gone
+      // live — the page says "this has not been broadcast yet" rather than hiding, because a
+      // control that appears only after the fact is one nobody finds when they want it.
+      const stats = document.createElement("a");
+      stats.href = `/analytics?stream=${ev.stream_id}`;
+      stats.textContent = "Analytics";
+
       const cancel = document.createElement("button");
       cancel.textContent = "Cancel event";
       cancel.addEventListener("click", async () => {
@@ -3887,7 +4302,7 @@ async function initEventsView(user: User | null): Promise<void> {
         else cancel.disabled = false;
       });
 
-      actions.append(live, copy, edit, cancel);
+      actions.append(live, copy, edit, stats, cancel);
     }
 
     card.append(actions);
@@ -6606,6 +7021,8 @@ async function init() {
     await initScheduleView(user);
   } else if (view === "events") {
     await initEventsView(user);
+  } else if (view === "analytics") {
+    await initAnalyticsView(user);
   } else {
     await initWatchView(streamId, user);
   }

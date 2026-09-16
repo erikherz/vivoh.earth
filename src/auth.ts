@@ -299,6 +299,53 @@ export async function putStreamKey(
   }
 }
 
+// ── Analytics ─────────────────────────────────────────────────────────────────────────
+
+export interface AnalyticsOverview {
+  streams: {
+    stream_id: string;
+    title: string | null;
+    recurrence: string | null;
+    scheduled_for: string | null;
+    last_started: string | null;
+    runs: number;
+    live: boolean;
+    people: number;
+    sessions: number;
+    anonymous_sessions: number;
+    watch_seconds: number;
+  }[];
+  retention_days: number | null;
+  truncated?: boolean;
+}
+
+/** Everything this account has broadcast. Null on any failure; the page says "loading" lost. */
+export async function getAnalyticsOverview(): Promise<AnalyticsOverview | null> {
+  try {
+    const res = await fetch("/api/analytics", { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as AnalyticsOverview;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One event's audience: who came, for how long, split by broadcast run.
+ *
+ * 404 for a stream this account does not own — deliberately not 403, because whether a
+ * five-character id exists is not a fact a signed-in stranger needs.
+ */
+export async function getAnalyticsForStream(streamId: string): Promise<Record<string, any> | null> {
+  try {
+    const res = await fetch(`/api/analytics/stream/${streamId}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 // ── Breakout rooms ────────────────────────────────────────────────────────────────────
 
 export interface BreakoutRoom {

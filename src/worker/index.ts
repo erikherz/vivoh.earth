@@ -254,7 +254,10 @@ export default {
       url.pathname === "/broadcast" ||
       url.pathname === "/watch" ||
       url.pathname === "/schedule" ||
-      url.pathname === "/events";
+      url.pathname === "/events" ||
+      // A client route with no file behind it. Forgetting this line is invisible to every API
+      // test — the endpoints answer perfectly and the page 404s — which is what happened here.
+      url.pathname === "/analytics";
 
     if (isStreamId || isStatsPage || isStreamStatsPage || isClearDataPage || isAppPage) {
       const indexUrl = new URL("/index.html", url.origin);
@@ -580,6 +583,11 @@ async function handleApiRoutes(
     }
 
     // Stats routes
+    if (url.pathname.startsWith("/api/analytics")) {
+      const handled = await handleAnalyticsRoutes(request, env, url);
+      if (handled) return handled;
+    }
+
     if (url.pathname.startsWith("/api/stats/")) {
       return handleStatsRoutes(request, env, url);
     }
@@ -3509,6 +3517,418 @@ async function getAuthenticatedUser(request: Request, env: Env): Promise<User | 
 // Note this is keyed by EMAIL, not user id, so a grant can be written before that person has
 // ever signed in — and so it survives them re-signing in through a different provider, since
 // upsertUser links providers that share an email onto one account.
+// ── Analytics, for the person who ran the event ───────────────────────────────────────
+//
+// Everything historical used to need the admin password: /audience.html is an OPERATOR
+// console, and a broadcaster could see who was watching only while it was happening — the
+// live badge, which vanishes when the broadcast ends. This is the same data, scoped to the
+// account that owns it.
+//
+// WHAT A ROW IS, stated because the endpoints below it got this wrong for a while. A session
+// is a browser tab, and where the viewer was signed in it carries a `user_id` — a foreign key
+// to a real account. So "which of these rows is the same person" IS answerable here, and this
+// page answers it on purpose. Still not collected: no IP, no IP hash, no fingerprint, no
+// location. See public/audience.html, whose header has always said this correctly.
+
+/** Sessions read for one stream's report. Far above any real event; a bound, not a limit. */
+const ANALYTICS_SESSION_LIMIT = 5000;
+/** Broadcast runs shown for one stream. A weekly series hits 52 in a year. */
+const ANALYTICS_RUN_LIMIT = 60;
+/** Events listed on the overview. Ordered live-first, then most recent, so the cap bites the
+ *  least interesting end. Announced to the client as `truncated` rather than silently. */
+const ANALYTICS_OVERVIEW_LIMIT = 200;
+
+interface SessionRow {
+  id: number;
+  stream_id: string;
+  user_id: number | null;
+  user_name: string | null;
+  user_email: string | null;
+  avatar_url: string | null;
+  started_at: string;
+  ended_at: string | null;
+  last_seen_at: string | null;
+  state: string | null;
+  live: number;
+}
+
+interface RunRow {
+  id: number;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+/**
+ * May this caller read this stream's audience?
+ *
+ * Three tables can establish ownership and any one is enough: the scheduled event, the
+ * settings row, or a broadcast that actually ran. A stream can legitimately exist in only one
+ * of them — an ad hoc broadcast never gets a `scheduled_events` row, and a host who changed no
+ * settings never gets a `streams` row — so asking only one would lock people out of their own
+ * numbers.
+ */
+async function ownsStream(env: Env, streamId: string, userId: number): Promise<boolean> {
+  const row = await env.DB
+    .prepare(`
+      SELECT 1 AS hit FROM scheduled_events WHERE stream_id = ? AND user_id = ?
+      UNION ALL
+      SELECT 1 AS hit FROM streams WHERE stream_id = ? AND user_id = ?
+      UNION ALL
+      SELECT 1 AS hit FROM broadcast_events WHERE stream_id = ? AND user_id = ?
+      LIMIT 1
+    `)
+    .bind(streamId, userId, streamId, userId, streamId, userId)
+    .first<{ hit: number }>();
+  return !!row;
+}
+
+/** The admin password, as an override for support. Absent config means no override at all. */
+function isAdminCaller(request: Request, env: Env): boolean {
+  if (!env.ADMIN_PASSWORD) return false;
+  const header = request.headers.get("Authorization") ?? "";
+  return constantTimeEqual(header, `Bearer ${env.ADMIN_PASSWORD}`);
+}
+
+/** Seconds a session lasted. An open one is measured to its last heartbeat, never to now. */
+function sessionSeconds(s: SessionRow): number {
+  const start = Date.parse(`${s.started_at}Z`);
+  const end = Date.parse(`${s.ended_at ?? s.last_seen_at ?? s.started_at}Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+  return Math.max(0, Math.round((end - start) / 1000));
+}
+
+interface Person {
+  user_id: number | null;
+  name: string | null;
+  email: string | null;
+  avatar_url: string | null;
+  sessions: number;
+  watch_seconds: number;
+  standby_seconds: number;
+  first_seen: string;
+  last_seen: string;
+  live: boolean;
+}
+
+/**
+ * Sessions -> people.
+ *
+ * Grouped by account, because "who came" is the question and one person reconnecting three
+ * times is one attendee with three sessions, not three attendees. Anonymous rows — which only
+ * occur when a broadcaster turned the sign-in requirement off — cannot be grouped and are
+ * counted separately rather than being quietly merged into one phantom person.
+ */
+function groupPeople(sessions: SessionRow[]): { people: Person[]; anonymous: { sessions: number; watch_seconds: number } } {
+  const byUser = new Map<number, Person>();
+  const anonymous = { sessions: 0, watch_seconds: 0 };
+
+  for (const s of sessions) {
+    const secs = sessionSeconds(s);
+    const waiting = s.state === "waiting";
+
+    if (s.user_id === null) {
+      anonymous.sessions += 1;
+      if (!waiting) anonymous.watch_seconds += secs;
+      continue;
+    }
+
+    const p = byUser.get(s.user_id) ?? {
+      user_id: s.user_id,
+      name: s.user_name,
+      email: s.user_email,
+      avatar_url: s.avatar_url,
+      sessions: 0,
+      watch_seconds: 0,
+      standby_seconds: 0,
+      first_seen: s.started_at,
+      last_seen: s.started_at,
+      live: false,
+    };
+    p.sessions += 1;
+    if (waiting) p.standby_seconds += secs;
+    else p.watch_seconds += secs;
+    if (s.started_at < p.first_seen) p.first_seen = s.started_at;
+    const last = s.ended_at ?? s.last_seen_at ?? s.started_at;
+    if (last > p.last_seen) p.last_seen = last;
+    if (s.live) p.live = true;
+    byUser.set(s.user_id, p);
+  }
+
+  const people = [...byUser.values()].sort((a, b) => b.watch_seconds - a.watch_seconds);
+  return { people, anonymous };
+}
+
+/**
+ * The most people watching at once.
+ *
+ * A sweep over the session intervals rather than a query, because SQL cannot answer it without
+ * a self-join over the whole table and this runs on at most a few thousand rows already in
+ * memory. Standby sessions are excluded: "peak audience" that counted people staring at a
+ * countdown would be the most flattering and least true number on the page.
+ */
+function peakConcurrent(sessions: SessionRow[]): number {
+  const edges: { t: number; d: number }[] = [];
+  for (const s of sessions) {
+    if (s.state === "waiting") continue;
+    const start = Date.parse(`${s.started_at}Z`);
+    const end = Date.parse(`${s.ended_at ?? s.last_seen_at ?? s.started_at}Z`);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
+    edges.push({ t: start, d: 1 });
+    edges.push({ t: end, d: -1 });
+  }
+  // Departures before arrivals at the same instant, so two sessions that merely touch are not
+  // counted as overlapping.
+  edges.sort((a, b) => a.t - b.t || a.d - b.d);
+  let now = 0;
+  let peak = 0;
+  for (const e of edges) {
+    now += e.d;
+    if (now > peak) peak = now;
+  }
+  return peak;
+}
+
+/** Every column the report needs, for one or more stream ids. */
+async function loadSessions(env: Env, streamIds: string[]): Promise<SessionRow[]> {
+  if (!streamIds.length) return [];
+  const holes = streamIds.map(() => "?").join(", ");
+  const res = await env.DB
+    .prepare(`
+      SELECT
+        w.id, w.stream_id, w.started_at, w.ended_at, w.last_seen_at, w.state,
+        ${liveSessionSql("w.")} AS live,
+        u.id AS user_id, u.name AS user_name, u.email AS user_email, u.avatar_url
+      FROM watch_events w
+      LEFT JOIN users u ON u.id = w.user_id
+      WHERE w.stream_id IN (${holes})
+      ORDER BY w.started_at DESC
+      LIMIT ?
+    `)
+    .bind(...streamIds, ANALYTICS_SESSION_LIMIT)
+    .all<SessionRow>();
+  return res.results ?? [];
+}
+
+async function handleAnalyticsRoutes(
+  request: Request,
+  env: Env,
+  url: URL
+): Promise<Response | null> {
+  const method = request.method;
+  const path = url.pathname;
+  if (method !== "GET" || !path.startsWith("/api/analytics")) return null;
+
+  const admin = isAdminCaller(request, env);
+  const user = await getAuthenticatedUser(request, env);
+  if (!user && !admin) {
+    return Response.json({ error: "Authentication required" }, { status: 401 });
+  }
+
+  const retentionDays = parseInt(env.STATS_RETENTION_DAYS ?? "", 10);
+  const retention = Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : null;
+
+  // ── One stream ──────────────────────────────────────────────────────────────────────
+  const oneMatch = path.match(/^\/api\/analytics\/stream\/([a-z0-9]{5})$/);
+  if (oneMatch) {
+    const streamId = oneMatch[1];
+    if (!admin && !(await ownsStream(env, streamId, user!.id))) {
+      // 404 rather than 403: whether a stream id exists is not a fact a signed-in stranger
+      // needs, and the same reasoning already governs /api/events/:id.
+      return Response.json({ error: "not found" }, { status: 404 });
+    }
+
+    const event = await env.DB
+      .prepare(`SELECT ${EVENT_COLUMNS} FROM scheduled_events WHERE stream_id = ? ORDER BY id DESC LIMIT 1`)
+      .bind(streamId)
+      .first<EventRow>();
+
+    const runsRes = await env.DB
+      .prepare(`
+        SELECT id, started_at, ended_at FROM broadcast_events
+        WHERE stream_id = ? ORDER BY id DESC LIMIT ?
+      `)
+      .bind(streamId, ANALYTICS_RUN_LIMIT)
+      .all<RunRow>();
+    const runs = runsRes.results ?? [];
+
+    const sessions = await loadSessions(env, [streamId]);
+
+    // Attribute each session to the run it started during: the most recent broadcast that had
+    // already begun. Sessions that predate every run — an attendee who opened the link before
+    // the host went live — land in `before`, which is a real category and not a rounding error.
+    const ordered = [...runs].sort((a, b) => String(a.started_at ?? "").localeCompare(String(b.started_at ?? "")));
+    const byRun = new Map<number, SessionRow[]>();
+    const before: SessionRow[] = [];
+    for (const s of sessions) {
+      let owner: RunRow | null = null;
+      for (const r of ordered) {
+        if (r.started_at && r.started_at <= s.started_at) owner = r;
+        else break;
+      }
+      if (!owner) { before.push(s); continue; }
+      const list = byRun.get(owner.id);
+      if (list) list.push(s);
+      else byRun.set(owner.id, [s]);
+    }
+
+    const runReports = runs.map((r) => {
+      const mine = byRun.get(r.id) ?? [];
+      const { people, anonymous } = groupPeople(mine);
+      const startedMs = r.started_at ? Date.parse(`${r.started_at}Z`) : NaN;
+      const endedMs = r.ended_at ? Date.parse(`${r.ended_at}Z`) : NaN;
+      return {
+        id: r.id,
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        live: !r.ended_at,
+        seconds: Number.isFinite(startedMs)
+          ? Math.max(0, Math.round(((Number.isFinite(endedMs) ? endedMs : Date.now()) - startedMs) / 1000))
+          : null,
+        people,
+        anonymous,
+        peak_concurrent: peakConcurrent(mine),
+        watch_seconds: people.reduce((n, p) => n + p.watch_seconds, 0) + anonymous.watch_seconds,
+      };
+    });
+
+    const all = groupPeople(sessions);
+
+    // Breakouts: their own streams, so their own totals, listed rather than folded in. Time in
+    // a side room is not time at the main event, and adding them together would hide the fact
+    // that somebody left the room.
+    const boRes = await env.DB
+      .prepare(`
+        SELECT b.stream_id, b.created_at, b.closed_at, u.name AS owner_name, u.email AS owner_email
+        FROM breakout_rooms b LEFT JOIN users u ON u.id = b.user_id
+        WHERE b.parent_stream_id = ? ORDER BY b.id DESC LIMIT 50
+      `)
+      .bind(streamId)
+      .all<{ stream_id: string; created_at: string; closed_at: string | null; owner_name: string | null; owner_email: string | null }>();
+    const boRows = boRes.results ?? [];
+    const boSessions = await loadSessions(env, boRows.map((b) => b.stream_id));
+    const breakouts = boRows.map((b) => {
+      const mine = boSessions.filter((s) => s.stream_id === b.stream_id);
+      const g = groupPeople(mine);
+      return {
+        stream_id: b.stream_id,
+        created_at: b.created_at,
+        closed_at: b.closed_at,
+        owner_name: b.owner_name,
+        owner_email: b.owner_email,
+        people: g.people.length,
+        anonymous_sessions: g.anonymous.sessions,
+        watch_seconds: g.people.reduce((n, p) => n + p.watch_seconds, 0) + g.anonymous.watch_seconds,
+      };
+    });
+
+    return Response.json(
+      {
+        stream_id: streamId,
+        event: event
+          ? { id: event.id, title: event.title, recurrence: event.recurrence, phase: eventPhase(event, Date.now()) }
+          : null,
+        runs: runReports,
+        before_any_broadcast: groupPeople(before).people.length,
+        totals: {
+          people: all.people.length,
+          sessions: sessions.length,
+          anonymous_sessions: all.anonymous.sessions,
+          watch_seconds: all.people.reduce((n, p) => n + p.watch_seconds, 0) + all.anonymous.watch_seconds,
+          peak_concurrent: peakConcurrent(sessions),
+          runs: runs.length,
+        },
+        people: all.people,
+        breakouts,
+        // Said out loud so a page cannot imply the history is complete when it is being purged.
+        retention_days: retention,
+        truncated: sessions.length >= ANALYTICS_SESSION_LIMIT,
+      },
+      { headers: { "Cache-Control": "no-store, private" } }
+    );
+  }
+
+  // ── Everything this account ran ─────────────────────────────────────────────────────
+  if (path === "/api/analytics") {
+    // Admin with no session sees nothing here; "all events" is meaningless without an owner,
+    // and quietly showing them the whole platform would be a different endpoint.
+    if (!user) return Response.json({ streams: [], retention_days: retention });
+
+    // ONE aggregate query, and NO list of ids in the binds.
+    //
+    // The first version fetched the owned ids and then passed them back as `IN (?, ?, …)`.
+    // That worked until an account owned 241 streams, at which point the statement carried 241
+    // bound parameters and D1 answered 500 — a plain Internal Server Error with nothing in it
+    // to say which limit had been hit. Aggregating against the ownership set in SQL keeps this
+    // at three binds no matter how many events somebody has run.
+    //
+    // NOTE what is missing here compared with the per-event page: peak concurrent. It needs a
+    // sweep over every session's interval, which means loading them, which is exactly what this
+    // query exists to avoid. It is a per-event number and it stays on the per-event page rather
+    // than being approximated here.
+    const rows = await env.DB
+      .prepare(`
+        WITH owned AS (
+          SELECT DISTINCT stream_id FROM (
+            SELECT stream_id FROM scheduled_events WHERE user_id = ?
+            UNION
+            SELECT stream_id FROM streams WHERE user_id = ?
+            UNION
+            SELECT stream_id FROM broadcast_events WHERE user_id = ?
+          )
+        )
+        SELECT
+          o.stream_id,
+          e.title, e.recurrence, e.starts_at AS scheduled_for,
+          (SELECT MAX(b.started_at) FROM broadcast_events b WHERE b.stream_id = o.stream_id) AS last_started,
+          (SELECT COUNT(*) FROM broadcast_events b WHERE b.stream_id = o.stream_id) AS runs,
+          (SELECT COUNT(*) FROM broadcast_events b WHERE b.stream_id = o.stream_id AND b.ended_at IS NULL) AS live_runs,
+          -- People, not sessions: one account reconnecting three times is one attendee.
+          (SELECT COUNT(DISTINCT w.user_id) FROM watch_events w
+            WHERE w.stream_id = o.stream_id AND w.user_id IS NOT NULL
+              AND COALESCE(w.state, 'watching') <> 'waiting') AS people,
+          (SELECT COUNT(*) FROM watch_events w WHERE w.stream_id = o.stream_id) AS sessions,
+          (SELECT COUNT(*) FROM watch_events w
+            WHERE w.stream_id = o.stream_id AND w.user_id IS NULL
+              AND COALESCE(w.state, 'watching') <> 'waiting') AS anonymous_sessions,
+          -- Standby time is excluded, as it is everywhere else: sitting behind a curtain is
+          -- not watching, and one number covering both would be the flattering version.
+          (SELECT COALESCE(SUM(
+              (julianday(COALESCE(w.ended_at, w.last_seen_at, w.started_at)) - julianday(w.started_at)) * 86400
+            ), 0) FROM watch_events w
+            WHERE w.stream_id = o.stream_id AND COALESCE(w.state, 'watching') <> 'waiting') AS watch_seconds
+        FROM owned o
+        LEFT JOIN scheduled_events e ON e.id = (
+          SELECT id FROM scheduled_events WHERE stream_id = o.stream_id ORDER BY id DESC LIMIT 1
+        )
+        ORDER BY live_runs DESC, COALESCE(last_started, e.starts_at, '') DESC
+        LIMIT ?
+      `)
+      .bind(user.id, user.id, user.id, ANALYTICS_OVERVIEW_LIMIT)
+      .all<Record<string, unknown>>();
+
+    const streams = (rows.results ?? []).map((r) => ({
+      stream_id: String(r.stream_id),
+      title: (r.title as string | null) ?? null,
+      recurrence: (r.recurrence as string | null) ?? null,
+      scheduled_for: (r.scheduled_for as string | null) ?? null,
+      last_started: (r.last_started as string | null) ?? null,
+      runs: Number(r.runs ?? 0),
+      live: Number(r.live_runs ?? 0) > 0,
+      people: Number(r.people ?? 0),
+      sessions: Number(r.sessions ?? 0),
+      anonymous_sessions: Number(r.anonymous_sessions ?? 0),
+      watch_seconds: Math.round(Number(r.watch_seconds ?? 0)),
+    }));
+
+    return Response.json(
+      { streams, retention_days: retention, truncated: streams.length >= ANALYTICS_OVERVIEW_LIMIT },
+      { headers: { "Cache-Control": "no-store, private" } }
+    );
+  }
+
+  return null;
+}
+
 // ── Breakout rooms ────────────────────────────────────────────────────────────────────
 //
 // An attendee opens a side conversation off a live broadcast and becomes its broadcaster.
@@ -4645,10 +5065,15 @@ async function handleAdminRoutes(
 
   // GET /api/admin/stats/streams - Audience overview, one row per stream id.
   //
-  // Deliberately aggregate-only: counts and durations. There is no viewer identity to show
-  // here because there is none in the table — see migration 0014. Streams that are live with
-  // no audience yet are merged in from broadcast_events so the console shows silence rather
-  // than omitting the stream entirely.
+  // Aggregate-only: counts and durations, with no names. That is a CHOICE about this view, not
+  // a property of the table — `watch_events.user_id` is a foreign key to a real account, and
+  // /api/analytics/stream/:id shows exactly who. This comment used to claim "there is no viewer
+  // identity to show here because there is none in the table", which was Wallflower's design
+  // inherited in the port and untrue here from the moment OAuth was armed; public/audience.html
+  // has always described it correctly, so the page and the endpoint disagreed.
+  //
+  // Streams that are live with no audience yet are merged in from broadcast_events so the
+  // console shows silence rather than omitting the stream entirely.
   if (method === "GET" && path === "/api/admin/stats/streams") {
     const rows = await env.DB
       .prepare(`
@@ -4705,9 +5130,13 @@ async function handleAdminRoutes(
   // GET /api/admin/stats/stream/:id - Every session on one stream, newest first.
   //
   // ?since= / ?until= (ISO dates) bound the report; ?limit= caps the rows. Each row is one
-  // viewing session: a browser tab that watched, and for how long. It is NOT a person, and
-  // two rows here cannot be shown to be the same person — that is the property the table is
-  // built to keep, not an omission to be fixed later.
+  // viewing session: a browser tab that watched, and for how long.
+  //
+  // A session is not a person, but on THIS deployment two rows CAN be shown to be the same
+  // person — a signed-in session carries `user_id`. The previous wording here ("that is the
+  // property the table is built to keep") was Wallflower's, where it is true; here it stopped
+  // being true when OAuth became the only publisher door. Not collected, then or now: IP, IP
+  // hashes, fingerprints, location.
   const adminStreamMatch = path.match(/^\/api\/admin\/stats\/stream\/([a-z0-9]{5})$/);
   if (method === "GET" && adminStreamMatch) {
     const streamId = adminStreamMatch[1];

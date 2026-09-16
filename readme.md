@@ -175,6 +175,33 @@ A session needs a live broadcast row, so this counts the curtain case rather tha
 arrival: before the host goes live there is no route tag to prove a link against, and that gate
 is what stops a stranger manufacturing an audience for a guessed id.
 
+## Analytics
+
+Three surfaces, and they are not the same thing:
+
+- **The live badge** on the broadcast page — who is watching *now*, and who is waiting behind
+  the curtain. Gated on the route tag. It vanishes when the broadcast ends.
+- **`/analytics`** — broadcaster-facing history, scoped to what your account owns. One row per
+  event; each links to `/analytics?stream=<id>`, which splits by broadcast run (newest first,
+  expanded) and lists who came, how long they watched, how many sessions, and when they joined
+  and left. Breakouts are listed underneath with their own totals rather than folded in — time
+  in a side room is not time at the main event. Reached from the events list, the calendar's
+  day panel, and a link beside the live badge. Owner-gated, with `ADMIN_PASSWORD` as a support
+  override; a stream you do not own answers 404, not 403.
+- **`/audience.html`** — the OPERATOR console, behind `ADMIN_PASSWORD`, aggregate across every
+  account. A different audience and a different credential.
+
+Two things the numbers do not do. Standby time is never added to watch time — sitting behind a
+curtain is not watching, and one figure covering both would be the flattering version. And peak
+concurrent appears only on an event page: it needs a sweep over every session interval, which
+the overview's single aggregate query exists to avoid, so it is not approximated across every
+event.
+
+**A session carries a `user_id`** where the viewer was signed in, so "which of these rows is the
+same person" is answerable and this page answers it. Not collected: IP, IP hashes, fingerprints,
+location. Anonymous rows — only possible where the sign-in requirement was off — are shown and
+counted apart, never merged into a phantom attendee.
+
 ## Architecture
 
 ```
