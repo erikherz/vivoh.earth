@@ -81,6 +81,36 @@ Consequences worth stating plainly:
 - Viewing is **attributed**: `watch_events` carries a real account id, so "who watched what,
   and when" is answerable by anyone holding the database. Still not collected: IP, IP hashes,
   fingerprints, location. See [`public/audience.html`](./public/audience.html).
+- A scheduled event's **title, description and standby page are plaintext to us**, and have to
+  be: the standby page is shown to people who have not been let in yet, and a calendar invite
+  is not a confidential document. Media is still sealed; the event's *name* is not.
+
+## The curtain
+
+Migration `0022` (2026-09-16) separates *being live* from *the audience may watch*. A scheduled
+event's attendees land on a standby page the scheduler designed — headline, message, accent,
+optional countdown — and stay there while the host starts publishing, checks their framing and
+gets the deck up. Pressing **Lift the curtain** switches every one of them over.
+
+The switchover is a **poll, not a push**. Waiting clients already ask `/route` every 1.5s; once
+the curtain is up that call starts returning a route instead of `425`, and each page moves on
+by itself. A socket would be a second thing to keep alive for the sake of one moment, and a
+waiting room that missed its own event because a connection had quietly dropped is a worse
+failure than a switchover up to 1.5 seconds late.
+
+The gate is **server-side**, at the point the viewer token is minted — not a `<div>` the client
+hides. Curtain down, `GET /api/streams/:id/route` answers `425 Too Early` and hands out no
+token, so a viewer who drives the relay directly is refused by the relay. `scripts/e2e/curtain-live-gate.mjs`
+proves that against production by planting a synthetic live broadcast and checking both
+directions on the same stream id.
+
+`curtain_lifted_at` is a timestamp, not a flag, because a standing weekly town hall is one row:
+a lift belongs to the occurrence it is *nearest* to, and counts while that occurrence has not
+been overtaken. A boolean set last Thursday would still read "up" this Thursday.
+
+There is no *lower*. Viewers already watching hold a relay token and a live subscription that
+nothing server-side can revoke, so a control claiming to shut the room would be lying to the
+person pressing it. What it governs is who gets in from now on.
 
 ## Architecture
 

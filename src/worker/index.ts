@@ -1193,7 +1193,7 @@ async function handleStreamRoutes(
 
     const row = await env.DB
       .prepare(`
-        SELECT id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+        SELECT ${EVENT_COLUMNS}
         FROM scheduled_events WHERE stream_id = ? ORDER BY id DESC LIMIT 1
       `)
       .bind(streamId)
@@ -1353,6 +1353,39 @@ async function handleStreamRoutes(
       if (!user) {
         return Response.json({ error: "Authentication required" }, { status: 401 });
       }
+    }
+
+    // ── The curtain ────────────────────────────────────────────────────────────────────
+    // A scheduled event may be live and still closed to the audience. The broadcaster is
+    // publishing — checking their framing, loading the deck, letting the room fill — and the
+    // people holding the invite are looking at the standby page until the doors open.
+    //
+    // Enforced HERE, where the viewer token is minted, and not in the client. A curtain the
+    // browser drew would be a curtain painted on glass: anyone who opened the console, or who
+    // simply reloaded with a stale bundle, would walk straight through it. Refusing the token
+    // means the relay refuses the subscription, so the closed door is closed to everyone.
+    //
+    // Placed AFTER the route-tag check on purpose: a stranger sweeping the id space still
+    // gets a flat 404 and learns nothing, including that anything is scheduled here.
+    //
+    // Ad hoc broadcasts have no event row, so this costs them one indexed lookup and changes
+    // nothing — pressing Broadcast is still the fastest thing on the site.
+    const curtainRow = await env.DB
+      .prepare(`
+        SELECT starts_at, recurrence, curtain_lifted_at, canceled_at
+        FROM scheduled_events WHERE stream_id = ? ORDER BY id DESC LIMIT 1
+      `)
+      .bind(streamId)
+      .first<Pick<EventRow, "starts_at" | "recurrence" | "curtain_lifted_at" | "canceled_at">>();
+    if (curtainRow && !curtainUp(curtainRow, Date.now())) {
+      // 425 Too Early, not 404. The caller holds the link and proved it; they are entitled to
+      // know the difference between "nothing is happening here" and "not yet". The waiting
+      // room says something different for each, and a viewer who is told the wrong one either
+      // gives up on a working link or stares at a dead one.
+      return Response.json({ error: "curtain", curtain: "down" }, {
+        status: 425,
+        headers: { "Cache-Control": "no-store, private" },
+      });
     }
 
     // Optional shorter viewer token: ?ttl=<seconds>.
@@ -1678,6 +1711,9 @@ const EVENT_TITLE_MAX = 128;
 const EVENT_DESCRIPTION_MAX = 2000;
 const EVENT_RECURRENCES = new Set(["daily", "weekly", "monthly"]);
 
+const EVENT_HEADLINE_MAX = 80;
+const EVENT_STANDBY_MESSAGE_MAX = 600;
+
 interface EventRow {
   id: number;
   stream_id: string;
@@ -1688,7 +1724,25 @@ interface EventRow {
   timezone: string;
   recurrence: string | null;
   canceled_at: string | null;
+  standby_headline: string | null;
+  standby_message: string | null;
+  standby_accent: string | null;
+  standby_countdown: number;
+  curtain_lifted_at: string | null;
 }
+
+/**
+ * Every column eventJson() reads, in one place.
+ *
+ * Six queries select this row shape. When the standby columns landed, a list that still
+ * selected the old nine would have returned events whose curtain read "down" and whose
+ * standby page was blank — no error anywhere, just a feature that worked on one screen and
+ * not the next. Naming the list once is what stops the next column doing the same.
+ */
+const EVENT_COLUMNS = `
+  id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at,
+  standby_headline, standby_message, standby_accent, standby_countdown, curtain_lifted_at
+`;
 
 /**
  * A stream id nobody is using — not live, not already scheduled, and with no key on file.
@@ -1765,6 +1819,86 @@ function nextOccurrence(startsAt: string, recurrence: string | null, from: numbe
   return new Date(first + steps * stepMs).toISOString();
 }
 
+/**
+ * One interval back from an occurrence, clamped at the first.
+ *
+ * Expressed against nextOccurrence() rather than duplicating its month-clamping arithmetic:
+ * the two must agree about which instants are occurrences, and the cheapest way to guarantee
+ * that is to derive one from the other.
+ */
+function previousOccurrence(startsAt: string, recurrence: string | null, occurrence: number): number {
+  const first = Date.parse(startsAt);
+  if (!Number.isFinite(first) || !recurrence || occurrence <= first) return first;
+
+  if (recurrence === "monthly") {
+    const prev = new Date(occurrence);
+    const month = prev.getUTCMonth();
+    prev.setUTCDate(1);
+    prev.setUTCMonth(month - 1);
+    // Clamp, so a 31st series steps back to the 28th in February rather than skidding.
+    const daysInMonth = new Date(Date.UTC(prev.getUTCFullYear(), prev.getUTCMonth() + 1, 0)).getUTCDate();
+    prev.setUTCDate(Math.min(new Date(first).getUTCDate(), daysInMonth));
+    return Math.max(first, prev.getTime());
+  }
+
+  const stepMs = recurrence === "daily" ? 86_400_000 : 604_800_000;
+  return Math.max(first, occurrence - stepMs);
+}
+
+/**
+ * Which occurrence does this instant belong to?
+ *
+ * The nearest one. That is the whole rule, and it is the second attempt: the first used a
+ * fixed two-hour "setup window" before each start, which meant a host who opened the doors the
+ * DAY BEFORE a one-off event pressed the button, got a 200 back, and watched the bar go on
+ * saying Curtain down. Found by schedule-ui-renders.mjs, not by reading the code — the
+ * arithmetic was self-consistent, it was just answering a question nobody had asked.
+ *
+ * Nearest-occurrence has no window to be outside of. Lift whenever you like and it counts for
+ * the occurrence it is closest to; a series resets only once the midpoint to the next one has
+ * passed, which is the point at which "last time" and "this time" genuinely swap places.
+ *
+ * A one-off event collapses to a single occurrence, so any lift at all counts. That is the
+ * behaviour a host expects and the case the window got wrong.
+ */
+function occurrenceFor(startsAt: string, recurrence: string | null, at: number): number {
+  const first = Date.parse(startsAt);
+  if (!Number.isFinite(first)) return Number.NaN;
+  if (!recurrence || at <= first) return first;
+
+  const next = Date.parse(nextOccurrence(startsAt, recurrence, at));
+  if (!Number.isFinite(next)) return first;
+  const prev = previousOccurrence(startsAt, recurrence, next);
+  return at - prev <= next - at ? prev : next;
+}
+
+/**
+ * Is this event's curtain up right now?
+ *
+ * "Up" means the broadcaster lifted it FOR THE OCCURRENCE IN PLAY, or for a later one. A lift
+ * is an instant; it belongs to the occurrence it is nearest to, and it counts as long as that
+ * occurrence has not been overtaken.
+ *
+ * This is why the column is a timestamp and not a boolean. A standing weekly town hall is ONE
+ * row: a flag set last Thursday would still read "up" this Thursday and the whole audience
+ * would walk in on the host's empty green room.
+ *
+ * A cancelled event has no curtain to lift; it has an explanation instead.
+ */
+function curtainUp(row: Pick<EventRow, "starts_at" | "recurrence" | "curtain_lifted_at" | "canceled_at">, now: number): boolean {
+  if (row.canceled_at) return false;
+  if (!row.curtain_lifted_at) return false;
+  const lifted = Date.parse(row.curtain_lifted_at);
+  if (!Number.isFinite(lifted)) return false;
+
+  const liftedFor = occurrenceFor(row.starts_at, row.recurrence, lifted);
+  const inPlay = occurrenceFor(row.starts_at, row.recurrence, now);
+  // An unparseable start date must never lock an audience out of a broadcast the host has
+  // explicitly opened.
+  if (!Number.isFinite(liftedFor) || !Number.isFinite(inPlay)) return true;
+  return liftedFor >= inPlay;
+}
+
 /** The shape the client sees. `next_starts_at` is what a countdown should count to. */
 function eventJson(row: EventRow, now: number) {
   return {
@@ -1779,7 +1913,33 @@ function eventJson(row: EventRow, now: number) {
     recurrence: row.recurrence,
     canceled: !!row.canceled_at,
     url: `/${row.stream_id}`,
+    // What the early arrival sees, and whether they are still seeing it.
+    standby: {
+      headline: row.standby_headline,
+      message: row.standby_message,
+      accent: row.standby_accent,
+      countdown: row.standby_countdown !== 0,
+    },
+    curtain: curtainUp(row, now) ? "up" : "down",
+    curtain_lifted_at: row.curtain_lifted_at,
   };
+}
+
+/** `#rrggbb` or nothing. See migration 0022 for why this is not free CSS. */
+function readAccent(value: unknown, fallback: string | null): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string") return fallback;
+  const v = value.trim();
+  if (!v) return null;
+  return /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : fallback;
+}
+
+/** Trimmed, length-capped, or null. `null` in means "clear it"; absent means "leave it". */
+function readStandbyText(value: unknown, max: number, fallback: string | null): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string") return fallback;
+  const v = value.trim().slice(0, max);
+  return v || null;
 }
 
 async function handleEventRoutes(
@@ -1804,7 +1964,7 @@ async function handleEventRoutes(
   if (method === "GET" && path === "/api/events") {
     const { results } = await env.DB
       .prepare(`
-        SELECT id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+        SELECT ${EVENT_COLUMNS}
         FROM scheduled_events WHERE user_id = ? ORDER BY starts_at ASC LIMIT 200
       `)
       .bind(user.id)
@@ -1867,17 +2027,67 @@ async function handleEventRoutes(
       return Response.json({ error: "Could not prepare the event link. Try again." }, { status: 500 });
     }
 
+    const standby = body.standby && typeof body.standby === "object" ? body.standby as Record<string, unknown> : {};
+    const standbyHeadline = readStandbyText(standby.headline, EVENT_HEADLINE_MAX, null);
+    const standbyMessage = readStandbyText(standby.message, EVENT_STANDBY_MESSAGE_MAX, null);
+    const standbyAccent = readAccent(standby.accent, null);
+    // Absent means on. A scheduler who never opened the standby section gets a countdown,
+    // which is what the page did before this column existed.
+    const standbyCountdown = standby.countdown === false ? 0 : 1;
+
     const row = await env.DB
       .prepare(`
-        INSERT INTO scheduled_events (user_id, stream_id, title, description, starts_at, ends_at, timezone, recurrence)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+        INSERT INTO scheduled_events (user_id, stream_id, title, description, starts_at, ends_at, timezone, recurrence,
+                                      standby_headline, standby_message, standby_accent, standby_countdown)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING ${EVENT_COLUMNS}
       `)
-      .bind(user.id, streamId, title, description, startsAt, endsAt, timezone, recurrence)
+      .bind(user.id, streamId, title, description, startsAt, endsAt, timezone, recurrence,
+            standbyHeadline, standbyMessage, standbyAccent, standbyCountdown)
       .first<EventRow>();
     if (!row) return Response.json({ error: "Could not save the event." }, { status: 500 });
 
     return Response.json({ event: eventJson(row, now) }, { status: 201 });
+  }
+
+  // POST /api/events/:id/curtain — open the doors.
+  //
+  // Matched ahead of the /api/events/:id block below, whose regex is anchored and would
+  // otherwise fall through to the 404 at the bottom of this function.
+  //
+  // One direction only. Lowering it again would be a lie: viewers who are already watching
+  // hold a relay token and a live subscription, and nothing here can reach in and stop them
+  // — they would keep watching behind a control that claimed the room was shut. What this
+  // does control is who gets in from now on, so it only ever says "let them in".
+  const curtainMatch = path.match(/^\/api\/events\/(\d+)\/curtain$/);
+  if (method === "POST" && curtainMatch) {
+    const id = Number(curtainMatch[1]);
+    const row = await env.DB
+      .prepare(`SELECT ${EVENT_COLUMNS} FROM scheduled_events WHERE id = ? AND user_id = ?`)
+      .bind(id, user.id)
+      .first<EventRow>();
+    if (!row) return Response.json({ error: "not found" }, { status: 404 });
+    if (row.canceled_at) {
+      return Response.json({ error: "This event was cancelled." }, { status: 409 });
+    }
+
+    // Idempotent: already up for this occurrence and the timestamp stays where it is, so a
+    // double-click does not re-date the lift and a series' attribution window stays put.
+    if (curtainUp(row, now)) {
+      return Response.json({ event: eventJson(row, now) });
+    }
+
+    const lifted = new Date(now).toISOString();
+    const updated = await env.DB
+      .prepare(`
+        UPDATE scheduled_events SET curtain_lifted_at = ?, updated_at = datetime('now')
+        WHERE id = ? AND user_id = ?
+        RETURNING ${EVENT_COLUMNS}
+      `)
+      .bind(lifted, id, user.id)
+      .first<EventRow>();
+    if (!updated) return Response.json({ error: "Could not lift the curtain." }, { status: 500 });
+    return Response.json({ event: eventJson(updated, now) });
   }
 
   const eventIdMatch = path.match(/^\/api\/events\/(\d+)$/);
@@ -1885,7 +2095,7 @@ async function handleEventRoutes(
     const id = Number(eventIdMatch[1]);
     const owned = await env.DB
       .prepare(`
-        SELECT id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+        SELECT ${EVENT_COLUMNS}
         FROM scheduled_events WHERE id = ? AND user_id = ?
       `)
       .bind(id, user.id)
@@ -1893,6 +2103,11 @@ async function handleEventRoutes(
     // 404 rather than 403 for someone else's event: whether an id exists is not a fact a
     // signed-in stranger needs.
     if (!owned) return Response.json({ error: "not found" }, { status: 404 });
+
+    // GET — one event, for the edit form, which arrives by URL with nothing in hand.
+    if (method === "GET") {
+      return Response.json({ event: eventJson(owned, now) });
+    }
 
     // PATCH — edit the details. The stream id and its key are deliberately NOT editable: they
     // are what is already sitting in other people's calendars.
@@ -1927,15 +2142,34 @@ async function handleEventRoutes(
           ? body.recurrence
           : owned.recurrence;
 
+      // The standby design. Absent leaves each field alone, explicit null clears it — the
+      // same convention `description` already follows, so an edit form that only touches the
+      // time cannot silently wipe the page an audience is about to look at.
+      const standby = body.standby && typeof body.standby === "object" ? body.standby as Record<string, unknown> : {};
+      const standbyHeadline = "headline" in standby
+        ? readStandbyText(standby.headline, EVENT_HEADLINE_MAX, owned.standby_headline)
+        : owned.standby_headline;
+      const standbyMessage = "message" in standby
+        ? readStandbyText(standby.message, EVENT_STANDBY_MESSAGE_MAX, owned.standby_message)
+        : owned.standby_message;
+      const standbyAccent = "accent" in standby
+        ? readAccent(standby.accent, owned.standby_accent)
+        : owned.standby_accent;
+      const standbyCountdown = "countdown" in standby
+        ? (standby.countdown === false ? 0 : 1)
+        : owned.standby_countdown;
+
       const row = await env.DB
         .prepare(`
           UPDATE scheduled_events
           SET title = ?, description = ?, starts_at = ?, ends_at = ?, timezone = ?, recurrence = ?,
+              standby_headline = ?, standby_message = ?, standby_accent = ?, standby_countdown = ?,
               updated_at = datetime('now')
           WHERE id = ? AND user_id = ?
-          RETURNING id, stream_id, title, description, starts_at, ends_at, timezone, recurrence, canceled_at
+          RETURNING ${EVENT_COLUMNS}
         `)
-        .bind(title, description, startsAt, endsAt, timezone, recurrence, id, user.id)
+        .bind(title, description, startsAt, endsAt, timezone, recurrence,
+              standbyHeadline, standbyMessage, standbyAccent, standbyCountdown, id, user.id)
         .first<EventRow>();
       if (!row) return Response.json({ error: "Could not save the change." }, { status: 500 });
       return Response.json({ event: eventJson(row, now) });

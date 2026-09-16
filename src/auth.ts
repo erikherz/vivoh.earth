@@ -315,6 +315,24 @@ export interface ScheduledEvent {
   recurrence: "daily" | "weekly" | "monthly" | null;
   canceled: boolean;
   url: string;
+  /** The page an early arrival sees, as the scheduler designed it. */
+  standby: StandbyDesign;
+  /**
+   * "up" once the broadcaster opened the doors FOR THE OCCURRENCE IN PLAY.
+   *
+   * Occurrence-scoped rather than a flag: a weekly series lifted last Thursday reads "down"
+   * again this Thursday, so a host never finds their green room already full.
+   */
+  curtain: "up" | "down";
+  curtain_lifted_at: string | null;
+}
+
+export interface StandbyDesign {
+  headline: string | null;
+  message: string | null;
+  /** `#rrggbb` or null. The Worker refuses anything else — it is styling, not a stylesheet. */
+  accent: string | null;
+  countdown: boolean;
 }
 
 export interface EventInput {
@@ -324,6 +342,8 @@ export interface EventInput {
   ends_at?: string | null;
   timezone: string;
   recurrence?: "daily" | "weekly" | "monthly" | null;
+  /** On PATCH an absent field is left alone and an explicit null clears it. */
+  standby?: Partial<StandbyDesign>;
 }
 
 /** The broadcaster's own events. Empty array on any failure — a list is not worth throwing over. */
@@ -358,6 +378,24 @@ export async function createEvent(input: EventInput): Promise<{ event?: Schedule
   }
 }
 
+/**
+ * One of the broadcaster's own events, by id.
+ *
+ * Exists for the edit form, which is reached by URL and so cannot rely on having the event
+ * already in hand. Scoped to the owner in the Worker, which answers 404 — not 403 — for
+ * somebody else's id.
+ */
+export async function getEvent(id: number): Promise<ScheduledEvent | null> {
+  try {
+    const res = await fetch(`/api/events/${id}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.event ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function updateEvent(id: number, input: Partial<EventInput>): Promise<{ event?: ScheduledEvent; error?: string }> {
   try {
     const res = await fetch(`/api/events/${id}`, {
@@ -367,6 +405,24 @@ export async function updateEvent(id: number, input: Partial<EventInput>): Promi
     });
     const data = await res.json().catch(() => null);
     if (!res.ok) return { error: data?.error || `Could not save the change (HTTP ${res.status}).` };
+    return { event: data?.event };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Open the doors.
+ *
+ * One direction only, which is why there is no `lower`. Viewers already watching hold a relay
+ * token and a live subscription that nothing here can revoke, so a "lower" control would claim
+ * to shut a room it could not empty. What this changes is who gets in from now on.
+ */
+export async function liftCurtain(id: number): Promise<{ event?: ScheduledEvent; error?: string }> {
+  try {
+    const res = await fetch(`/api/events/${id}/curtain`, { method: "POST" });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return { error: data?.error || `Could not lift the curtain (HTTP ${res.status}).` };
     return { event: data?.event };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
@@ -422,12 +478,22 @@ export interface StreamRoute {
   pullToken?: string; // local relay -> edge (cluster-flagged pull pass)
 }
 
+/**
+ * "curtain" means live, reachable, and deliberately not yours yet.
+ *
+ * Distinguished from null because the two need different words on screen. Null is "nothing is
+ * happening at this link" and the honest response is a countdown; "curtain" is "it has
+ * started and the host has not opened the doors", and a viewer told the first one about the
+ * second gives up on a link that was about to work.
+ */
+export type RouteResult = StreamRoute | "curtain" | null;
+
 export async function getStreamRoute(
   streamId: string,
   viewerCdn?: string,
   origin?: string,
   opts?: { noEnterprise?: boolean; routeTag?: string }
-): Promise<StreamRoute | null> {
+): Promise<RouteResult> {
   try {
     const qp = new URLSearchParams();
     if (viewerCdn) qp.set("viewer-cdn", viewerCdn);
@@ -454,6 +520,10 @@ export async function getStreamRoute(
     if (ttl) qp.set("ttl", ttl);
     const qs = qp.toString() ? `?${qp.toString()}` : "";
     const response = await fetch(`/api/streams/${streamId}/route${qs}`);
+    // 425 Too Early = the broadcast is live but this event's curtain is down. The Worker
+    // withheld the viewer token, so there is genuinely nothing to connect with; the caller
+    // keeps waiting and says so in the right words.
+    if (response.status === 425) return "curtain";
     if (!response.ok) return null; // 404 = offline, 401 = auth required
     const data = await response.json();
     if (!data.relay) return null;

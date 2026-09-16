@@ -167,3 +167,6 @@ dist
 .wrangler/
 .dev.vars
 .claude/
+
+# Screenshots written by scripts/e2e/schedule-ui-renders.mjs. Evidence, not source.
+scripts/e2e/.shots/

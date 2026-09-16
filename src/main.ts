@@ -771,9 +771,13 @@ import {
   putStreamKey,
   getStreamEvent,
   listEvents,
+  getEvent,
   createEvent,
   cancelEvent,
+  updateEvent,
+  liftCurtain,
   type ScheduledEvent,
+  type StandbyDesign,
   getLiveStats,
   getStreamViewers,
   type User,
@@ -1145,6 +1149,113 @@ function spin(btn: Element): void {
   window.setTimeout(() => btn.classList.remove("spun"), 500);
 }
 
+/**
+ * The curtain control, on the broadcaster's own page.
+ *
+ * Only a scheduled event has one. An ad hoc broadcast has no event row, the bar never
+ * appears, and going live still means going live — which is the promise the Broadcast button
+ * has always made and this must not quietly break.
+ *
+ * What it buys a host is the separation between "I am publishing" and "they can watch". Until
+ * this existed, the first frame that reached the relay was the first frame the whole invite
+ * list saw: no time to check framing, no time to get the deck up, no time to let the room
+ * fill. Now the audience sits on the standby page until this button is pressed.
+ *
+ * There is no lower. See liftCurtain() in auth.ts for why a control that claimed to shut the
+ * room would be lying to the person pressing it.
+ */
+function mountCurtainControl(streamId: string): void {
+  const bar = document.getElementById("curtain-bar");
+  if (!bar) return;
+
+  // Cleared up front, because this is re-called after a link rotation: a stale bar left on
+  // screen would offer to lift a curtain belonging to a broadcast nobody is watching.
+  bar.classList.add("hidden");
+  bar.replaceChildren();
+
+  void (async () => {
+    const event = await getStreamEvent(streamId);
+    // null = ad hoc, "auth" = signed out (the page has bigger problems, and showing a curtain
+    // control to someone who cannot broadcast would be a control that cannot work).
+    if (!event || event === "auth") return;
+
+    let current = event;
+    bar.classList.remove("hidden");
+
+    const paint = () => {
+      bar.replaceChildren();
+      if (current.standby.accent) bar.style.setProperty("--standby-accent", current.standby.accent);
+      bar.classList.toggle("up", current.curtain === "up");
+
+      const text = document.createElement("div");
+      text.className = "curtain-text";
+
+      const title = document.createElement("strong");
+      const detail = document.createElement("span");
+
+      if (current.canceled) {
+        title.textContent = "This event was cancelled";
+        detail.textContent = "Anyone who opens the link is told so. Schedule a replacement to run it again.";
+        text.append(title, detail);
+        bar.append(text);
+        return;
+      }
+
+      if (current.curtain === "up") {
+        title.textContent = "Curtain up";
+        detail.textContent = "Everyone holding the link can watch. New arrivals go straight to the video.";
+        text.append(title, detail);
+        bar.append(text);
+        return;
+      }
+
+      title.textContent = "Curtain down";
+      detail.textContent =
+        "Your audience is on the standby page, even while you are live. Take your time — " +
+        "lift the curtain when you are ready and every one of them switches over on their own.";
+      text.append(title, detail);
+
+      const actions = document.createElement("div");
+      actions.className = "curtain-actions";
+
+      const preview = document.createElement("a");
+      preview.className = "curtain-preview";
+      preview.href = `/schedule?event=${current.id}`;
+      preview.textContent = "Edit standby page";
+
+      const lift = document.createElement("button");
+      lift.type = "button";
+      lift.className = "curtain-lift";
+      lift.textContent = "Lift the curtain";
+      lift.addEventListener("click", async () => {
+        lift.disabled = true;
+        lift.textContent = "Lifting…";
+        const result = await liftCurtain(current.id);
+        if (result.event) {
+          current = result.event;
+          paint();
+          return;
+        }
+        // Say what actually refused. A button that goes back to its old label having done
+        // nothing is the failure mode where a host presses it three more times and then
+        // starts the broadcast over.
+        lift.disabled = false;
+        lift.textContent = "Lift the curtain";
+        const err = document.createElement("p");
+        err.className = "curtain-error";
+        err.setAttribute("role", "alert");
+        err.textContent = result.error ?? "Could not lift the curtain.";
+        bar.append(err);
+      });
+
+      actions.append(preview, lift);
+      bar.append(text, actions);
+    };
+
+    paint();
+  })();
+}
+
 function initBroadcastView(initialStreamId: string, user: User | null) {
   // The broadcast's identity is MUTABLE: the "new link" control (rotateIdentity, below)
   // replaces the id and the link secret together without a page reload. Everything derived
@@ -1279,6 +1390,11 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       }, ok ? 2000 : 6000);
     });
   }
+
+  // Is this broadcast a scheduled event? If so the audience is behind a curtain until the
+  // host opens it. Fire-and-forget: the bar reveals itself once the answer comes back, and a
+  // broadcast must never wait on a lookup that an ad hoc stream does not even need.
+  mountCurtainControl(streamId);
 
   // Relay-blind E2E media encryption is MANDATORY for every stream — there is no opt-out.
   // Arm the publisher at page load, BEFORE any frame is encoded, so nothing is ever
@@ -1875,6 +1991,11 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
         // already did this when the rotation was live; this covers rotate-while-stopped, where
         // nothing else would, and the link would quietly vanish for viewers of the new id.
         if (!wasLive) resealLink();
+        // The curtain belongs to the OLD id's event. A rotation leaves that event behind
+        // entirely -- its invitees still hold the previous link -- so re-asking is what clears
+        // a control that would otherwise still be offering to open a door this broadcast is no
+        // longer behind.
+        mountCurtainControl(streamId);
         console.log("[rotate] new identity:", streamId);
       } finally {
         rotating = false;
@@ -3099,21 +3220,77 @@ function requireBroadcaster(user: User | null, container: HTMLElement): boolean 
   return false;
 }
 
-function initScheduleView(user: User | null): void {
+/**
+ * An instant, as the wall-clock date and time it reads in a given zone.
+ *
+ * The inverse of wallTimeToUtcIso(), and it exists for the edit form: an event stored as
+ * 2026-10-01T01:00Z in Asia/Manila has to reappear in the boxes as 09:00 on the 1st, not as
+ * whatever those boxes would show in the editor's own zone. `sv` gives exactly the
+ * YYYY-MM-DD, HH:mm shapes the date and time inputs want.
+ */
+function utcIsoToWallTime(iso: string | null, zone: string): { date: string; time: string } {
+  if (!iso) return { date: "", time: "" };
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return { date: "", time: "" };
+  try {
+    const parts = new Intl.DateTimeFormat("sv-SE", {
+      timeZone: zone, hour12: false,
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    }).formatToParts(new Date(ms));
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    // Some engines render midnight as hour 24; the date inputs will not accept it.
+    const hour = get("hour") === "24" ? "00" : get("hour");
+    return { date: `${get("year")}-${get("month")}-${get("day")}`, time: `${hour}:${get("minute")}` };
+  } catch {
+    return { date: "", time: "" };
+  }
+}
+
+/**
+ * Schedule an event, or edit one.
+ *
+ * `/schedule` creates; `/schedule?event=<id>` reopens an existing one. The same form does both
+ * because they are the same decisions — and because the standby page is the half a scheduler
+ * most often wants to come back and change, once they have seen what their attendees see.
+ *
+ * What the edit form deliberately CANNOT change is the stream id and its key. Those are what
+ * is already sitting in other people's calendars.
+ */
+async function initScheduleView(user: User | null): Promise<void> {
   const view = showOnly("schedule-view");
   if (!view) return;
   if (!requireBroadcaster(user, view)) return;
 
+  const editId = Number(new URLSearchParams(location.search).get("event")) || 0;
+  const existing = editId ? await getEvent(editId) : null;
+  // An id that resolves to nothing is a stale bookmark or someone else's event. Falling back
+  // to the create form would silently schedule a NEW event out of what the broadcaster
+  // believed was an edit, so say what happened instead.
+  if (editId && !existing) {
+    const panel = document.createElement("div");
+    panel.className = "sched-page";
+    panel.innerHTML = `
+      <h2>That event is not here</h2>
+      <p class="sched-intro">
+        It may have been removed, or it may belong to another account. Nothing has been changed.
+      </p>
+      <div class="sched-actions"><a href="/events" class="sched-btn sched-btn-primary">Your events</a></div>`;
+    view.replaceChildren(panel);
+    return;
+  }
+
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  const zones = [browserZone, ...COMMON_TIMEZONES.filter((z) => z !== browserZone)];
+  const eventZone = existing?.timezone || browserZone;
+  const zones = [eventZone, ...COMMON_TIMEZONES.filter((z) => z !== eventZone)];
 
   const page = document.createElement("div");
   page.className = "sched-page";
   page.innerHTML = `
-    <h2>Schedule an event</h2>
+    <h2>${existing ? "Edit event" : "Schedule an event"}</h2>
     <p class="sched-intro">
-      You will get a link straight away. Put it in the invite &mdash; it works from now until
-      the event is over, and it is the same link you broadcast to on the day.
+      ${existing
+        ? "The link and its key stay exactly as they are &mdash; they are already in other people&rsquo;s calendars. Everything else here can change."
+        : "You will get a link straight away. Put it in the invite &mdash; it works from now until the event is over, and it is the same link you broadcast to on the day."}
     </p>
     <p class="sched-error hidden" id="sched-error" role="alert"></p>
     <div class="sched-row">
@@ -3160,9 +3337,47 @@ function initScheduleView(user: User | null): void {
         </div>
       </div>
     </div>
+
+    <!-- The standby page. Everything here has a working default, so a scheduler who skips
+         this section still gets a page that looks deliberate. -->
+    <h3 class="sched-section">The standby page</h3>
+    <p class="sched-section-note">
+      What people see when they open your link early &mdash; and what they keep seeing after
+      you go live, until you lift the curtain.
+    </p>
+    <div class="sched-row">
+      <label for="sched-sb-headline">Headline</label>
+      <div class="sched-field">
+        <input type="text" id="sched-sb-headline" maxlength="80" autocomplete="off" placeholder="Coming soon">
+        <span class="sched-sub">Leave it empty to use the event title.</span>
+      </div>
+    </div>
+    <div class="sched-row">
+      <label for="sched-sb-message">Message</label>
+      <div class="sched-field">
+        <textarea id="sched-sb-message" maxlength="600" placeholder="Leave it empty to use the description."></textarea>
+      </div>
+    </div>
+    <div class="sched-row">
+      <label for="sched-sb-accent">Accent</label>
+      <div class="sched-field">
+        <div class="sched-accent-row">
+          <input type="color" id="sched-sb-accent" value="${STANDBY_DEFAULT_ACCENT}">
+          <label class="sched-toggle">
+            <input type="checkbox" id="sched-sb-countdown" checked>
+            <span>Show a countdown</span>
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="sched-row">
+      <label>Preview</label>
+      <div class="sched-field"><div id="sched-sb-preview"></div></div>
+    </div>
+
     <div class="sched-actions">
-      <a href="/events" class="sched-btn">My events</a>
-      <button type="button" class="sched-btn sched-btn-primary" id="sched-save">Schedule it</button>
+      <a href="/events" class="sched-btn">${existing ? "Cancel" : "My events"}</a>
+      <button type="button" class="sched-btn sched-btn-primary" id="sched-save">${existing ? "Save changes" : "Schedule it"}</button>
     </div>`;
   view.replaceChildren(page);
 
@@ -3173,15 +3388,73 @@ function initScheduleView(user: User | null): void {
     opt.textContent = timezoneLabel(z);
     tzSelect.append(opt);
   }
-  tzSelect.value = browserZone;
+  tzSelect.value = eventZone;
 
   const titleInput = page.querySelector("#sched-title") as HTMLInputElement;
   const titleCount = page.querySelector("#sched-title-count") as HTMLElement;
-  titleInput.addEventListener("input", () => { titleCount.textContent = String(titleInput.value.length); });
-
+  const descInput = page.querySelector("#sched-desc") as HTMLTextAreaElement;
+  const startDate = page.querySelector("#sched-start-date") as HTMLInputElement;
+  const startTime = page.querySelector("#sched-start-time") as HTMLInputElement;
+  const endDate = page.querySelector("#sched-end-date") as HTMLInputElement;
+  const endTime = page.querySelector("#sched-end-time") as HTMLInputElement;
   const recurring = page.querySelector("#sched-recurring") as HTMLInputElement;
   const recurrence = page.querySelector("#sched-recurrence") as HTMLSelectElement;
+  const sbHeadline = page.querySelector("#sched-sb-headline") as HTMLInputElement;
+  const sbMessage = page.querySelector("#sched-sb-message") as HTMLTextAreaElement;
+  const sbAccent = page.querySelector("#sched-sb-accent") as HTMLInputElement;
+  const sbCountdown = page.querySelector("#sched-sb-countdown") as HTMLInputElement;
+  const preview = page.querySelector("#sched-sb-preview") as HTMLElement;
+
+  if (existing) {
+    titleInput.value = existing.title;
+    descInput.value = existing.description ?? "";
+    const s = utcIsoToWallTime(existing.starts_at, eventZone);
+    startDate.value = s.date;
+    startTime.value = s.time;
+    const e = utcIsoToWallTime(existing.ends_at, eventZone);
+    endDate.value = e.date;
+    endTime.value = e.time;
+    if (existing.recurrence) {
+      recurring.checked = true;
+      recurrence.classList.remove("hidden");
+      recurrence.value = existing.recurrence;
+    }
+    sbHeadline.value = existing.standby.headline ?? "";
+    sbMessage.value = existing.standby.message ?? "";
+    sbAccent.value = existing.standby.accent ?? STANDBY_DEFAULT_ACCENT;
+    sbCountdown.checked = existing.standby.countdown;
+  }
+
+  titleCount.textContent = String(titleInput.value.length);
+  titleInput.addEventListener("input", () => { titleCount.textContent = String(titleInput.value.length); });
   recurring.addEventListener("change", () => recurrence.classList.toggle("hidden", !recurring.checked));
+
+  // The preview is the SAME renderer the viewer gets, not a mock-up of it. Anything that
+  // drifted here would be a scheduler designing one page and shipping another.
+  let livePreview: StandbyHandle | null = null;
+  const repaint = () => {
+    livePreview?.stop();
+    const zone = tzSelect.value;
+    const startsIso = wallTimeToUtcIso(startDate.value, startTime.value, zone);
+    livePreview = renderStandby({
+      title: titleInput.value.trim() || "Your event",
+      description: descInput.value.trim() || null,
+      standby: {
+        headline: sbHeadline.value.trim() || null,
+        message: sbMessage.value.trim() || null,
+        accent: sbAccent.value,
+        countdown: sbCountdown.checked,
+      },
+      startsAt: startsIso ? new Date(startsIso) : null,
+      canceled: false,
+    });
+    preview.replaceChildren(livePreview.el);
+  };
+  for (const el of [titleInput, descInput, startDate, startTime, tzSelect, sbHeadline, sbMessage, sbAccent, sbCountdown]) {
+    el.addEventListener("input", repaint);
+    el.addEventListener("change", repaint);
+  }
+  repaint();
 
   const errorEl = page.querySelector("#sched-error") as HTMLElement;
   const fail = (msg: string) => {
@@ -3191,6 +3464,7 @@ function initScheduleView(user: User | null): void {
   };
 
   const saveBtn = page.querySelector("#sched-save") as HTMLButtonElement;
+  const saveLabel = saveBtn.textContent ?? "Save";
   saveBtn.addEventListener("click", async () => {
     errorEl.classList.add("hidden");
 
@@ -3198,153 +3472,437 @@ function initScheduleView(user: User | null): void {
     if (!title) return fail("Give the event a title — it is what attendees see before you go live.");
 
     const zone = tzSelect.value;
-    const startsAt = wallTimeToUtcIso(
-      (page.querySelector("#sched-start-date") as HTMLInputElement).value,
-      (page.querySelector("#sched-start-time") as HTMLInputElement).value,
-      zone
-    );
+    const startsAt = wallTimeToUtcIso(startDate.value, startTime.value, zone);
     if (!startsAt) return fail("Pick a start date and a start time.");
 
-    const endDate = (page.querySelector("#sched-end-date") as HTMLInputElement).value;
-    const endTime = (page.querySelector("#sched-end-time") as HTMLInputElement).value;
     // A half-filled end is a mistake, not an omission: someone typed a date and moved on.
     // Treating it as "no end" would silently discard what they entered.
-    if ((endDate && !endTime) || (!endDate && endTime)) {
+    if ((endDate.value && !endTime.value) || (!endDate.value && endTime.value)) {
       return fail("The end needs both a date and a time, or neither.");
     }
-    const endsAt = endDate && endTime ? wallTimeToUtcIso(endDate, endTime, zone) : null;
+    const endsAt = endDate.value && endTime.value ? wallTimeToUtcIso(endDate.value, endTime.value, zone) : null;
 
-    saveBtn.disabled = true;
-    saveBtn.textContent = "Scheduling…";
-    const result = await createEvent({
+    const input = {
       title,
-      description: (page.querySelector("#sched-desc") as HTMLTextAreaElement).value.trim() || null,
+      description: descInput.value.trim() || null,
       starts_at: startsAt,
       ends_at: endsAt,
       timezone: zone,
       recurrence: recurring.checked ? (recurrence.value as "daily" | "weekly" | "monthly") : null,
-    });
-    saveBtn.disabled = false;
-    saveBtn.textContent = "Schedule it";
+      standby: {
+        headline: sbHeadline.value.trim() || null,
+        message: sbMessage.value.trim() || null,
+        // The colour picker has no "unset", so an untouched accent equals the house one and
+        // is sent as null. Storing it would freeze this event against a future restyle.
+        accent: sbAccent.value.toLowerCase() === STANDBY_DEFAULT_ACCENT ? null : sbAccent.value,
+        countdown: sbCountdown.checked,
+      },
+    };
 
-    if (result.error || !result.event) return fail(result.error ?? "Could not schedule the event.");
-    // Straight to the list, where the new event's link is right there to copy. Staying on a
+    saveBtn.disabled = true;
+    saveBtn.textContent = existing ? "Saving…" : "Scheduling…";
+    const result = existing ? await updateEvent(existing.id, input) : await createEvent(input);
+    saveBtn.disabled = false;
+    saveBtn.textContent = saveLabel;
+
+    if (result.error || !result.event) return fail(result.error ?? "Could not save the event.");
+    // Straight to the list, where the event's link is right there to copy. Staying on a
     // cleared form would make a broadcaster wonder whether it saved.
     window.location.href = "/events";
   });
 }
 
+/**
+ * Every time this event begins between `from` and `to`.
+ *
+ * The Worker expands recurrence on read too (nextOccurrence), but it only ever answers "when
+ * is the next one" — a calendar needs all of them inside a window. Expanding here rather than
+ * asking the Worker for a range keeps the events API to one shape and means moving between
+ * months costs nothing.
+ *
+ * Bounded at 400 iterations. A daily series across a month grid produces 42; the cap is not a
+ * limit anyone reaches, it is what stops a malformed interval spinning the page forever.
+ */
+function occurrencesInRange(ev: ScheduledEvent, from: Date, to: Date): Date[] {
+  const first = Date.parse(ev.starts_at);
+  if (!Number.isFinite(first)) return [];
+  const fromMs = from.getTime();
+  const toMs = to.getTime();
+  const out: Date[] = [];
+
+  if (!ev.recurrence) {
+    if (first >= fromMs && first <= toMs) out.push(new Date(first));
+    return out;
+  }
+
+  if (ev.recurrence === "monthly") {
+    const day = new Date(first).getUTCDate();
+    const cursor = new Date(first);
+    for (let i = 0; i < 400 && cursor.getTime() <= toMs; i++) {
+      if (cursor.getTime() >= fromMs) out.push(new Date(cursor.getTime()));
+      const month = cursor.getUTCMonth();
+      cursor.setUTCDate(1);
+      cursor.setUTCMonth(month + 1);
+      // Clamp, so a 31st series lands on the 28th in February rather than skidding into March.
+      const daysInMonth = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0)).getUTCDate();
+      cursor.setUTCDate(Math.min(day, daysInMonth));
+    }
+    return out;
+  }
+
+  const stepMs = ev.recurrence === "daily" ? 86_400_000 : 604_800_000;
+  // Jump straight to the first occurrence at or after `from` instead of walking there: a
+  // daily series started two years ago would otherwise take 700 steps to reach this month.
+  const skipped = first >= fromMs ? 0 : Math.ceil((fromMs - first) / stepMs);
+  let t = first + skipped * stepMs;
+  for (let i = 0; i < 400 && t <= toMs; i++) {
+    out.push(new Date(t));
+    t += stepMs;
+  }
+  return out;
+}
+
+/** Local midnight, as the key a calendar cell is looked up by. */
+function dayKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * The broadcaster's events, as a list or as a month.
+ *
+ * The list answers "what have I got booked and what is its link"; the calendar answers "is the
+ * 14th free" and "when does this weekly series actually fall". Neither replaces the other, so
+ * the choice rides in `?view=` and survives a refresh.
+ *
+ * Occurrences are expanded in the VIEWER's own zone — the broadcaster's browser, here. An
+ * event stored with timezone Asia/Manila shows up on the day it falls for the person looking
+ * at the grid, which is the only reading of "which day is it on" that does not need arithmetic.
+ */
 async function initEventsView(user: User | null): Promise<void> {
   const view = showOnly("events-view");
   if (!view) return;
   if (!requireBroadcaster(user, view)) return;
+
+  const wantCalendar = new URLSearchParams(location.search).get("view") === "calendar";
 
   const page = document.createElement("div");
   page.className = "sched-page";
   page.innerHTML = `
     <h2>Your events</h2>
     <p class="sched-intro">Each link works from now until the event is over.</p>
-    <div id="events-list"><p class="event-empty">Loading…</p></div>
+    <div class="events-modes" role="tablist" aria-label="How to show your events">
+      <button type="button" class="events-mode" id="mode-list" role="tab">List</button>
+      <button type="button" class="events-mode" id="mode-calendar" role="tab">Calendar</button>
+    </div>
+    <div id="events-body"><p class="event-empty">Loading…</p></div>
     <div class="sched-actions">
       <a href="/broadcast" class="sched-btn">Broadcast now</a>
       <a href="/schedule" class="sched-btn sched-btn-primary">Schedule an event</a>
     </div>`;
   view.replaceChildren(page);
 
-  const list = page.querySelector("#events-list") as HTMLElement;
-  const paint = (events: ScheduledEvent[]) => {
-    if (!events.length) {
-      list.innerHTML = `<p class="event-empty">Nothing scheduled yet.</p>`;
-      return;
-    }
-    list.replaceChildren();
-    for (const ev of events) {
-      const card = document.createElement("div");
-      card.className = `event-card${ev.canceled ? " canceled" : ""}`;
+  const body = page.querySelector("#events-body") as HTMLElement;
+  const listBtn = page.querySelector("#mode-list") as HTMLButtonElement;
+  const calBtn = page.querySelector("#mode-calendar") as HTMLButtonElement;
 
-      const h = document.createElement("h3");
-      h.textContent = ev.title;
+  let events: ScheduledEvent[] = [];
+  let mode: "list" | "calendar" = wantCalendar ? "calendar" : "list";
+  // The month on screen, held as its first day so month arithmetic cannot land on the 31st of
+  // a 30-day month and skip one.
+  let cursorMonth = new Date();
+  cursorMonth = new Date(cursorMonth.getFullYear(), cursorMonth.getMonth(), 1);
+  let selectedDay: string | null = dayKey(new Date());
 
-      const when = document.createElement("p");
-      when.className = "event-when";
-      const starts = new Date(ev.next_starts_at);
-      const recurring = ev.recurrence ? ` · repeats ${ev.recurrence}` : "";
-      when.textContent = ev.canceled
-        ? "Cancelled"
-        : starts.toLocaleString(undefined, {
-            weekday: "short", month: "short", day: "numeric",
-            hour: "numeric", minute: "2-digit", timeZoneName: "short",
-          }) + recurring;
+  const setMode = (next: "list" | "calendar") => {
+    mode = next;
+    // A month grid at 46rem gives ~94px cells, which clips every title to six characters. The
+    // form stays narrow because a form should; the calendar gets the width it needs.
+    page.classList.toggle("wide", next === "calendar");
+    listBtn.classList.toggle("active", next === "list");
+    listBtn.setAttribute("aria-selected", String(next === "list"));
+    calBtn.classList.toggle("active", next === "calendar");
+    calBtn.setAttribute("aria-selected", String(next === "calendar"));
+    // replaceState, not a navigation: reloading the whole view to change a tab would refetch
+    // the events and lose the month the broadcaster had paged to.
+    const url = new URL(location.href);
+    if (next === "calendar") url.searchParams.set("view", "calendar");
+    else url.searchParams.delete("view");
+    window.history.replaceState({}, "", url.pathname + (url.search || ""));
+    paint();
+  };
+  listBtn.addEventListener("click", () => setMode("list"));
+  calBtn.addEventListener("click", () => setMode("calendar"));
 
-      card.append(h, when);
-
-      if (ev.description) {
-        const d = document.createElement("p");
-        d.className = "event-desc";
-        d.textContent = ev.description;
-        card.append(d);
-      }
-
-      const linkRow = document.createElement("p");
-      linkRow.style.cssText = "margin:0;font-size:0.88rem;";
-      const code = document.createElement("span");
-      code.className = "event-link";
-      code.textContent = `${location.origin}${ev.url}`;
-      linkRow.append(code);
-      card.append(linkRow);
-
-      const actions = document.createElement("div");
-      actions.className = "event-actions";
-
-      if (!ev.canceled) {
-        const copy = document.createElement("button");
-        copy.textContent = "Copy link";
-        copy.addEventListener("click", async () => {
-          // The tick means "it is on your clipboard", never "you clicked me" — the same rule
-          // the broadcast page's Copy follows, and for the same reason: a refused clipboard
-          // write is invisible, and the broadcaster pastes whatever was there before.
-          try {
-            await navigator.clipboard.writeText(`${location.origin}${ev.url}`);
-            copy.textContent = "Copied";
-          } catch {
-            copy.textContent = "Press ⌘C";
-            const sel = window.getSelection();
-            const range = document.createRange();
-            range.selectNodeContents(code);
-            sel?.removeAllRanges();
-            sel?.addRange(range);
-          }
-          window.setTimeout(() => { copy.textContent = "Copy link"; }, 2000);
-        });
-
-        const live = document.createElement("a");
-        live.className = "go-live";
-        // The broadcast view's own resume URL, so this opens the publishing page for THIS
-        // event's id rather than minting a new one.
-        live.href = broadcastUrl(ev.stream_id);
-        live.textContent = "Go live";
-
-        const cancel = document.createElement("button");
-        cancel.textContent = "Cancel event";
-        cancel.addEventListener("click", async () => {
-          if (!window.confirm(
-            `Cancel "${ev.title}"?\n\nAnyone who opens the link will be told it was cancelled. ` +
-            `You cannot un-cancel it, but you can schedule a replacement.`
-          )) return;
-          cancel.disabled = true;
-          if (await cancelEvent(ev.id)) paint(await listEvents());
-          else cancel.disabled = false;
-        });
-
-        actions.append(live, copy, cancel);
-      }
-
-      card.append(actions);
-      list.append(card);
-    }
+  const paint = () => {
+    if (mode === "calendar") paintCalendar();
+    else paintList();
   };
 
-  paint(await listEvents());
+  // ── List ────────────────────────────────────────────────────────────────────────────
+  function paintList() {
+    if (!events.length) {
+      body.innerHTML = `<p class="event-empty">Nothing scheduled yet.</p>`;
+      return;
+    }
+    body.replaceChildren(...events.map(eventCard));
+  }
+
+  function eventCard(ev: ScheduledEvent): HTMLElement {
+    const card = document.createElement("div");
+    card.className = `event-card${ev.canceled ? " canceled" : ""}`;
+    if (ev.standby.accent) card.style.setProperty("--standby-accent", ev.standby.accent);
+
+    const h = document.createElement("h3");
+    h.textContent = ev.title;
+    card.append(h);
+
+    const when = document.createElement("p");
+    when.className = "event-when";
+    const recurring = ev.recurrence ? ` · repeats ${ev.recurrence}` : "";
+    when.textContent = ev.canceled
+      ? "Cancelled"
+      : new Date(ev.next_starts_at).toLocaleString(undefined, {
+          weekday: "short", month: "short", day: "numeric",
+          hour: "numeric", minute: "2-digit", timeZoneName: "short",
+        }) + recurring;
+    card.append(when);
+
+    // Whether the doors are open, stated plainly. A host looking at this list mid-event wants
+    // to know whether their audience is watching or still on the standby page, and "curtain
+    // up" is the only fact on the card that changes minute to minute.
+    if (!ev.canceled) {
+      const chip = document.createElement("span");
+      chip.className = `curtain-chip ${ev.curtain === "up" ? "up" : "down"}`;
+      chip.textContent = ev.curtain === "up" ? "Curtain up" : "Curtain down";
+      card.append(chip);
+    }
+
+    if (ev.description) {
+      const d = document.createElement("p");
+      d.className = "event-desc";
+      d.textContent = ev.description;
+      card.append(d);
+    }
+
+    const linkRow = document.createElement("p");
+    linkRow.style.cssText = "margin:0;font-size:0.88rem;";
+    const code = document.createElement("span");
+    code.className = "event-link";
+    code.textContent = `${location.origin}${ev.url}`;
+    linkRow.append(code);
+    card.append(linkRow);
+
+    const actions = document.createElement("div");
+    actions.className = "event-actions";
+
+    if (!ev.canceled) {
+      const copy = document.createElement("button");
+      copy.textContent = "Copy link";
+      copy.addEventListener("click", async () => {
+        // The tick means "it is on your clipboard", never "you clicked me" — the same rule
+        // the broadcast page's Copy follows, and for the same reason: a refused clipboard
+        // write is invisible, and the broadcaster pastes whatever was there before.
+        try {
+          await navigator.clipboard.writeText(`${location.origin}${ev.url}`);
+          copy.textContent = "Copied";
+        } catch {
+          copy.textContent = "Press ⌘C";
+          const sel = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(code);
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+        }
+        window.setTimeout(() => { copy.textContent = "Copy link"; }, 2000);
+      });
+
+      const live = document.createElement("a");
+      live.className = "go-live";
+      // The broadcast view's own resume URL, so this opens the publishing page for THIS
+      // event's id rather than minting a new one.
+      live.href = broadcastUrl(ev.stream_id);
+      live.textContent = "Go live";
+
+      const edit = document.createElement("a");
+      edit.href = `/schedule?event=${ev.id}`;
+      edit.textContent = "Edit";
+
+      const cancel = document.createElement("button");
+      cancel.textContent = "Cancel event";
+      cancel.addEventListener("click", async () => {
+        if (!window.confirm(
+          `Cancel "${ev.title}"?\n\nAnyone who opens the link will be told it was cancelled. ` +
+          `You cannot un-cancel it, but you can schedule a replacement.`
+        )) return;
+        cancel.disabled = true;
+        if (await cancelEvent(ev.id)) { events = await listEvents(); paint(); }
+        else cancel.disabled = false;
+      });
+
+      actions.append(live, copy, edit, cancel);
+    }
+
+    card.append(actions);
+    return card;
+  }
+
+  // ── Calendar ────────────────────────────────────────────────────────────────────────
+  function paintCalendar() {
+    const year = cursorMonth.getFullYear();
+    const month = cursorMonth.getMonth();
+
+    // Six weeks, always. A grid that is five rows in one month and six in the next jumps the
+    // page under the pointer every time you press the arrow.
+    const gridStart = new Date(year, month, 1);
+    gridStart.setDate(gridStart.getDate() - gridStart.getDay());
+    const gridEnd = new Date(gridStart);
+    gridEnd.setDate(gridEnd.getDate() + 41);
+    gridEnd.setHours(23, 59, 59, 999);
+
+    const byDay = new Map<string, { ev: ScheduledEvent; at: Date }[]>();
+    for (const ev of events) {
+      if (ev.canceled) continue;
+      for (const at of occurrencesInRange(ev, gridStart, gridEnd)) {
+        const key = dayKey(at);
+        const bucket = byDay.get(key);
+        if (bucket) bucket.push({ ev, at });
+        else byDay.set(key, [{ ev, at }]);
+      }
+    }
+    for (const bucket of byDay.values()) bucket.sort((a, b) => a.at.getTime() - b.at.getTime());
+
+    const wrap = document.createElement("div");
+    wrap.className = "cal";
+
+    const head = document.createElement("div");
+    head.className = "cal-head";
+    const monthLabel = document.createElement("h3");
+    monthLabel.textContent = cursorMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    const nav = document.createElement("div");
+    nav.className = "cal-nav";
+    const step = (delta: number, label: string, aria: string) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.setAttribute("aria-label", aria);
+      b.addEventListener("click", () => {
+        cursorMonth = new Date(cursorMonth.getFullYear(), cursorMonth.getMonth() + delta, 1);
+        paintCalendar();
+      });
+      return b;
+    };
+    const today = document.createElement("button");
+    today.type = "button";
+    today.textContent = "Today";
+    today.addEventListener("click", () => {
+      const now = new Date();
+      cursorMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      selectedDay = dayKey(now);
+      paintCalendar();
+    });
+    nav.append(step(-1, "‹", "Previous month"), today, step(1, "›", "Next month"));
+    head.append(monthLabel, nav);
+    wrap.append(head);
+
+    const grid = document.createElement("div");
+    grid.className = "cal-grid";
+    // Weekday names from the runtime, not a hard-coded English list: the rest of this page
+    // renders dates through toLocaleString, and a Monday labelled "Sun" would be worse than
+    // no label at all.
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(gridStart);
+      d.setDate(d.getDate() + i);
+      const h = document.createElement("div");
+      h.className = "cal-weekday";
+      h.textContent = d.toLocaleDateString(undefined, { weekday: "short" });
+      grid.append(h);
+    }
+
+    const todayKey = dayKey(new Date());
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(gridStart);
+      d.setDate(d.getDate() + i);
+      const key = dayKey(d);
+      const cell = document.createElement("button");
+      cell.type = "button";
+      cell.className = "cal-cell";
+      if (d.getMonth() !== month) cell.classList.add("outside");
+      if (key === todayKey) cell.classList.add("today");
+      if (key === selectedDay) cell.classList.add("selected");
+
+      const num = document.createElement("span");
+      num.className = "cal-daynum";
+      num.textContent = String(d.getDate());
+      cell.append(num);
+
+      const occurrences = byDay.get(key) ?? [];
+      for (const { ev, at } of occurrences.slice(0, 3)) {
+        const chip = document.createElement("span");
+        chip.className = "cal-chip";
+        if (ev.standby.accent) chip.style.setProperty("--standby-accent", ev.standby.accent);
+        const t = document.createElement("span");
+        t.className = "cal-chip-text";
+        t.textContent = `${at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })} ${ev.title}`;
+        chip.append(t);
+        cell.append(chip);
+      }
+      if (occurrences.length > 3) {
+        const more = document.createElement("span");
+        more.className = "cal-chip cal-more";
+        const t = document.createElement("span");
+        t.className = "cal-chip-text";
+        t.textContent = `+${occurrences.length - 3} more`;
+        more.append(t);
+        cell.append(more);
+      }
+
+      const count = occurrences.length;
+      cell.setAttribute(
+        "aria-label",
+        `${d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}, ${count} event${count === 1 ? "" : "s"}`
+      );
+      cell.addEventListener("click", () => { selectedDay = key; paintCalendar(); });
+      grid.append(cell);
+    }
+    wrap.append(grid);
+
+    // The day panel. On a phone the cells are too small to read a title in, so the chips
+    // collapse to dots and THIS is where the day is actually read. It is present at every
+    // width rather than swapped in by a breakpoint, because a control that only exists on
+    // some screens is a control nobody learns.
+    const panel = document.createElement("div");
+    panel.className = "cal-day";
+    const chosen = selectedDay ? byDay.get(selectedDay) ?? [] : [];
+    const heading = document.createElement("h4");
+    heading.textContent = selectedDay
+      ? new Date(`${selectedDay}T12:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })
+      : "Pick a day";
+    panel.append(heading);
+    if (!chosen.length) {
+      const p = document.createElement("p");
+      p.className = "event-empty";
+      p.textContent = "Nothing scheduled.";
+      panel.append(p);
+    } else {
+      for (const { ev, at } of chosen) {
+        const card = eventCard(ev);
+        // The card shows the series' NEXT occurrence, which is not the one this cell was
+        // clicked for. Say which one this is, or a weekly series read from the 3rd would show
+        // the 10th and look like a bug.
+        const at_ = document.createElement("p");
+        at_.className = "event-when";
+        at_.textContent = `This occurrence: ${at.toLocaleString(undefined, { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}`;
+        card.insertBefore(at_, card.querySelector(".event-actions"));
+        panel.append(card);
+      }
+    }
+    wrap.append(panel);
+
+    body.replaceChildren(wrap);
+  }
+
+  events = await listEvents();
+  setMode(mode);
 }
 
 /**
@@ -3372,91 +3930,171 @@ function showWatchKeyMissing() {
 }
 
 /**
- * The panel a viewer sees before a broadcast begins.
+ * The standby page, rendered from a design rather than hard-coded.
  *
- * Two quite different situations share it. Someone early to an ad hoc broadcast wants
- * reassurance that the link works; someone who opened a calendar invite for next Thursday
- * wants to know it is next Thursday and go away again. Passing the event (or null) is what
- * separates them.
+ * ONE renderer, used twice: here for the viewer who is actually waiting, and again in the
+ * schedule form as the scheduler's preview. A preview that approximated this would drift from
+ * it the first time either changed, and the scheduler would design one page and ship another.
  *
- * Times are rendered in the VIEWER's own zone, not the broadcaster's. The event carries a
- * timezone for the broadcaster's benefit, but a person in Manila reading "3pm New York" has
- * been handed arithmetic rather than an answer.
+ * Every field has a working default, so an event nobody styled still looks deliberate — the
+ * title as the headline, the description as the message, the house accent, a countdown. The
+ * designer overrides; it does not have to be filled in.
  */
-function renderWaitingRoom(event: ScheduledEvent | null): HTMLElement {
+interface StandbySpec {
+  title: string;
+  description: string | null;
+  standby: StandbyDesign;
+  /** The instant to count to. Null on a cancelled event, where there is nothing to count. */
+  startsAt: Date | null;
+  canceled: boolean;
+}
+
+interface StandbyHandle {
+  el: HTMLElement;
+  /** Replace the status line under the countdown. Used when the curtain is the reason. */
+  setStatus(text: string): void;
+  /** Stop the countdown timer. Called when the page is torn down. */
+  stop(): void;
+}
+
+/** The house accent, and the fallback for an event whose designer left the colour alone. */
+const STANDBY_DEFAULT_ACCENT = "#00d4aa";
+
+/**
+ * What the standby page says once the broadcast is live but the curtain is still down.
+ *
+ * Deliberately not "the broadcaster is live" — from the audience's side that reads as "so why
+ * am I still looking at this?". The honest version is that someone is there and the doors have
+ * not opened yet, which is both true and a reason to stay on the page.
+ */
+const CURTAIN_STATUS = "The host is getting set up. This page will open on its own.";
+
+function renderStandby(spec: StandbySpec): StandbyHandle {
+  const accent = spec.standby.accent || STANDBY_DEFAULT_ACCENT;
+
   const el = document.createElement("div");
-  el.className = "watch-waiting";
-  el.style.cssText = "text-align:center;padding:2rem 1.5rem;color:var(--text-muted);";
+  el.className = "standby";
+  // A custom property rather than a stylesheet rule, because the value is per-event and the
+  // sheet is static. The Worker has already checked it is #rrggbb; see migration 0022 for why
+  // that check is not optional.
+  el.style.setProperty("--standby-accent", accent);
 
-  if (!event) {
-    el.textContent = "Waiting for broadcaster…";
-    return el;
-  }
+  const card = document.createElement("div");
+  card.className = "standby-card";
 
-  if (event.canceled) {
-    const h = document.createElement("h2");
-    h.style.cssText = "margin:0 0 0.5rem;color:var(--text-primary);font-size:1.3rem;";
-    h.textContent = event.title;
+  const headline = document.createElement("h2");
+  headline.className = "standby-headline";
+  headline.textContent = spec.standby.headline || spec.title;
+  card.append(headline);
+
+  if (spec.canceled) {
     const p = document.createElement("p");
-    p.style.cssText = "margin:0;line-height:1.55;";
+    p.className = "standby-message";
     p.textContent = "This event was cancelled.";
-    el.append(h, p);
-    return el;
+    card.append(p);
+    el.append(card);
+    return { el, setStatus: () => {}, stop: () => {} };
   }
 
-  const starts = new Date(event.next_starts_at);
-  const title = document.createElement("h2");
-  title.style.cssText = "margin:0 0 0.4rem;color:var(--text-primary);font-size:1.4rem;";
-  title.textContent = event.title;
+  // The title, demoted to a subtitle, but only when the headline replaced it. Otherwise it
+  // would appear twice on every event nobody bothered to style.
+  if (spec.standby.headline && spec.standby.headline !== spec.title) {
+    const sub = document.createElement("p");
+    sub.className = "standby-subtitle";
+    sub.textContent = spec.title;
+    card.append(sub);
+  }
 
-  const when = document.createElement("p");
-  when.style.cssText = "margin:0 0 0.75rem;color:var(--text-secondary);font-size:1rem;";
-  when.textContent = starts.toLocaleString(undefined, {
-    weekday: "long", month: "long", day: "numeric",
-    hour: "numeric", minute: "2-digit", timeZoneName: "short",
-  });
+  if (spec.startsAt) {
+    const when = document.createElement("p");
+    when.className = "standby-when";
+    // The VIEWER's zone, not the broadcaster's. The event carries a timezone so the scheduler
+    // can think in their own hours; a person in Manila reading "3pm New York" has been handed
+    // arithmetic instead of an answer.
+    when.textContent = spec.startsAt.toLocaleString(undefined, {
+      weekday: "long", month: "long", day: "numeric",
+      hour: "numeric", minute: "2-digit", timeZoneName: "short",
+    });
+    card.append(when);
+  }
 
-  el.append(title, when);
-
-  if (event.description) {
-    const desc = document.createElement("p");
-    desc.style.cssText = "margin:0 auto 0.9rem;max-width:34em;line-height:1.55;";
-    desc.textContent = event.description;
-    el.append(desc);
+  const message = spec.standby.message || spec.description;
+  if (message) {
+    const p = document.createElement("p");
+    p.className = "standby-message";
+    p.textContent = message;
+    card.append(p);
   }
 
   const countdown = document.createElement("p");
-  countdown.style.cssText = "margin:0;font-size:0.92rem;";
-  el.append(countdown);
+  countdown.className = "standby-countdown";
+  if (spec.standby.countdown && spec.startsAt) card.append(countdown);
 
-  // setInterval, not requestAnimationFrame. A viewer waiting for an event that starts in an
-  // hour will switch tabs, and rAF stops in a background tab — the countdown would freeze at
-  // whatever it said when they looked away and be wrong when they came back. Same reasoning
-  // as the compositor's tick; see the hidden-tab fix.
-  const tick = () => {
-    const remaining = starts.getTime() - Date.now();
-    if (remaining <= 0) {
-      countdown.textContent = "Starting shortly — this page will begin playing on its own.";
-      return;
-    }
-    const mins = Math.floor(remaining / 60_000);
-    const days = Math.floor(mins / 1440);
-    const hours = Math.floor((mins % 1440) / 60);
-    const parts = [];
-    if (days) parts.push(`${days} day${days === 1 ? "" : "s"}`);
-    if (hours) parts.push(`${hours} hour${hours === 1 ? "" : "s"}`);
-    if (!days) parts.push(`${mins % 60} minute${mins % 60 === 1 ? "" : "s"}`);
-    countdown.textContent = `Starts in ${parts.join(", ")}.`;
+  const status = document.createElement("p");
+  status.className = "standby-status";
+  status.textContent = "This page will begin playing on its own.";
+  card.append(status);
+
+  el.append(card);
+
+  let timer = 0;
+  if (spec.standby.countdown && spec.startsAt) {
+    const starts = spec.startsAt;
+    const tick = () => {
+      const remaining = starts.getTime() - Date.now();
+      if (remaining <= 0) {
+        countdown.textContent = "Starting shortly";
+        return;
+      }
+      const mins = Math.floor(remaining / 60_000);
+      const days = Math.floor(mins / 1440);
+      const hours = Math.floor((mins % 1440) / 60);
+      const parts: string[] = [];
+      if (days) parts.push(`${days} day${days === 1 ? "" : "s"}`);
+      if (hours) parts.push(`${hours} hour${hours === 1 ? "" : "s"}`);
+      if (!days) parts.push(`${mins % 60} minute${mins % 60 === 1 ? "" : "s"}`);
+      countdown.textContent = `Starts in ${parts.join(", ")}`;
+    };
+    tick();
+    // setInterval, not requestAnimationFrame. Someone waiting an hour for a town hall will
+    // switch tabs, and rAF stops in a background tab — the countdown would freeze at whatever
+    // it said when they looked away and be wrong when they came back. Same reasoning as the
+    // compositor's tick; see [[raf-dies-in-a-hidden-tab]].
+    timer = window.setInterval(tick, 30_000);
+  }
+
+  return {
+    el,
+    setStatus: (text: string) => { status.textContent = text; },
+    stop: () => { if (timer) window.clearInterval(timer); },
   };
-  tick();
-  const timer = window.setInterval(tick, 30_000);
-  // The waiting room is removed the moment the broadcast resolves, and an interval left
-  // running against a detached node is a leak that outlives the whole event.
-  new MutationObserver((_, obs) => {
-    if (!el.isConnected) { window.clearInterval(timer); obs.disconnect(); }
-  }).observe(document.body, { childList: true, subtree: true });
+}
 
-  return el;
+/**
+ * The panel a viewer sees before a broadcast begins.
+ *
+ * Three quite different situations share it. Someone early to an ad hoc broadcast wants
+ * reassurance that the link works; someone who opened a calendar invite for next Thursday
+ * wants to know it is next Thursday and go away again; and someone at a scheduled event whose
+ * host is live but has not lifted the curtain wants to know the wait is nearly over. Passing
+ * the event (or null) separates the first from the other two; setStatus() separates those.
+ */
+function renderWaitingRoom(event: ScheduledEvent | null): StandbyHandle {
+  if (!event) {
+    const el = document.createElement("div");
+    el.className = "watch-waiting";
+    el.style.cssText = "text-align:center;padding:2rem 1.5rem;color:var(--text-muted);";
+    el.textContent = "Waiting for broadcaster…";
+    return { el, setStatus: (t) => { el.textContent = t; }, stop: () => {} };
+  }
+
+  return renderStandby({
+    title: event.title,
+    description: event.description,
+    standby: event.standby,
+    startsAt: event.canceled ? null : new Date(event.next_starts_at),
+    canceled: event.canceled,
+  });
 }
 
 // promptPasscode() and its first/wrong/rotated variants lived here. There is no second
@@ -4337,10 +4975,14 @@ async function initWatchView(streamId: string, user: User | null) {
     // it, and re-asks each time round.
     const routeTag = watchSecret ? await deriveRouteTag(watchSecret, streamId) : undefined;
 
-    let routeInfo = routeTag
+    const firstRoute = routeTag
       ? await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag })
       : null;
-    console.log(`[watch-timing] route resolved @ ${ms()} ->`, routeInfo?.relay ?? "(offline, polling)", routeInfo?.mode ? `(mode=${routeInfo.mode})` : "");
+    // "curtain" is live-but-closed. It is not a route, so it does not become one here — but it
+    // is a different WAIT from an offline stream, and the standby page says so.
+    let curtainDown = firstRoute === "curtain";
+    let routeInfo: StreamRoute | null = firstRoute === "curtain" ? null : firstRoute;
+    console.log(`[watch-timing] route resolved @ ${ms()} ->`, routeInfo?.relay ?? (curtainDown ? "(curtain down, polling)" : "(offline, polling)"), routeInfo?.mode ? `(mode=${routeInfo.mode})` : "");
 
     if (!routeInfo) {
       const section = document.querySelector("#watch-view section");
@@ -4351,11 +4993,22 @@ async function initWatchView(streamId: string, user: User | null) {
       // Someone who opened a calendar invite for Thursday's all-hands on Tuesday deserves to
       // be told it is Thursday, not left watching a spinner wondering if the link is broken.
       const scheduled = await getStreamEvent(streamId);
-      const waitingEl = renderWaitingRoom(scheduled === "auth" ? null : scheduled);
-      section?.appendChild(waitingEl);
+      const waiting = renderWaitingRoom(scheduled === "auth" ? null : scheduled);
+      // Hide the player while this is up. It is a <canvas> with nothing decoded into it — a
+      // black rectangle the size of the video, with the standby page pushed underneath it.
+      // The screenshot was the only thing that showed this; every assertion passed on a page
+      // whose top half was an empty box.
+      section?.classList.add("standing-by");
+      section?.appendChild(waiting.el);
+      if (curtainDown) waiting.setStatus(CURTAIN_STATUS);
 
       let stopped = false;
       window.addEventListener("beforeunload", () => { stopped = true; });
+      const teardown = () => {
+        waiting.stop();
+        waiting.el.remove();
+        section?.classList.remove("standing-by");
+      };
       // Re-ask for the key each time round, not only for the route.
       //
       // An ad hoc broadcast has no key until its broadcaster goes live, so an attendee who
@@ -4369,8 +5022,8 @@ async function initWatchView(streamId: string, user: User | null) {
         if (!watchSecret) {
           const access = await getStreamAccess(streamId);
           if (access && "error" in access) {
-            if (access.error === "killed") { waitingEl.remove(); stopForKill("viewer"); return; }
-            waitingEl.remove();
+            if (access.error === "killed") { teardown(); stopForKill("viewer"); return; }
+            teardown();
             showWatchLoginRequired();
             return;
           }
@@ -4378,9 +5031,21 @@ async function initWatchView(streamId: string, user: User | null) {
           if (watchSecret) currentTag = await deriveRouteTag(watchSecret, streamId);
         }
         if (!currentTag) continue;
-        routeInfo = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag: currentTag });
+        const attempt = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag: currentTag });
+        // THIS is the automatic switchover the broadcaster's Lift the curtain button drives.
+        // Nothing is pushed to these clients: the same poll that was already asking "is it
+        // live yet" starts getting a route instead of a 425, and the page moves on by itself.
+        // A push channel would be a second thing to keep alive for the sake of one edge, and
+        // a waiting room that missed its own event because a socket had quietly dropped is a
+        // worse failure than a switchover that can be up to 1.5 seconds late.
+        if (attempt === "curtain") {
+          if (!curtainDown) { curtainDown = true; waiting.setStatus(CURTAIN_STATUS); }
+          continue;
+        }
+        curtainDown = false;
+        routeInfo = attempt;
       }
-      waitingEl.remove();
+      teardown();
       if (stopped) return;
       console.log(`[watch-timing] route became available @ ${ms()} ->`, routeInfo?.relay);
     }
@@ -5193,7 +5858,12 @@ async function initWatchView(streamId: string, user: User | null) {
       if (gotFrames === 0 && failed > 0) {
         recovering = true;
         try {
-          const fresh = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag });
+          // "curtain" cannot happen on an established session — the curtain only ever goes
+          // up — but the type says it can, and treating it as "no fresh route" is the right
+          // answer anyway: keep the salt we have rather than concluding a key mismatch from
+          // an answer that was not about the key.
+          const attempt = await getStreamRoute(streamId, viewerCdn, originOverride, { noEnterprise, routeTag });
+          const fresh = attempt === "curtain" ? null : attempt;
           const freshSalt = fresh?.salt ?? undefined;
           if (fresh && freshSalt !== watchSalt) {
             // The broadcaster re-keyed. Pick up the new salt and carry on without bothering
@@ -5594,7 +6264,7 @@ async function init() {
   } else if (view === "broadcast") {
     initBroadcastView(streamId, user);
   } else if (view === "schedule") {
-    initScheduleView(user);
+    await initScheduleView(user);
   } else if (view === "events") {
     await initEventsView(user);
   } else {
