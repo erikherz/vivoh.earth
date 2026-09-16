@@ -5726,19 +5726,6 @@ async function initWatchView(streamId: string, user: User | null) {
       let stopped = false;
       window.addEventListener("beforeunload", () => { stopped = true; });
 
-      // Count this person while they wait.
-      //
-      // Until now a session opened only once the route resolved, so a host with forty people
-      // already sitting behind a lowered curtain saw "0 watching" — nothing, at exactly the
-      // moment they are deciding whether to start. The session opens as `waiting` and is
-      // PROMOTED in place when the curtain lifts, so somebody who waited twenty minutes and
-      // then watched the event is one row, not two.
-      //
-      // Needs a route tag, and the Worker needs a live broadcast row, which together mean this
-      // counts the CURTAIN case rather than every early arrival: before the host goes live
-      // there is nothing to prove a link against, and that gate is what stops a stranger
-      // manufacturing an audience for a guessed id.
-      if (currentTag) void openWaitingSession(currentTag);
       const teardown = () => {
         waiting.stop();
         waiting.el.remove();
@@ -5752,6 +5739,27 @@ async function initWatchView(streamId: string, user: User | null) {
       // started perfectly well. Whichever of the two appears first, this loop picks up the
       // other on its next pass.
       let currentTag = routeTag;
+
+      // Count this person while they wait.
+      //
+      // A session used to open only once the route resolved, so a host with forty people
+      // already sitting behind a lowered curtain saw "0 watching" — nothing, at exactly the
+      // moment they are deciding whether to start. The session opens as `waiting` and is
+      // PROMOTED in place when the curtain lifts, so somebody who waited twenty minutes and
+      // then watched the event is one row, not two.
+      //
+      // Needs a route tag, and the Worker needs a live broadcast row, which together mean this
+      // counts the CURTAIN case rather than every early arrival: before the host goes live
+      // there is nothing to prove a link against, and that gate is what stops a stranger
+      // manufacturing an audience for a guessed id.
+      //
+      // AFTER `currentTag`, and that position is the whole of this comment's reason for
+      // existing. This call sat ABOVE the declaration for one deploy, which is a temporal dead
+      // zone ReferenceError: it threw before the loop below ever started, so a waiting viewer
+      // stopped polling entirely and never switched over when the curtain went up. The feature
+      // that broke was not the one being added.
+      if (currentTag) void openWaitingSession(currentTag);
+
       while (!routeInfo && !stopped) {
         await new Promise((r) => setTimeout(r, 1500));
         if (!watchSecret) {
