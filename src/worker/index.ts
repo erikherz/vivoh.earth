@@ -1067,7 +1067,7 @@ async function handleStreamRoutes(
     // with settings but no salt row, or a salt row with no settings, must both be answerable.
     const stream = await env.DB
       .prepare(`
-        SELECT s.require_auth, s.overlay_html, s.link_enc, s.encrypted, s.chat_enabled, s.room_enabled, k.killed_at
+        SELECT s.require_auth, s.overlay_html, s.link_enc, s.encrypted, s.chat_enabled, s.room_enabled, s.breakouts_enabled, k.killed_at
         FROM (SELECT ? AS sid) q
         LEFT JOIN streams s ON s.stream_id = q.sid
         LEFT JOIN stream_salts k ON k.stream_id = q.sid
@@ -1080,6 +1080,7 @@ async function handleStreamRoutes(
         encrypted: number | null;
         chat_enabled: number | null;
         room_enabled: number | null;
+        breakouts_enabled: number | null;
         killed_at: string | null;
       }>();
 
@@ -1104,6 +1105,7 @@ async function handleStreamRoutes(
       // their audience see each other, and inferring that agreement from silence is exactly
       // the mistake migration 0019 is written to prevent.
       room_enabled: stream?.room_enabled === 1,
+      breakouts_enabled: stream?.breakouts_enabled === 1,
       killed: !!stream?.killed_at,
     });
   }
@@ -1187,6 +1189,13 @@ async function handleStreamRoutes(
   // unauthenticated stranger would hand the names of every company's internal town hall to
   // whoever sweeps the id space. One rule, applied in both places: if you may not have the
   // key, you may not have the title either.
+  // Breakout rooms. Returns null when nothing matched, so this falls through to the routes
+  // below rather than swallowing every /api/streams/* path.
+  {
+    const handled = await handleBreakoutRoutes(request, env, url);
+    if (handled) return handled;
+  }
+
   const streamEventMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/event$/);
   if (method === "GET" && streamEventMatch) {
     const streamId = streamEventMatch[1];
@@ -1231,10 +1240,14 @@ async function handleStreamRoutes(
     if (!user) {
       return Response.json({ error: "Authentication required" }, { status: 401 });
     }
-    // Same admission as going live. Without it any signed-in account could write a key for any
-    // unused id and squat broadcast names it is not allowed to broadcast under — cheap to do
-    // in bulk, and invisible until a legitimate broadcaster could not schedule anything.
-    if (!(await canBroadcast(env.DB, user.email))) {
+    // Same admission as going live, through the same function, and that shared call is the
+    // point. Without it any signed-in account could write a key for any unused id and squat
+    // broadcast names it is not allowed to broadcast under — cheap in bulk, and invisible
+    // until a legitimate broadcaster could not schedule anything. With it, a breakout host is
+    // admitted for their ONE delegated name and refused for every other, exactly as at
+    // go-live: a grant that let you publish but not store your key would be a broadcast
+    // nobody could open.
+    if (!(await mayPublish(env.DB, user.email, user.id, streamId))) {
       return Response.json({ error: "This account is not approved to broadcast." }, { status: 403 });
     }
 
@@ -1598,16 +1611,16 @@ async function handleStreamRoutes(
       return Response.json({ error: "Authentication required" }, { status: 401 });
     }
 
-    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; link_enc?: string; encrypted?: boolean; chat_enabled?: boolean; room_enabled?: boolean };
+    const body = await request.json() as { stream_id: string; require_auth?: boolean; overlay_html?: string; link_enc?: string; encrypted?: boolean; chat_enabled?: boolean; room_enabled?: boolean; breakouts_enabled?: boolean };
     if (!body.stream_id) {
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
 
     // Get current settings first
     const current = await env.DB
-      .prepare("SELECT user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled, room_enabled FROM streams WHERE stream_id = ?")
+      .prepare("SELECT user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled, room_enabled, breakouts_enabled FROM streams WHERE stream_id = ?")
       .bind(body.stream_id)
-      .first<{ user_id: number; require_auth: number; overlay_html: string | null; link_enc: string | null; encrypted: number; chat_enabled: number; room_enabled: number }>();
+      .first<{ user_id: number; require_auth: number; overlay_html: string | null; link_enc: string | null; encrypted: number; chat_enabled: number; room_enabled: number; breakouts_enabled: number }>();
 
     // OWNERSHIP. Wallflower does not need this check: with OAuth off every caller resolves to
     // the same anonymous user, so "someone else's row" does not exist there. The moment
@@ -1636,12 +1649,17 @@ async function handleStreamRoutes(
     const isEncrypted = body.encrypted !== undefined ? body.encrypted : (current?.encrypted === 1);
     const chatEnabled = body.chat_enabled !== undefined ? body.chat_enabled : (current?.chat_enabled === 1);
     const roomEnabled = body.room_enabled !== undefined ? body.room_enabled : (current?.room_enabled === 1);
+    // Breakouts need the room: the participant list an attendee invites FROM is the room
+    // roster. Switching the room off therefore switches breakouts off too, rather than
+    // leaving a control that offers to invite from a list that does not exist.
+    const breakoutsEnabled = roomEnabled
+      && (body.breakouts_enabled !== undefined ? body.breakouts_enabled : (current?.breakouts_enabled === 1));
 
     // Upsert stream settings
     await env.DB
       .prepare(`
-        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled, room_enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO streams (stream_id, user_id, require_auth, overlay_html, link_enc, encrypted, chat_enabled, room_enabled, breakouts_enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(stream_id) DO UPDATE SET
           require_auth = excluded.require_auth,
           overlay_html = excluded.overlay_html,
@@ -1649,9 +1667,10 @@ async function handleStreamRoutes(
           encrypted = excluded.encrypted,
           chat_enabled = excluded.chat_enabled,
           room_enabled = excluded.room_enabled,
+          breakouts_enabled = excluded.breakouts_enabled,
           updated_at = datetime('now')
       `)
-      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, linkEnc, isEncrypted ? 1 : 0, chatEnabled ? 1 : 0, roomEnabled ? 1 : 0)
+      .bind(body.stream_id, user.id, requireAuth ? 1 : 0, overlayHtml, linkEnc, isEncrypted ? 1 : 0, chatEnabled ? 1 : 0, roomEnabled ? 1 : 0, breakoutsEnabled ? 1 : 0)
       .run();
 
     return Response.json({
@@ -1662,6 +1681,7 @@ async function handleStreamRoutes(
       encrypted: isEncrypted,
       chat_enabled: chatEnabled,
       room_enabled: roomEnabled,
+      breakouts_enabled: breakoutsEnabled,
     });
   }
 
@@ -1977,6 +1997,11 @@ async function handleEventRoutes(
   // Same admission as going live, and for the same reason: scheduling reserves a broadcast
   // name and mints a key, so an account that may not publish must not be able to do it in
   // advance either.
+  //
+  // canBroadcast, NOT mayPublish, and that is deliberate — do not "fix the inconsistency".
+  // A breakout grant is for ONE id that we minted, for a conversation happening now. Widening
+  // this call would let anyone who had ever opened a side room reserve broadcast names weeks
+  // into the future, which is a different permission wearing the same word.
   if (method === "POST" && path === "/api/events") {
     if (!(await canBroadcast(env.DB, user.email))) {
       return Response.json({ error: "This account is not approved to broadcast." }, { status: 403 });
@@ -2954,7 +2979,11 @@ async function handleStatsRoutes(
     // Default-deny, and note where the deny lives: canBroadcast returns false for a missing
     // row, so a brand-new account can sign in and cannot broadcast until someone says so.
     // That is the intended first-run experience, not a misconfiguration.
-    if (!(await canBroadcast(env.DB, user.email))) {
+    //
+    // SECOND DOOR, added with breakout rooms: an account that is NOT on the allow list may
+    // publish exactly one name, if a broadcaster who is on the list delegated it. mayPublish()
+    // holds both doors so they cannot drift apart. See migration 0023.
+    if (!(await mayPublish(env.DB, user.email, user.id, body.stream_id))) {
       return Response.json(
         { error: "This account is not approved to broadcast." },
         { status: 403 }
@@ -3143,6 +3172,10 @@ async function handleStatsRoutes(
 
     if (row?.stream_id) {
       await releaseRelay(env, row.stream_id, row.relay_host, env.TINYMOQ_PROVISION_KEY);
+      // If this was a breakout, its publish grant ends with its broadcast. A no-op for every
+      // ordinary stream. Leaving it open would mean the grant outlived the conversation by up
+      // to its whole TTL — technically bounded, and still a permission nobody is using.
+      await closeBreakout(env.DB, row.stream_id);
     }
 
     return Response.json({ success: true });
@@ -3269,6 +3302,250 @@ async function getAuthenticatedUser(request: Request, env: Env): Promise<User | 
 // Note this is keyed by EMAIL, not user id, so a grant can be written before that person has
 // ever signed in — and so it survives them re-signing in through a different provider, since
 // upsertUser links providers that share an email onto one account.
+// ── Breakout rooms ────────────────────────────────────────────────────────────────────
+//
+// An attendee opens a side conversation off a live broadcast and becomes its broadcaster.
+// Migration 0023 explains why this needs a second admission door and how that door is kept
+// narrow; this is the code that opens it.
+
+/** How long a breakout's publish grant lives. Long enough for a real conversation, not a day. */
+const BREAKOUT_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** A ceiling on how many rooms one broadcast can spawn, so a script cannot mint names forever. */
+const BREAKOUT_MAX_PER_PARENT = 50;
+
+interface BreakoutRow {
+  id: number;
+  parent_stream_id: string;
+  stream_id: string;
+  user_id: number;
+  closed_at: string | null;
+  expires_at: string;
+}
+
+/**
+ * The second admission door: may THIS account publish THIS ONE broadcast name?
+ *
+ * Answers true only for an open, unexpired breakout grant. Everything about it is scoped —
+ * one id, one account, one time window — because the account on the other side of it is
+ * deliberately NOT on the broadcaster allow list. See migration 0023.
+ *
+ * Read as a single indexed query on the go-live hot path, and written so a missing row, a
+ * closed row and an expired row are all the same answer: no.
+ */
+async function isBreakoutHost(db: D1Database, streamId: string, userId: number): Promise<boolean> {
+  const row = await db
+    .prepare(`
+      SELECT expires_at FROM breakout_rooms
+      WHERE stream_id = ? AND user_id = ? AND closed_at IS NULL
+    `)
+    .bind(streamId, userId)
+    .first<{ expires_at: string }>();
+  if (!row) return false;
+  const expires = Date.parse(row.expires_at);
+  // An unparseable expiry is treated as expired. This grant widens who may publish, so the
+  // failure direction has to be closed — the opposite of the curtain, where an unreadable date
+  // must not lock an audience out of a room the host opened.
+  return Number.isFinite(expires) && expires > Date.now();
+}
+
+/**
+ * May you publish this stream at all?
+ *
+ * The allow list OR a breakout grant. Both call sites that gate publishing go through here so
+ * the two doors can never drift apart — the version of this that checked the allow list in one
+ * place and the grant in another is exactly how a broadcaster ends up able to go live but
+ * unable to store the key for what they are broadcasting.
+ */
+async function mayPublish(db: D1Database, email: string, userId: number, streamId: string): Promise<boolean> {
+  if (await canBroadcast(db, email)) return true;
+  return isBreakoutHost(db, streamId, userId);
+}
+
+/** Close a breakout's grant. Idempotent; used by the end-of-broadcast hook and the kill path. */
+async function closeBreakout(db: D1Database, streamId: string): Promise<void> {
+  await db
+    .prepare("UPDATE breakout_rooms SET closed_at = datetime('now') WHERE stream_id = ? AND closed_at IS NULL")
+    .bind(streamId)
+    .run();
+}
+
+async function handleBreakoutRoutes(
+  request: Request,
+  env: Env,
+  url: URL
+): Promise<Response | null> {
+  const method = request.method;
+  const path = url.pathname;
+
+  // GET /api/streams/:id/breakout — is this stream a breakout, and is it still open?
+  //
+  // Public in the same sense /route is: it answers for a caller who already holds the link.
+  // What it returns is where to go BACK to, which is the one thing a viewer whose side room
+  // just ended actually needs. It deliberately does not say who created it.
+  const lookupMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/breakout$/);
+  if (method === "GET" && lookupMatch) {
+    const row = await env.DB
+      .prepare("SELECT parent_stream_id, closed_at, expires_at FROM breakout_rooms WHERE stream_id = ?")
+      .bind(lookupMatch[1])
+      .first<{ parent_stream_id: string; closed_at: string | null; expires_at: string }>();
+    // 404 is the ordinary answer for an ordinary broadcast, which is not a breakout of
+    // anything. The client treats it as "this is a normal stream".
+    if (!row) return new Response("not found", { status: 404 });
+    return Response.json(
+      {
+        parent_stream_id: row.parent_stream_id,
+        parent_url: `/${row.parent_stream_id}`,
+        closed: !!row.closed_at,
+      },
+      { headers: { "Cache-Control": "no-store, private" } }
+    );
+  }
+
+  // POST /api/streams/:parent/breakouts — open one.
+  const createMatch = path.match(/^\/api\/streams\/([a-z0-9]{5})\/breakouts$/);
+  if (method === "POST" && createMatch) {
+    const parentId = createMatch[1];
+
+    // 1. A session. This is the "anyone authenticated" half, and it is the ONLY thing about
+    //    the caller that is checked — deliberately, because the whole feature is for people
+    //    who are not on the allow list.
+    const user = await getAuthenticatedUser(request, env);
+    if (!user) {
+      return Response.json({ error: "Sign in to open a breakout room." }, { status: 401 });
+    }
+
+    // 2. The parent broadcaster opted in. This is where the authority comes from: an account
+    //    that IS allowed to broadcast delegated a slice of that to their attendees. Without
+    //    this check, any signed-in person could publish by naming any live stream.
+    const parent = await env.DB
+      .prepare("SELECT require_auth, breakouts_enabled FROM streams WHERE stream_id = ?")
+      .bind(parentId)
+      .first<{ require_auth: number; breakouts_enabled: number }>();
+    if (parent?.breakouts_enabled !== 1) {
+      // Same answer whether the toggle is off or the stream has no settings row at all. A
+      // caller learns "not here", not which of those it was.
+      return Response.json(
+        { error: "This broadcast is not offering breakout rooms." },
+        { status: 403 }
+      );
+    }
+
+    // 3. Proof the caller actually holds the parent's link, by the same route tag a viewer
+    //    presents at /route. Without it, "signed in + the id is live" would let anyone
+    //    sweeping the five-character id space mint publish grants off other people's events.
+    const live = await env.DB
+      .prepare(`
+        SELECT route_tag FROM broadcast_events
+        WHERE stream_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1
+      `)
+      .bind(parentId)
+      .first<{ route_tag: string | null }>();
+    if (!live) {
+      // A breakout is a side conversation at a live event. There is nothing to break out of.
+      return Response.json({ error: "That broadcast is not live." }, { status: 409 });
+    }
+    if (live.route_tag) {
+      const presented = url.searchParams.get("tag") ?? "";
+      if (!constantTimeEqual(presented, live.route_tag)) {
+        return Response.json({ error: "That broadcast is not live." }, { status: 409 });
+      }
+    }
+
+    // 4. A bound on how many names one event can mint, so a loop cannot exhaust the id space
+    //    or the CDN bill. Counts OPEN rooms only — a busy day of short conversations is fine.
+    const open = await env.DB
+      .prepare("SELECT COUNT(*) AS n FROM breakout_rooms WHERE parent_stream_id = ? AND closed_at IS NULL")
+      .bind(parentId)
+      .first<{ n: number }>();
+    if ((open?.n ?? 0) >= BREAKOUT_MAX_PER_PARENT) {
+      return Response.json(
+        { error: "This broadcast already has as many breakout rooms as it can hold." },
+        { status: 429 }
+      );
+    }
+
+    // 5. A name nobody is using. Same minting as a scheduled event, and for the same reason:
+    //    "not currently live" is the wrong question when the id is about to hold a key.
+    const streamId = await mintEventStreamId(env);
+    if (!streamId) {
+      return Response.json({ error: "Could not reserve a room name. Try again." }, { status: 503 });
+    }
+
+    // 6. The key, minted here and stored BEFORE the grant exists, so there is no window in
+    //    which someone may publish a stream whose key nobody can fetch.
+    const secret = generateLinkSecretServerSide();
+    const stored = await resolveStreamKey(env, streamId, user.id, secret);
+    if (!stored) {
+      return Response.json({ error: "Could not prepare the room. Try again." }, { status: 500 });
+    }
+
+    // 7. Settings, INHERITED from the parent rather than defaulted.
+    //
+    //    require_auth is the one that matters. Defaulting it to on would have been the safe
+    //    reflex and the wrong answer: at an open event the invitees are anonymous, and a
+    //    breakout they cannot enter is a broken invitation. Inheriting means the side room is
+    //    exactly as open, and exactly as closed, as the event it came from.
+    //
+    //    room_enabled is set because the breakout's participants ARE its roster; without it
+    //    the new broadcaster would open a room with the room switched off.
+    await env.DB
+      .prepare(`
+        INSERT INTO streams (stream_id, user_id, require_auth, encrypted, room_enabled, breakouts_enabled)
+        VALUES (?, ?, ?, 1, 1, 0)
+        ON CONFLICT(stream_id) DO NOTHING
+      `)
+      .bind(streamId, user.id, parent.require_auth ?? 1)
+      .run();
+
+    // 8. The grant itself, written LAST. Everything above can fail without having widened who
+    //    may publish; this row is the only line that does, and by the time it is written the
+    //    stream it names is fully prepared.
+    const expiresAt = new Date(Date.now() + BREAKOUT_TTL_MS).toISOString();
+    const row = await env.DB
+      .prepare(`
+        INSERT INTO breakout_rooms (parent_stream_id, stream_id, user_id, expires_at)
+        VALUES (?, ?, ?, ?)
+        RETURNING id, parent_stream_id, stream_id, user_id, closed_at, expires_at
+      `)
+      .bind(parentId, streamId, user.id, expiresAt)
+      .first<BreakoutRow>();
+    if (!row) {
+      return Response.json({ error: "Could not open the room." }, { status: 500 });
+    }
+
+    return Response.json(
+      {
+        stream_id: streamId,
+        parent_stream_id: parentId,
+        // The key, so the creator's tab can derive the room key and the route tag without a
+        // second round trip. It is the same value /access would hand them.
+        secret: stored,
+        expires_at: expiresAt,
+        require_auth: (parent.require_auth ?? 1) === 1,
+      },
+      { status: 201, headers: { "Cache-Control": "no-store, private" } }
+    );
+  }
+
+  // DELETE /api/streams/:id/breakout — the creator closing their own room.
+  //
+  // Scoped to the grant holder, so this is not a way to shut somebody else's conversation.
+  // The end-of-broadcast hook closes rooms too; this exists for the tab that is closed without
+  // ever having gone live, which would otherwise hold its grant until it expired.
+  if (method === "DELETE" && lookupMatch) {
+    const user = await getAuthenticatedUser(request, env);
+    if (!user) return Response.json({ error: "Authentication required" }, { status: 401 });
+    const res = await env.DB
+      .prepare("UPDATE breakout_rooms SET closed_at = datetime('now') WHERE stream_id = ? AND user_id = ? AND closed_at IS NULL")
+      .bind(lookupMatch[1], user.id)
+      .run();
+    return Response.json({ closed: (res.meta?.changes ?? 0) > 0 });
+  }
+
+  return null;
+}
+
 async function canBroadcast(db: D1Database, email: string): Promise<boolean> {
   const row = await db
     .prepare("SELECT status FROM broadcaster_access WHERE email = ?")

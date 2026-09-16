@@ -35,6 +35,21 @@ export interface GuestMedia {
   exp: number;
 }
 
+/**
+ * Someone in this room has opened a breakout and is asking you to come.
+ *
+ * Opened client-side from the sealed payload, so the Durable Object that relayed it never knew
+ * which broadcast it was pointing at — see the invite branch in watch-room.ts.
+ */
+export interface BreakoutInvite {
+  /** The room id of whoever sent it; resolve it against the roster for a name and a face. */
+  from: string;
+  /** The breakout's own five-character broadcast name. */
+  streamId: string;
+  /** What to call it, as the sender's tab wrote it. Display only; treat it as untrusted text. */
+  title: string;
+}
+
 export interface RoomReaction {
   /** Who threw it; may be a member who has since left. */
   from: string;
@@ -61,6 +76,11 @@ export interface RoomHandle {
   drop: () => void;
   /** Send one Opus frame. Only accepted while you hold the floor. */
   sendAudio: (b64: string) => Promise<void>;
+  /**
+   * Invite people to a breakout room. `ids` null invites everyone; a list invites exactly
+   * those. The server throttles to one invite every few seconds per socket.
+   */
+  inviteToBreakout: (ids: string[] | null, streamId: string, title: string) => Promise<void>;
   /** Am I the broadcaster? Decided by the Worker, not by this page. */
   isHost: () => boolean;
   /** My own room id, once the socket has said hello. */
@@ -90,6 +110,8 @@ export interface RoomCallbacks {
   onFloor: (id: string | null, media: GuestMedia | null) => void;
   /** One Opus frame from the current speaker. Only the broadcaster receives these. */
   onAudio: (b64: string) => void;
+  /** Somebody opened a breakout room and named you. Never fires for your own invites. */
+  onInvite: (invite: BreakoutInvite) => void;
   /** The socket is up and the Worker has said whether this page is the broadcaster. */
   onReady: (host: boolean) => void;
 }
@@ -198,6 +220,7 @@ export function initRoom(opts: {
       let data: {
         t?: string;
         id?: string;
+        from?: string;
         p?: string;
         cap?: number;
         host?: boolean;
@@ -300,6 +323,36 @@ export function initRoom(opts: {
         return;
       }
 
+      if (data.t === "invite" && data.id === undefined && data.from && data.p) {
+        const from = data.from;
+        const sealed = data.p;
+        // Opened asynchronously like every other sealed payload. A blob we cannot open is
+        // dropped in silence: it is an invite from a client keyed to a different link, and
+        // there is nothing a person could do about it.
+        void (async () => {
+          try {
+            // openText signals "not ours" by returning null rather than throwing, so this
+            // has to be checked and not fed to JSON.parse — which would coerce null to the
+            // string "null", parse it happily, and only fail one property access later.
+            const text = await openText(await opts.roomKey(), sealed);
+            if (!text) return;
+            const plain = JSON.parse(text) as { s?: unknown; n?: unknown };
+            const streamId = typeof plain.s === "string" ? plain.s : "";
+            // Shape-checked here rather than trusted: this value ends up in a URL that a
+            // person is invited to open, and the sender is another participant, not us.
+            if (!/^[a-z0-9]{5}$/.test(streamId)) return;
+            cb.onInvite({
+              from,
+              streamId,
+              title: typeof plain.n === "string" ? plain.n.slice(0, 80) : "",
+            });
+          } catch {
+            /* not for us */
+          }
+        })();
+        return;
+      }
+
       if (data.t === "leave" && data.id) {
         known.delete(data.id);
         callbacks.onLeave(data.id);
@@ -370,6 +423,16 @@ export function initRoom(opts: {
       // broadcaster is carrying ciphertext — the room's audio is exactly as private as its
       // video, and for the same reason.
       send({ t: "a", p: await sealText(await opts.roomKey(), b64) });
+    },
+    async inviteToBreakout(ids, streamId, title) {
+      // Sealed under the room key, so the relay carries a pointer it cannot follow. `s` and
+      // `n` are short because MAX_INVITE is deliberately small — this is an address, not
+      // content.
+      send({
+        t: "invite",
+        to: ids,
+        p: await sealText(await opts.roomKey(), JSON.stringify({ s: streamId, n: title.slice(0, 80) })),
+      });
     },
     isHost: () => host,
     myId: () => myId,

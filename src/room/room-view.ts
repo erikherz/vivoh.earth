@@ -16,6 +16,7 @@
 import type { User } from "../auth";
 import { anonAvatar, avatarToDataUrl, giphyAvatar, oauthAvatar, type AvatarImage } from "./avatar";
 import { initRoom, type GuestMedia, type RoomHandle, type RoomMember, type RoomReaction } from "./room-client";
+import { serveBreakoutBridge, type BreakoutPeer, type ParentBridge } from "./breakout";
 import {
   startGuestPublish,
   startGuestSubscribe,
@@ -95,6 +96,22 @@ export function initRoomView(opts: {
   setGuestVideo?: (source: HTMLCanvasElement | null) => void;
   /** What the compositor is holding, for the presenter-facing diagnostic. */
   guestState?: () => string;
+  /**
+   * Breakout rooms, if this broadcast is offering them.
+   *
+   * The API calls live in main.ts and arrive here as functions, so this module stays what it
+   * is — a view — and never grows a second opinion about who may publish.
+   */
+  breakouts?: {
+    /** Is the parent broadcaster offering them right now? */
+    enabled: () => boolean;
+    /** Broadcaster only. Absent on a viewer's page, which is what hides the toggle. */
+    setEnabled?: (on: boolean) => Promise<boolean>;
+    /** Open one. Resolves with the new broadcast name, or the Worker's own refusal text. */
+    create?: () => Promise<{ streamId?: string; error?: string }>;
+    /** Creating needs an account; an anonymous viewer is told so, not shown a dead button. */
+    signedIn: boolean;
+  };
 }): RoomViewHandle {
   const { container, stage, user } = opts;
 
@@ -103,6 +120,10 @@ export function initRoomView(opts: {
   let joined = false;
   let destroyed = false;
   const bubbles = new Map<string, Bubble>();
+  /** The same people as `bubbles`, as plain data, for the breakout tab across the channel. */
+  const members = new Map<string, BreakoutPeer>();
+  let bridge: ParentBridge | null = null;
+  const publishPeers = () => bridge?.publish([...members.values()], displayName);
   let flying = 0;
 
   // An explicit opt-out of motion, honoured for the flying reactions (which are the only
@@ -127,6 +148,28 @@ export function initRoomView(opts: {
       <button class="room-gif-btn" type="button" title="Choose a GIF as your picture">GIF</button>
       <button class="room-throw-btn" type="button" title="Throw your picture across the video">Throw</button>
       <button class="room-hand-btn" type="button" title="Raise your hand to ask a question">✋ Raise hand</button>
+    </div>
+    <!-- Breakout rooms. Hidden entirely unless this broadcast offers them. The broadcaster's
+         own toggle lives HERE rather than in the capture control bar, which has 2px of spare
+         width at 430px. It also belongs here on the merits: what an attendee invites FROM is
+         this roster, so a breakout without a room is a control with nothing behind it. -->
+    <div class="room-breakout hidden">
+      <label class="room-bo-toggle hidden">
+        <input class="room-bo-enable" type="checkbox">
+        <span>Let attendees open breakout rooms</span>
+      </label>
+      <div class="room-bo-open hidden">
+        <span class="room-bo-text"></span>
+        <button class="room-bo-btn" type="button">Open a breakout</button>
+      </div>
+    </div>
+    <!-- An invite from somebody else's breakout. One slot, newest wins: a stack of these over
+         a live video is a pop-up cannon, which is what this and the server-side throttle are
+         jointly there to prevent. -->
+    <div class="room-bo-invite hidden" role="alertdialog" aria-live="polite">
+      <span class="room-bo-invite-text"></span>
+      <button class="room-bo-invite-yes" type="button">Join</button>
+      <button class="room-bo-invite-no" type="button">Not now</button>
     </div>
     <!-- The presenter's queue. Rendered only for the broadcaster, and the server re-checks
          every action it offers — this panel being present is not what grants the power. -->
@@ -176,6 +219,16 @@ export function initRoomView(opts: {
   const gifResults = container.querySelector(".room-gif-results") as HTMLElement;
   const gifNote = container.querySelector(".room-gif-note") as HTMLElement;
   const handBtn = container.querySelector(".room-hand-btn") as HTMLButtonElement;
+  const boPanel = container.querySelector(".room-breakout") as HTMLElement;
+  const boToggleLabel = container.querySelector(".room-bo-toggle") as HTMLElement;
+  const boEnable = container.querySelector(".room-bo-enable") as HTMLInputElement;
+  const boOpenRow = container.querySelector(".room-bo-open") as HTMLElement;
+  const boText = container.querySelector(".room-bo-text") as HTMLElement;
+  const boBtn = container.querySelector(".room-bo-btn") as HTMLButtonElement;
+  const boInvite = container.querySelector(".room-bo-invite") as HTMLElement;
+  const boInviteText = container.querySelector(".room-bo-invite-text") as HTMLElement;
+  const boInviteYes = container.querySelector(".room-bo-invite-yes") as HTMLButtonElement;
+  const boInviteNo = container.querySelector(".room-bo-invite-no") as HTMLButtonElement;
   const queuePanel = container.querySelector(".room-queue") as HTMLElement;
   const queueList = container.querySelector(".room-queue-list") as HTMLOListElement;
   const queueCount = container.querySelector(".room-queue-count") as HTMLElement;
@@ -216,6 +269,11 @@ export function initRoomView(opts: {
   };
 
   const upsert = (m: RoomMember) => {
+    // Mirrored alongside the bubbles because a breakout tab needs the DATA, not the DOM: a
+    // bubble is an <img> with a data URL baked into it, and reading names back out of a grid
+    // is how you end up shipping "Someone" to every invite.
+    members.set(m.id, { id: m.id, name: m.name, avatar: m.avatar });
+    publishPeers();
     clearPlaceholder();
     let b = bubbles.get(m.id);
     if (!b) {
@@ -242,6 +300,8 @@ export function initRoomView(opts: {
   };
 
   const remove = (id: string) => {
+    members.delete(id);
+    publishPeers();
     const b = bubbles.get(id);
     if (!b) return;
     if (b.timer) clearTimeout(b.timer);
@@ -776,6 +836,112 @@ export function initRoomView(opts: {
     room.drop();
   });
 
+  // --- breakout rooms -----------------------------------------------------------------
+  //
+  // Three separate things share this strip, and which of them you see depends on who you are:
+  // the broadcaster gets the toggle that delegates the permission, a signed-in attendee gets
+  // the button that uses it, and an anonymous one gets told why they do not.
+
+  const bo = opts.breakouts;
+
+  const paintBreakout = () => {
+    if (!bo) return;                       // deployment or page without the feature at all
+    const on = bo.enabled();
+    const isBroadcaster = !!bo.setEnabled;
+
+    // The strip exists for a broadcaster whether or not the toggle is on — it is where they
+    // turn it on. For everyone else it exists only while it is on.
+    boPanel.classList.toggle("hidden", !isBroadcaster && !on);
+    boToggleLabel.classList.toggle("hidden", !isBroadcaster);
+    boEnable.checked = on;
+
+    boOpenRow.classList.toggle("hidden", isBroadcaster || !on);
+    if (isBroadcaster || !on) return;
+
+    if (!bo.signedIn) {
+      // Shown rather than hidden. An attendee who can see other people opening side rooms and
+      // has no control of their own should be told the reason is their account, not left to
+      // conclude the feature is broken.
+      boText.textContent = "Sign in to open a breakout room of your own.";
+      boBtn.classList.add("hidden");
+      return;
+    }
+    boBtn.classList.remove("hidden");
+    boBtn.disabled = false;
+    boText.textContent = "Start a side conversation. You broadcast it; this one keeps playing.";
+  };
+
+  boEnable.addEventListener("change", () => {
+    if (!bo?.setEnabled) return;
+    const want = boEnable.checked;
+    boEnable.disabled = true;
+    void bo.setEnabled(want).then(
+      (ok) => {
+        boEnable.disabled = false;
+        // Follow the SERVER's answer, not the click. A checkbox that stays ticked after the
+        // save failed is a broadcaster believing they delegated something they did not.
+        if (!ok) boEnable.checked = !want;
+        paintBreakout();
+      },
+      () => {
+        boEnable.disabled = false;
+        boEnable.checked = !want;
+        paintBreakout();
+      }
+    );
+  });
+
+  boBtn.addEventListener("click", () => {
+    if (!bo?.create) return;
+    boBtn.disabled = true;
+    boBtn.textContent = "Opening…";
+    void bo.create().then(
+      (res) => {
+        boBtn.textContent = "Open a breakout";
+        boBtn.disabled = false;
+        if (!res.streamId) {
+          boText.textContent = res.error ?? "Could not open a breakout room.";
+          return;
+        }
+        // A NEW TAB, deliberately: this page is still playing the main event, and the whole
+        // shape of the feature is that a person is in both at once. `from=` is what lets the
+        // new tab find this one over the channel and show the roster.
+        //
+        // noopener would sever window.opener, which we do not use — but it also drops the
+        // new tab into a separate process on some browsers, and the BroadcastChannel works
+        // either way. Kept for the usual reason.
+        window.open(
+          `/?stream=${res.streamId}&from=${encodeURIComponent(opts.streamId)}#NOT-THE-SHARE-LINK--USE-THE-COPY-BUTTON`,
+          "_blank",
+          "noopener"
+        );
+        boText.textContent = "Your breakout is open in a new tab. Invite people from there.";
+      },
+      () => {
+        boBtn.textContent = "Open a breakout";
+        boBtn.disabled = false;
+        boText.textContent = "Could not open a breakout room.";
+      }
+    );
+  });
+
+  let pendingInvite: { streamId: string } | null = null;
+  const hideBoInvite = () => {
+    pendingInvite = null;
+    boInvite.classList.add("hidden");
+  };
+  boInviteNo.addEventListener("click", hideBoInvite);
+  boInviteYes.addEventListener("click", () => {
+    const target = pendingInvite?.streamId;
+    hideBoInvite();
+    // Opened as a VIEWER — the plain watch URL. The person who accepted an invite is joining
+    // somebody else's room, not starting their own, and the Worker would refuse them the
+    // publish grant anyway.
+    if (target) window.open(`/${target}`, "_blank", "noopener");
+  });
+
+  paintBreakout();
+
   // --- the connection ---------------------------------------------------------------
 
   const room: RoomHandle = initRoom({
@@ -825,6 +991,17 @@ export function initRoomView(opts: {
       // the host subscribes to. The DO's audio relay stays in the protocol for now but nothing
       // sends on it; it is removed once the CDN path is confirmed live.
       onAudio: () => {},
+      onInvite: (inv) => {
+        // Resolve the sender against the roster so the prompt says a person's name. Falling
+        // back to "Someone" rather than showing a raw socket id, which means nothing to
+        // anybody and looks like a bug.
+        const who = members.get(inv.from)?.name?.trim();
+        pendingInvite = { streamId: inv.streamId };
+        boInviteText.textContent = who
+          ? `${who} invited you to a breakout room.`
+          : "You have been invited to a breakout room.";
+        boInvite.classList.remove("hidden");
+      },
       onFull: (cap) => {
         joinBox.classList.remove("hidden");
         joinBtn.disabled = true;
@@ -835,6 +1012,15 @@ export function initRoomView(opts: {
   });
 
   placeholder();
+
+  // Serve the roster to any breakout tab this page opens. Created unconditionally — it is a
+  // cheap same-origin channel and the creator may open a breakout at any time — but it only
+  // ever carries data this tab is already displaying.
+  bridge = serveBreakoutBridge({
+    parentStreamId: opts.streamId,
+    roster: () => ({ members: [...members.values()], meName: displayName }),
+    relay: (ids, streamId, title) => room.inviteToBreakout(ids, streamId, title),
+  });
 
   // --- joining ----------------------------------------------------------------------
 
@@ -961,6 +1147,10 @@ export function initRoomView(opts: {
       // The roster lives on <body>, not in `container`, so replaceChildren() below would
       // leave it on screen over a room that no longer exists.
       closeRoster();
+      // Tells any breakout tab that its source of invites has gone, so it shows that rather
+      // than dropping clicks into a channel nobody is listening on.
+      bridge?.close();
+      bridge = null;
       for (const b of bubbles.values()) if (b.timer) clearTimeout(b.timer);
       bubbles.clear();
       // Before the socket goes: releasing the microphone is the one piece of teardown with a

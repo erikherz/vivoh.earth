@@ -28,6 +28,8 @@ interface Attachment {
   tp: number;
   /** Last accepted reaction, for the reaction throttle. */
   tr: number;
+  /** Last accepted breakout invite, for the invite throttle. */
+  ti?: number;
   /**
    * This socket is the broadcaster.
    *
@@ -53,6 +55,27 @@ const MAX_REACTION = 4 * 1024;
 const PRESENCE_INTERVAL_MS = 2000;
 // Reactions are meant to be spammed a little; this only stops a script from spamming a lot.
 const REACTION_INTERVAL_MS = 400;
+
+/**
+ * A breakout invite: a sealed pointer to another broadcast, plus who it is for.
+ *
+ * Small on purpose. This is a stream id and a name inside an envelope, not content — anything
+ * approaching the size of a presence blob is not an invite and is refused.
+ */
+const MAX_INVITE = 2 * 1024;
+
+/**
+ * An invite is a deliberate act aimed at people, so it may be slow, and slow is the point: it
+ * is the one message in this file that makes somebody else's browser offer to open a new tab.
+ */
+const INVITE_INTERVAL_MS = 3000;
+
+/**
+ * How many people one invite may name. `null` means the whole room and costs one fanout, so
+ * this only bounds the SELECTIVE form — where a caller could otherwise send a list long enough
+ * to make the lookup itself the attack.
+ */
+const MAX_INVITE_TARGETS = 200;
 
 // Bounds fanout. Every presence blob is relayed to every participant, so the cost of a room
 // is quadratic in this number — 200 participants exchanging 96 KiB is already ~2 GB of DO
@@ -206,6 +229,29 @@ export class WatchRoom {
     }
   }
 
+  /**
+   * Send to the sockets whose room ids are in `ids`, or to everyone when `ids` is null.
+   *
+   * Room ids are per-socket and assigned by this object, so a sender can only name people it
+   * has actually seen in the roster — there is no id to guess that is not already public
+   * within the room.
+   */
+  private toIds(payload: string, ids: string[] | null, except?: WebSocket): void {
+    const want = ids ? new Set(ids) : null;
+    for (const sock of this.state.getWebSockets()) {
+      if (sock === except) continue;
+      if (want) {
+        const a = sock.deserializeAttachment() as Attachment | null;
+        if (!a || !want.has(a.id)) continue;
+      }
+      try {
+        sock.send(payload);
+      } catch {
+        // socket going away; ignore
+      }
+    }
+  }
+
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
@@ -264,7 +310,7 @@ export class WatchRoom {
 
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
     if (typeof raw !== "string") return;
-    let data: { t?: unknown; p?: unknown; up?: unknown; id?: unknown };
+    let data: { t?: unknown; p?: unknown; up?: unknown; id?: unknown; to?: unknown };
     try {
       data = JSON.parse(raw);
     } catch {
@@ -296,6 +342,40 @@ export class WatchRoom {
       const p = String(data.p ?? "");
       if (!p || p.length > MAX_AUDIO) return;
       this.toHosts(JSON.stringify({ t: "a", id: att.id, p }));
+      return;
+    }
+
+    // A breakout invite: "come to this other broadcast".
+    //
+    // ANY member may send one, not just the host. That is the feature — an attendee opens a
+    // side room and pulls a few people into it — and it is why the throttle below is the only
+    // thing standing between this and a room-wide pop-up cannon.
+    //
+    // THE PAYLOAD IS SEALED AND THIS OBJECT NEVER OPENS IT. What travels is a stream id and a
+    // name inside an envelope keyed off the share link, so this relay cannot learn which side
+    // rooms exist, who is in them, or what they are called — the same property the roster and
+    // the reactions already have. What it does see, and cannot avoid seeing, is that SOMEONE
+    // invited THESE ids at THIS moment. `to` has to be readable to route the message.
+    if (type === "invite") {
+      const p = String(data.p ?? "");
+      if (!p || p.length > MAX_INVITE) return;
+
+      if (now - (att.ti ?? 0) < INVITE_INTERVAL_MS) return;
+      ws.serializeAttachment({ ...att, ti: now } satisfies Attachment);
+
+      // null / absent means the whole room. An explicit list is capped and de-duplicated.
+      let targets: string[] | null = null;
+      if (Array.isArray(data.to)) {
+        targets = [...new Set(data.to.filter((x): x is string => typeof x === "string"))]
+          .slice(0, MAX_INVITE_TARGETS);
+        // An empty list is a caller asking to invite nobody. Honour that literally rather
+        // than treating it as "everyone", which is the direction that surprises people.
+        if (targets.length === 0) return;
+      }
+
+      // `except: ws` — never echo an invite back to its sender. Their own tab already knows;
+      // receiving it would offer them a room they are standing in.
+      this.toIds(JSON.stringify({ t: "invite", from: att.id, p }), targets, ws);
       return;
     }
 

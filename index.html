@@ -2351,6 +2351,174 @@
         .event-actions .go-live { background: #00d4aa; border-color: #00d4aa; color: #06231d; font-weight: 600; }
         .event-empty { color: var(--text-muted); line-height: 1.6; }
 
+        /* ── Breakout rooms ────────────────────────────────────────────────────────────
+           Three surfaces: the strip in the room panel (create / delegate), the invite prompt
+           that lands on somebody else's screen, and the invite panel in the breakout tab. */
+        .room-breakout {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5rem 1rem;
+            margin-top: 0.75rem;
+            padding: 0.7rem 0.9rem;
+            border-radius: 9px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+        }
+        .room-bo-toggle { display: flex; align-items: center; gap: 0.55rem; font-size: 0.9rem; }
+        .room-bo-open { display: flex; align-items: center; gap: 0.85rem; flex-wrap: wrap; flex: 1; }
+        .room-bo-text { font-size: 0.87rem; color: var(--text-secondary); line-height: 1.45; flex: 1 1 14rem; }
+        .room-bo-btn {
+            padding: 0.5rem 1.05rem;
+            border-radius: 8px;
+            border: 1px solid #00d4aa;
+            background: transparent;
+            color: #00d4aa;
+            font: inherit;
+            font-weight: 600;
+            font-size: 0.88rem;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .room-bo-btn:hover:not(:disabled) { background: rgba(0, 212, 170, 0.12); }
+        .room-bo-btn:disabled { opacity: 0.55; cursor: default; }
+        :root.light .room-bo-btn { border-color: #00997e; color: #00997e; }
+
+        /* The incoming invite. Same shape as the speaking invite next to it, deliberately —
+           they are the same KIND of thing (somebody is asking you to do something) and a
+           person should not have to learn two layouts for one idea. */
+        .room-bo-invite {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            flex-wrap: wrap;
+            margin-top: 0.75rem;
+            padding: 0.7rem 0.9rem;
+            border-radius: 9px;
+            border: 1px solid #00d4aa;
+            background: rgba(0, 212, 170, 0.08);
+        }
+        .room-bo-invite-text { flex: 1 1 14rem; font-size: 0.9rem; color: var(--text-primary); }
+        .room-bo-invite button {
+            padding: 0.45rem 1rem;
+            border-radius: 7px;
+            border: 1px solid var(--border-color);
+            background: transparent;
+            color: var(--text-primary);
+            font: inherit;
+            font-size: 0.87rem;
+            cursor: pointer;
+            /* 44px is the touch target the rest of this UI holds to. */
+            min-height: 44px;
+        }
+        .room-bo-invite-yes { background: #00d4aa; border-color: #00d4aa; color: #06231d; font-weight: 700; }
+
+        /* The invite panel, in the breakout tab. */
+        .bo-panel {
+            max-width: 900px;
+            margin: 1rem auto 0;
+            padding: 1rem 1.15rem;
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+        }
+        .bo-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+        .bo-head h3 { margin: 0; font-size: 1rem; }
+        .bo-back { font-size: 0.85rem; color: var(--text-secondary); text-decoration: none; white-space: nowrap; }
+        .bo-back:hover { color: #00d4aa; }
+        .bo-note { margin: 0.35rem 0 0.8rem; font-size: 0.86rem; color: var(--text-muted); line-height: 1.5; }
+        /* Scrolls at about eight rows. The main room can hold 200 people and this panel sits
+           under a live video — an unbounded list would push the picture off the screen. */
+        .bo-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            max-height: 17rem;
+            overflow-y: auto;
+            border-radius: 8px;
+            background: var(--border-color);
+        }
+        .bo-row {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            padding: 0.5rem 0.65rem;
+            background: var(--bg-tertiary);
+            cursor: pointer;
+            min-height: 44px;
+        }
+        .bo-face {
+            width: 28px;
+            height: 28px;
+            flex: 0 0 28px;
+            border-radius: 50%;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-secondary);
+            font-size: 0.8rem;
+            font-weight: 700;
+            color: var(--text-secondary);
+        }
+        .bo-face img { width: 100%; height: 100%; object-fit: cover; }
+        .bo-name {
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .bo-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            flex-wrap: wrap;
+            margin-top: 0.85rem;
+        }
+        .bo-all { display: flex; align-items: center; gap: 0.5rem; font-size: 0.87rem; margin-right: auto; }
+        .bo-btn {
+            padding: 0.5rem 1.05rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: transparent;
+            color: var(--text-primary);
+            font: inherit;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            min-height: 44px;
+        }
+        .bo-btn-primary { background: #00d4aa; border-color: #00d4aa; color: #06231d; }
+        .bo-btn:disabled { opacity: 0.5; cursor: default; }
+        .bo-status { margin: 0.6rem 0 0; font-size: 0.85rem; color: #00d4aa; min-height: 1.2em; }
+        :root.light .bo-status { color: #00997e; }
+
+        /* The viewer's way back out of a breakout. */
+        .breakout-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            flex-wrap: wrap;
+            max-width: 900px;
+            margin: 0 auto 0.75rem;
+            padding: 0.55rem 0.9rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            font-size: 0.87rem;
+            color: var(--text-secondary);
+        }
+        .breakout-back { color: #00d4aa; text-decoration: none; font-weight: 600; white-space: nowrap; }
+        :root.light .breakout-back { color: #00997e; }
+
+        @media (max-width: 640px) {
+            .room-bo-open, .bo-actions { gap: 0.55rem; }
+            .bo-all { margin-right: 0; flex: 1 0 100%; }
+            .bo-btn, .room-bo-btn { flex: 1; }
+        }
+
         /* ── The standby page ──────────────────────────────────────────────────────────
            One stylesheet for two places: the viewer actually waiting, and the scheduler's
            preview of what that viewer will see. --standby-accent is set per event in JS,

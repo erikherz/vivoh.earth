@@ -770,6 +770,9 @@ import {
   getStreamAccess,
   putStreamKey,
   getStreamEvent,
+  createBreakout,
+  getBreakoutInfo,
+  closeBreakout,
   listEvents,
   getEvent,
   createEvent,
@@ -884,7 +887,10 @@ const broadcastUrl = (streamId: string, suffix = ""): string =>
 function carryTestParams(search: string): string {
   const from = new URLSearchParams(search);
   const out = new URLSearchParams();
-  for (const key of ["geo", "aframe", "diag", "agroup", "adg"]) {
+  //   from   — the parent broadcast a breakout was opened out of. NOT a test knob: without it
+  //            in this list, /broadcast's replaceState drops it and the breakout tab can never
+  //            find the roster it exists to invite from.
+  for (const key of ["geo", "aframe", "diag", "agroup", "adg", "from"]) {
     const v = from.get(key);
     if (v !== null) out.set(key, v);
   }
@@ -1396,6 +1402,31 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   // broadcast must never wait on a lookup that an ad hoc stream does not even need.
   mountCurtainControl(streamId);
 
+  // Did this tab open as a breakout of another broadcast? `from=` says so, and carryTestParams
+  // is what keeps it alive across the URL rewrite.
+  //
+  // The panel is mounted straight away, before go-live: the whole point of a breakout is to
+  // pull people in, and making a host go live to an empty room before they may invite anyone
+  // gets the order exactly backwards.
+  {
+    const parentStreamId = (new URLSearchParams(location.search).get("from") ?? "").trim();
+    // Queried here rather than reusing `broadcastRoomPanel`, which is declared further down
+    // this function: a `const` read before its declaration is a TDZ ReferenceError, and this
+    // block runs first.
+    const roomPanel = document.getElementById("broadcast-room");
+    if (/^[a-z0-9]{5}$/.test(parentStreamId) && roomPanel) {
+      const panel = document.createElement("div");
+      roomPanel.parentElement?.insertBefore(panel, roomPanel);
+      void import("./room/breakout").then(({ mountBreakoutInvites }) => {
+        mountBreakoutInvites({ container: panel, parentStreamId, breakoutStreamId: streamId });
+      });
+      // Release the publish grant when this tab goes, rather than leaving it open for its
+      // whole TTL. Best-effort by design — if the beacon never lands, expires_at is the
+      // backstop, which is why that column exists.
+      window.addEventListener("pagehide", () => closeBreakout(streamId));
+    }
+  }
+
   // Relay-blind E2E media encryption is MANDATORY for every stream — there is no opt-out.
   // Arm the publisher at page load, BEFORE any frame is encoded, so nothing is ever
   // published in the clear; the content key arrives at go-live and releases the queued
@@ -1539,6 +1570,14 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   let activeComp: Compositor | null = null;
   let roomHandle: RoomViewHandle | null = null;
   let roomEnabled = false;
+  /**
+   * Is this broadcaster delegating breakout rooms to attendees?
+   *
+   * Held here rather than read from the DOM because the room view may be torn down and rebuilt
+   * (the Room toggle, a link rotation), and the delegation is a property of the broadcast, not
+   * of whichever panel happens to be on screen.
+   */
+  let breakoutsEnabled = false;
   let roomBtn: HTMLButtonElement | null = null;
   const openRoom = () => {
     if (!broadcastRoomPanel || !broadcastStage || roomHandle) return;
@@ -1565,6 +1604,23 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       // guest with nowhere to be drawn is a warning, not a crash.
       setGuestVideo: (source) => activeComp?.setGuest(source),
       guestState: () => activeComp?.guestState() ?? "no compositor yet (not capturing)",
+      // The broadcaster's end of breakouts: the toggle that delegates publishing to attendees.
+      // `create` is deliberately absent — a broadcaster already has a broadcast, and an
+      // "open a breakout of my own event" button is a control with no meaning behind it.
+      breakouts: {
+        enabled: () => breakoutsEnabled,
+        setEnabled: async (on) => {
+          if (!(await updateStreamSettings(streamId, { breakouts_enabled: on }))) return false;
+          // Re-read rather than trusting the write. The Worker forces breakouts OFF whenever
+          // the room is off, so "the POST succeeded" and "the flag is now what you asked for"
+          // are genuinely different facts, and a toggle that reported the first as the second
+          // would leave a broadcaster believing they had delegated something they had not.
+          const fresh = await getStreamSettings(streamId);
+          breakoutsEnabled = fresh.breakouts_enabled === true;
+          return breakoutsEnabled === on;
+        },
+        signedIn: !!user,
+      },
     });
   };
   const closeRoom = () => {
@@ -1574,6 +1630,10 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   };
   const setRoomEnabled = (on: boolean, persist = true) => {
     roomEnabled = on;
+    // Breakouts ride on the room: the roster an attendee invites from IS the room. The Worker
+    // enforces the same rule on write, so this only keeps the page honest about it rather
+    // than being the place the rule lives.
+    if (!on) breakoutsEnabled = false;
     if (on) openRoom();
     else closeRoom();
     roomBtn?.classList.toggle("toggle-on", on);
@@ -1582,6 +1642,7 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
 
   getStreamSettings(streamId).then((settings) => {
     if (settings.chat_enabled) setChatEnabled(true, false);
+    breakoutsEnabled = settings.breakouts_enabled === true;
     if (settings.room_enabled) setRoomEnabled(true, false);
   });
 
@@ -4097,6 +4158,80 @@ function renderWaitingRoom(event: ScheduledEvent | null): StandbyHandle {
   });
 }
 
+/**
+ * The way back out of a breakout room.
+ *
+ * A side conversation is the one kind of broadcast whose ending is EXPECTED — somebody opened
+ * it for ten minutes and then closed the tab. Everywhere else in this client a broadcast that
+ * stops is a problem to diagnose; here it is the normal shape of the thing, and a viewer left
+ * looking at a stopped player would reasonably think it broke.
+ *
+ * So: a persistent link back to the parent event while the room runs, and a plain statement
+ * when it ends.
+ *
+ * Polled rather than pushed. The alternative was to infer "it ended" from the player stalling,
+ * which cannot tell a closed room from a bad network — and telling somebody their host left
+ * when the host is still talking is worse than being ten seconds late. This is one indexed
+ * read every ten seconds, for the small audience of one side room.
+ */
+function mountBreakoutReturn(streamId: string): void {
+  void (async () => {
+    const info = await getBreakoutInfo(streamId);
+    // 404 → an ordinary broadcast, which is almost every stream. Nothing to mount.
+    if (!info) return;
+
+    const section = document.querySelector("#watch-view section") as HTMLElement | null;
+    if (!section) return;
+
+    const bar = document.createElement("div");
+    bar.className = "breakout-bar";
+    const label = document.createElement("span");
+    label.textContent = "You are in a breakout room.";
+    const back = document.createElement("a");
+    back.href = info.parent_url;
+    back.className = "breakout-back";
+    back.textContent = "Back to the main event";
+    bar.append(label, back);
+    section.parentElement?.insertBefore(bar, section);
+
+    if (info.closed) return void showBreakoutEnded(info.parent_url);
+
+    const timer = window.setInterval(async () => {
+      const fresh = await getBreakoutInfo(streamId);
+      if (!fresh?.closed) return;
+      window.clearInterval(timer);
+      showBreakoutEnded(fresh.parent_url);
+    }, 10_000);
+    // setInterval, not rAF: a viewer who tabs away to the main event must still be told when
+    // the side room closes, and rAF stops in a background tab.
+    window.addEventListener("pagehide", () => window.clearInterval(timer));
+  })();
+}
+
+/** Replace the player with the reason it stopped, and the way back. */
+function showBreakoutEnded(parentUrl: string): void {
+  const section = document.querySelector("#watch-view section");
+  if (!section) return;
+  section.innerHTML = "";
+  const panel = document.createElement("div");
+  panel.className = "login-required";
+  const h = document.createElement("h2");
+  h.textContent = "This breakout room has ended";
+  const p = document.createElement("p");
+  p.textContent =
+    "Whoever opened it has closed it. The main event may still be going — you can go back to it, " +
+    "or to the tab you left it playing in.";
+  const cta = document.createElement("p");
+  cta.style.marginTop = "1.25rem";
+  const link = document.createElement("a");
+  link.href = parentUrl;
+  link.className = "cta cta-primary";
+  link.textContent = "Back to the main event";
+  cta.append(link);
+  panel.append(h, p, cta);
+  section.append(panel);
+}
+
 // promptPasscode() and its first/wrong/rotated variants lived here. There is no second
 // secret to ask for: the key is the link. A viewer whose link does not decrypt is told so
 // by the stuck-player watchdog, which can distinguish a stale salt (re-derivable) from a
@@ -4875,6 +5010,19 @@ async function initWatchView(streamId: string, user: User | null) {
       salt: () => watchSalt,
       // No `mix` and no `setGuestVideo` on a viewer's page: there is no composite here. A
       // viewer who is called on PUBLISHES; only the broadcaster subscribes and draws.
+      //
+      // `setEnabled` absent, `create` present — the exact inverse of the broadcaster's page,
+      // and that asymmetry IS the permission model: an attendee may use the delegation, never
+      // grant it. The Worker re-checks both; this only decides which control is drawn.
+      breakouts: {
+        enabled: () => settings.breakouts_enabled === true,
+        create: async () => {
+          const tag = await deriveRouteTag(watchLinkSecret, streamId);
+          const { room, error } = await createBreakout(streamId, tag);
+          return room ? { streamId: room.stream_id } : { error };
+        },
+        signedIn: !!user,
+      },
     });
   };
   const closeWatchRoom = () => {
@@ -4953,6 +5101,12 @@ async function initWatchView(streamId: string, user: User | null) {
     // A `#k=` fragment still WINS if one is present. Every link handed out before today
     // carries one, and those recipients should not be told to go and sign in for a stream they
     // could already decrypt.
+    // Is this a breakout of something else? Mounted HERE, before the route resolves, and that
+    // position is the point: a breakout is the one kind of stream people routinely open before
+    // it starts and after it ends. Mounted after the route (where the report control goes) the
+    // way back existed only while the video was playing — exactly when nobody needs it.
+    mountBreakoutReturn(streamId);
+
     const fragmentSecret = new URLSearchParams(location.hash.replace(/^#/, "")).get("k");
     let watchSecret: string | null = fragmentSecret;
 

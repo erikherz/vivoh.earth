@@ -299,6 +299,74 @@ export async function putStreamKey(
   }
 }
 
+// ── Breakout rooms ────────────────────────────────────────────────────────────────────
+
+export interface BreakoutRoom {
+  stream_id: string;
+  parent_stream_id: string;
+  /** The content key, so the new tab can derive its room key without a second round trip. */
+  secret: string;
+  expires_at: string;
+  require_auth: boolean;
+}
+
+/**
+ * Open a breakout off a live broadcast.
+ *
+ * `routeTag` proves the caller holds the parent's link. Without it a signed-in stranger who
+ * guessed a five-character id could mint a publish grant off somebody else's event — see the
+ * create handler, where this is step 3 of 8.
+ *
+ * Returns the Worker's own refusal text on failure. "This broadcast is not offering breakout
+ * rooms" is actionable; "something went wrong" is not.
+ */
+export async function createBreakout(
+  parentStreamId: string,
+  routeTag: string
+): Promise<{ room?: BreakoutRoom; error?: string }> {
+  try {
+    const res = await fetch(`/api/streams/${parentStreamId}/breakouts?tag=${encodeURIComponent(routeTag)}`, {
+      method: "POST",
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return { error: data?.error || `Could not open a breakout room (HTTP ${res.status}).` };
+    return { room: data as BreakoutRoom };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export interface BreakoutInfo {
+  parent_stream_id: string;
+  parent_url: string;
+  closed: boolean;
+}
+
+/**
+ * Is this stream a breakout, and is it still open?
+ *
+ * 404 is the ordinary answer for an ordinary broadcast and means "not a breakout", not an
+ * error. Null for both, because the caller does the same thing either way.
+ */
+export async function getBreakoutInfo(streamId: string): Promise<BreakoutInfo | null> {
+  try {
+    const res = await fetch(`/api/streams/${streamId}/breakout`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as BreakoutInfo;
+  } catch {
+    return null;
+  }
+}
+
+/** Close your own breakout. Best-effort: used on pagehide, so it must never throw. */
+export function closeBreakout(streamId: string): void {
+  try {
+    void fetch(`/api/streams/${streamId}/breakout`, { method: "DELETE", keepalive: true });
+  } catch {
+    /* the grant expires on its own */
+  }
+}
+
 // ── Scheduled events ──────────────────────────────────────────────────────────────────
 
 export interface ScheduledEvent {
@@ -692,6 +760,13 @@ export interface StreamSettings {
   chat_enabled: boolean;
   /** The room view: participants see each other. OFF unless the broadcaster turned it on. */
   room_enabled: boolean;
+  /**
+   * The broadcaster is delegating breakout rooms to signed-in attendees.
+   *
+   * Optional because an older Worker does not send it, and absent must read as OFF — this
+   * field is what widens who may publish.
+   */
+  breakouts_enabled?: boolean;
   /** Terminated by an operator. Both sides poll for this and stop; see stopForKill(). */
   killed: boolean;
 }
@@ -707,13 +782,16 @@ export async function getStreamSettings(streamId: string): Promise<StreamSetting
       encrypted: data.encrypted ?? false,
       chat_enabled: data.chat_enabled ?? false,
       room_enabled: data.room_enabled ?? false,
+      // Absent reads as OFF. An older Worker does not send this field, and this is the flag
+      // that decides whether attendees are offered a control that widens who may publish.
+      breakouts_enabled: data.breakouts_enabled === true,
       killed: data.killed ?? false,
     };
   } catch {
     // Fails to `killed: false` deliberately. A network blip must not black out a stream that
     // is running perfectly well — the real signal is an explicit `true` from the server, and
     // a poll that fails will simply be retried five seconds later.
-    return { require_auth: false, overlay_html: "", link_enc: "", encrypted: false, chat_enabled: false, room_enabled: false, killed: false };
+    return { require_auth: false, overlay_html: "", link_enc: "", encrypted: false, chat_enabled: false, room_enabled: false, breakouts_enabled: false, killed: false };
   }
 }
 

@@ -25,7 +25,9 @@ ever moves ciphertext it cannot read.
 - **Combinable capture** — Camera, Audio, and Screen toggled independently, composited into
   one stable video track + audio mix, with a draggable camera PiP.
 - **OAuth sign-in** (Google / Microsoft / Discord) — and it is the **only** way to broadcast.
-- **Default-deny broadcaster allow list** — only approved emails may publish.
+- **Default-deny broadcaster allow list** — only approved emails may publish, with one
+  deliberate exception: a breakout room (see below), where an approved broadcaster
+  delegates a single broadcast name to one signed-in attendee.
 - **Per-broadcast, server-minted relay tokens** — the Worker signs short-lived tokens scoped
   to a single stream. They authorize the *connection* only, and never decrypt media.
 - **Mandatory relay-blind E2E media encryption.** Every frame is AES-256-GCM encrypted in the
@@ -111,6 +113,37 @@ been overtaken. A boolean set last Thursday would still read "up" this Thursday.
 There is no *lower*. Viewers already watching hold a relay token and a live subscription that
 nothing server-side can revoke, so a control claiming to shut the room would be lying to the
 person pressing it. What it governs is who gets in from now on.
+
+## Breakout rooms
+
+Migration `0023` (2026-09-16). During a live broadcast, a signed-in attendee opens a side
+conversation in a new tab and becomes its broadcaster. Their original tab keeps playing the main
+event — being in both at once is the point.
+
+**This is the largest change to who may publish here.** Until now publishing needed an account
+AND a row in `broadcaster_access`; an ordinary attendee will never have one. So `breakout_rooms`
+is a second, narrower door, and every column on it exists to keep it narrow: the grant names ONE
+stream id (minted by us, never chosen by the caller), ONE account, and expires in six hours.
+`mayPublish()` holds both doors so they cannot drift apart. Scheduling events is deliberately
+NOT widened — a grant is for a conversation happening now, not a licence to reserve names weeks
+out, and the call site says so.
+
+**The authority is delegated, and revocable at the source.** A breakout can only be opened off a
+broadcast whose owner ticked *Let attendees open breakout rooms*, which lives in the room panel
+rather than the control bar — partly because that bar has 2px of spare width, mostly because the
+roster an attendee invites FROM is the room. Turning the room off turns breakouts off with it.
+Creating also requires the parent's route tag, so a signed-in stranger who guessed a
+five-character id cannot mint a publish grant off somebody else's event.
+
+**Invites travel sealed, over the rails the room already has.** The breakout tab shows the parent
+room's roster with a checkbox each, plus invite everyone / selected. It holds no parent
+credentials at all: the parent tab publishes the roster over a same-origin `BroadcastChannel` and
+relays invites back out through the socket it already owns. The alternative — a second room
+socket from the breakout tab — would have put the creator in the parent room twice, with two
+bubbles in everyone's grid. The Durable Object relays a sealed pointer it cannot open, throttled
+to one invite per socket per 3s, and never echoes an invite back to its sender.
+
+Close the main tab and the invite panel says so rather than dropping clicks.
 
 ## Architecture
 
@@ -203,7 +236,8 @@ tables, including `stream_salts` where the kill switch lives, arrive only by mig
 Each session uses a unique 5-character stream ID.
 
 ### Broadcasting
-1. Sign in (Google / Microsoft / Discord). Your email must be on the broadcaster allow list.
+1. Sign in (Google / Microsoft / Discord). Your email must be on the broadcaster allow list,
+   unless you are opening a breakout room off a broadcast that is offering them.
 2. Open your stream URL and toggle **Camera / Audio / Screen**.
 3. Leave **Require sign-in to watch** ticked unless you genuinely want an open stream.
 4. Share the URL — including everything after the `#`, which is the key.
