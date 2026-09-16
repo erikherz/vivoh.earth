@@ -666,12 +666,17 @@ export interface WatchSession {
  * /route requires — so audience cannot be manufactured for a stream by anyone who merely
  * guessed its five-character id.
  */
-export async function logWatchStart(streamId: string, routeTag?: string): Promise<WatchSession | null> {
+export async function logWatchStart(
+  streamId: string,
+  routeTag?: string,
+  /** "waiting" for somebody sitting on the standby page. Absent records a real viewing. */
+  state?: "waiting" | "watching"
+): Promise<WatchSession | null> {
   try {
     const response = await fetch("/api/stats/watch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stream_id: streamId, tag: routeTag }),
+      body: JSON.stringify({ stream_id: streamId, tag: routeTag, state }),
     });
     if (!response.ok) return null;
     const data = await response.json();
@@ -687,12 +692,19 @@ export async function logWatchStart(streamId: string, routeTag?: string): Promis
  * because the tab was suspended long enough to be reaped — which is the caller's cue to
  * open a fresh one rather than keep beating against a closed row.
  */
-export async function logWatchHeartbeat(session: WatchSession): Promise<boolean> {
+export async function logWatchHeartbeat(
+  session: WatchSession,
+  /**
+   * Pass "watching" to promote a session that opened as waiting — the curtain went up.
+   * One direction only; the Worker will not move a session back to waiting.
+   */
+  state?: "watching"
+): Promise<boolean> {
   try {
     const response = await fetch(`/api/stats/watch/${session.id}/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: session.token }),
+      body: JSON.stringify({ token: session.token, state }),
     });
     if (!response.ok) return false;
     const data = await response.json();
@@ -877,7 +889,7 @@ export async function getLiveStats(): Promise<{ broadcasts: LiveBroadcast[]; vie
 export async function getStreamViewers(
   streamId: string,
   routeTag?: string
-): Promise<{ stream_id: string; viewers: LiveViewer[] } | null> {
+): Promise<{ stream_id: string; viewers: LiveViewer[]; waiting?: LiveViewer[] } | null> {
   try {
     const qs = routeTag ? `?tag=${encodeURIComponent(routeTag)}` : "";
     const response = await fetch(`/api/stats/stream/${streamId}/viewers${qs}`);

@@ -2351,6 +2351,19 @@
         .event-actions .go-live { background: #00d4aa; border-color: #00d4aa; color: #06231d; font-weight: 600; }
         .event-empty { color: var(--text-muted); line-height: 1.6; }
 
+        /* The viewer badge, while people are behind the curtain. Amber rather than the house
+           green: "waiting" is a state a host should notice and act on, not a resting one. */
+        .viewer-stats-badge.vs-waiting { color: #e8a33d; border-color: rgba(232, 163, 61, 0.45); }
+        .vs-section {
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+        }
+        .vs-section td { padding-top: 0.7rem; }
+        .vs-row-waiting { opacity: 0.75; }
+
         /* ── Breakout rooms ────────────────────────────────────────────────────────────
            Three surfaces: the strip in the room panel (create / delegate), the invite prompt
            that lands on somebody else's screen, and the invite panel in the breakout tab. */

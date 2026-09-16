@@ -2878,10 +2878,13 @@ async function handleStatsRoutes(
       }
     }
 
-    const viewers = await env.DB
+    // Both states in ONE query, because they are two halves of one answer and the badge asks
+    // every five seconds. `state` is selected rather than filtered so the caller can split
+    // them — a host mid-curtain-lift wants to see both numbers moving, not one of them.
+    const sessions = await env.DB
       .prepare(`
         SELECT
-          w.id, w.stream_id, w.started_at, w.last_seen_at,
+          w.id, w.stream_id, w.started_at, w.last_seen_at, w.state,
           u.id as user_id, u.name as user_name, u.email as user_email, u.avatar_url
         FROM watch_events w
         LEFT JOIN users u ON w.user_id = u.id
@@ -2889,11 +2892,15 @@ async function handleStatsRoutes(
         ORDER BY w.started_at DESC
       `)
       .bind(streamId)
-      .all();
+      .all<{ state?: string }>();
 
+    const rows = sessions.results ?? [];
     return Response.json({
       stream_id: streamId,
-      viewers: viewers.results,
+      // `viewers` keeps its old meaning — people actually watching — so nothing that already
+      // reads this endpoint starts counting the standby page as audience.
+      viewers: rows.filter((r) => r.state !== "waiting"),
+      waiting: rows.filter((r) => r.state === "waiting"),
     });
   }
 
@@ -3194,10 +3201,20 @@ async function handleStatsRoutes(
   if (method === "POST" && path === "/api/stats/watch") {
     const user = await getAuthenticatedUser(request, env);
 
-    const body = await readJsonBody<{ stream_id?: string; tag?: string }>(request);
+    const body = await readJsonBody<{ stream_id?: string; tag?: string; state?: string }>(request);
     if (!body?.stream_id) {
       return Response.json({ error: "stream_id required" }, { status: 400 });
     }
+
+    // 'waiting' means this viewer holds the link and is sitting on the standby page — behind a
+    // curtain the host has not lifted. Anything else is taken as watching, so an older client
+    // that does not send this keeps the meaning its rows have always had.
+    //
+    // Note what this can and cannot see: a session needs a LIVE broadcast row (the 404 below),
+    // so people who arrive before the broadcaster goes live are not counted at all. That is the
+    // same gate that stops a stranger manufacturing audience for a guessed id, and it is why
+    // this counts the curtain case rather than every early arrival.
+    const state = body.state === "waiting" ? "waiting" : "watching";
 
     const live = await env.DB
       .prepare(
@@ -3221,17 +3238,18 @@ async function handleStatsRoutes(
     // A viewer's location is never needed by anything and is never resolved or stored.
     const result = await env.DB
       .prepare(`
-        INSERT INTO watch_events (user_id, stream_id, last_seen_at, session_hash)
-        VALUES (?, ?, datetime('now'), ?)
+        INSERT INTO watch_events (user_id, stream_id, last_seen_at, session_hash, state)
+        VALUES (?, ?, datetime('now'), ?, ?)
         RETURNING id
       `)
-      .bind(user?.id ?? null, body.stream_id, await sha256b64url(token))
+      .bind(user?.id ?? null, body.stream_id, await sha256b64url(token), state)
       .first<{ id: number }>();
 
     return Response.json({
       id: result?.id,
       stream_id: body.stream_id,
       token,
+      state,
       heartbeat_seconds: SESSION_HEARTBEAT_SECONDS,
     });
   }
@@ -3244,8 +3262,23 @@ async function handleStatsRoutes(
   // stitching that into the old row would credit them for the gap.
   const watchBeatMatch = path.match(/^\/api\/stats\/watch\/(\d+)\/heartbeat$/);
   if (method === "POST" && watchBeatMatch) {
-    const body = await readJsonBody<{ token?: string }>(request);
-    const ok = await touchSession(env, parseInt(watchBeatMatch[1]), body?.token ?? "");
+    const body = await readJsonBody<{ token?: string; state?: string }>(request);
+    const id = parseInt(watchBeatMatch[1]);
+    const ok = await touchSession(env, id, body?.token ?? "");
+    // The curtain lifting promotes a waiting session IN PLACE, rather than closing it and
+    // opening another. Somebody who waited twenty minutes and then watched the event was there
+    // for the whole thing; splitting that into two rows would credit them for neither.
+    //
+    // ONE DIRECTION ONLY, enforced by `state = 'waiting'` in the WHERE clause. A session never
+    // goes back: a viewer whose stream drops opens a fresh one, and letting this move backwards
+    // would let a client quietly subtract itself from the audience at will. touchSession has
+    // already proved the token, so this cannot be aimed at somebody else's row.
+    if (ok && body?.state === "watching") {
+      await env.DB
+        .prepare("UPDATE watch_events SET state = 'watching' WHERE id = ? AND state = 'waiting'")
+        .bind(id)
+        .run();
+    }
     return Response.json(ok ? { ok: true } : { ok: false, reason: "unknown" });
   }
 

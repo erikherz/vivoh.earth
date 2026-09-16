@@ -145,6 +145,18 @@ to one invite per socket per 3s, and never echoes an invite back to its sender.
 
 Close the main tab and the invite panel says so rather than dropping clicks.
 
+**The host can see who is waiting.** Migration `0024` gives a viewing session a `state`, and the
+standby page opens one as `waiting` — so a broadcast with forty people behind a lowered curtain
+reads "40 waiting" in amber rather than "0 watching", which is the number a host reads while
+deciding whether to start. Lifting the curtain PROMOTES each session in place (`waiting` ->
+`watching`, never back), so somebody who waited through the countdown and then watched the
+event is one row and not two. Mid-lift the badge shows both, because for those seconds the
+interesting fact is one number draining into the other.
+
+A session needs a live broadcast row, so this counts the curtain case rather than every early
+arrival: before the host goes live there is no route tag to prove a link against, and that gate
+is what stops a stranger manufacturing an audience for a guessed id.
+
 ## Architecture
 
 ```

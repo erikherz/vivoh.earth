@@ -1673,6 +1673,8 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
   const vsPanel = document.getElementById("viewer-stats-panel");
   if (vsToggle && vsCount && vsPanel) {
     let vsViewers: LiveViewer[] = [];
+    /** People holding the link who are sitting on the standby page behind the curtain. */
+    let vsWaiting: LiveViewer[] = [];
 
     const fmtDuration = (dateStr: string) => {
       const secs = Math.max(0, Math.floor((Date.now() - new Date(dateStr + "Z").getTime()) / 1000));
@@ -1685,7 +1687,9 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
     const renderPanel = () => {
       if (vsPanel.classList.contains("hidden")) return; // only build DOM when open
       const rows = vsViewers.length === 0
-        ? `<tr><td colspan="2" class="empty">No active viewers</td></tr>`
+        // Suppressed when people are waiting: "No active viewers" above a list of six names is
+        // a contradiction, and the standby section below already says what is happening.
+        ? (vsWaiting.length ? "" : `<tr><td colspan="2" class="empty">No active viewers</td></tr>`)
         : vsViewers.map((v) => {
             // WHO, not just how many. This is the visible half of the security model: with
             // Require sign-in on, every viewer holds an account, so a broadcaster sees their
@@ -1704,8 +1708,25 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
               : `<span class="viewer-anon">Anonymous</span>`;
             return `<tr><td>${who}</td><td>${fmtDuration(v.started_at)}</td></tr>`;
           }).join("");
-      vsPanel.innerHTML = `<table class="stats-table"><tbody>${rows}</tbody></table>`;
+      const waitingRows = vsWaiting.map((v) => {
+        const who = v.user_name
+          ? `<span class="viewer-name">${escapeHtml(v.user_name)}</span>` +
+            (v.user_email ? ` <span class="viewer-email">${escapeHtml(v.user_email)}</span>` : "")
+          : `<span class="viewer-anon">Anonymous</span>`;
+        return `<tr class="vs-row-waiting"><td>${who}</td><td>${fmtDuration(v.started_at)}</td></tr>`;
+      }).join("");
+
+      // A header row rather than a second table: the two groups share the same columns and the
+      // same meaning for "how long" — time on this page — so splitting them into two tables
+      // would imply the durations measure different things.
+      const waitingSection = vsWaiting.length
+        ? `<tr class="vs-section"><td colspan="2">On the standby page</td></tr>${waitingRows}`
+        : "";
+
+      vsPanel.innerHTML = `<table class="stats-table"><tbody>${rows}${waitingSection}</tbody></table>`;
     };
+
+    const vsLabel = vsToggle.querySelector(".vs-label") as HTMLElement | null;
 
     const refreshViewers = async () => {
       // Derived per call rather than cached: New link rotates linkSecret mid-broadcast, and a
@@ -1713,7 +1734,39 @@ function initBroadcastView(initialStreamId: string, user: User | null) {
       const data = await getStreamViewers(streamId, await deriveRouteTag(linkSecret, streamId));
       if (!data) return; // transient failure — keep the last known count
       vsViewers = data.viewers;
-      vsCount.textContent = String(vsViewers.length);
+      vsWaiting = data.waiting ?? [];
+
+      // WHAT THE BADGE SAYS, and why it is three cases rather than one.
+      //
+      // Nobody is watching but people are here: they are behind the curtain, and "0 watching"
+      // is both true and useless — it is the number a host reads while deciding whether to
+      // start. Say "waiting" instead.
+      //
+      // Both, during a curtain lift: show both, because for those few seconds the interesting
+      // fact is that one number is draining into the other. An either/or badge would flicker
+      // between two half-truths.
+      //
+      // Otherwise: unchanged. An ordinary broadcast has no waiters and reads exactly as before.
+      if (vsWaiting.length && !vsViewers.length) {
+        vsCount.textContent = String(vsWaiting.length);
+        if (vsLabel) vsLabel.textContent = "waiting";
+        vsToggle.classList.add("vs-waiting");
+      } else if (vsWaiting.length) {
+        vsCount.textContent = `${vsViewers.length} watching · ${vsWaiting.length}`;
+        if (vsLabel) vsLabel.textContent = "waiting";
+        vsToggle.classList.add("vs-waiting");
+      } else {
+        vsCount.textContent = String(vsViewers.length);
+        if (vsLabel) vsLabel.textContent = "watching";
+        vsToggle.classList.remove("vs-waiting");
+      }
+
+      vsToggle.setAttribute(
+        "title",
+        vsWaiting.length
+          ? `${vsViewers.length} watching, ${vsWaiting.length} on the standby page — click for details`
+          : "Active viewers — click for details"
+      );
       renderPanel();
     };
 
@@ -5051,6 +5104,38 @@ async function initWatchView(streamId: string, user: User | null) {
     // way back existed only while the video was playing — exactly when nobody needs it.
     mountBreakoutReturn(streamId);
 
+    /**
+     * The session opened while this viewer sits on the standby page.
+     *
+     * Declared out here because two places touch it: the waiting loop opens it, and the
+     * ordinary session machinery further down ADOPTS it rather than opening a second one.
+     */
+    let waitingSession: WatchSession | null = null;
+    let waitingBeat: number | null = null;
+
+    const openWaitingSession = async (tag: string) => {
+      if (waitingSession) return;
+      waitingSession = await logWatchStart(streamId, tag, "waiting");
+      if (!waitingSession) return;
+      // Its own heartbeat, on the same cadence the server asks for. Without it the reaper
+      // closes the row after a couple of minutes and a long wait reads as an empty room.
+      waitingBeat = window.setInterval(async () => {
+        if (!waitingSession) return;
+        if (!(await logWatchHeartbeat(waitingSession))) {
+          // Reaped — a suspended tab, most likely. Drop it; the loop reopens one on its next
+          // pass, which is the same self-healing the watching session already does.
+          window.clearInterval(waitingBeat ?? 0);
+          waitingBeat = null;
+          waitingSession = null;
+        }
+      }, Math.max(10, waitingSession.heartbeatSeconds) * 1000);
+    };
+
+    const stopWaitingBeat = () => {
+      if (waitingBeat !== null) window.clearInterval(waitingBeat);
+      waitingBeat = null;
+    };
+
     const fragmentSecret = new URLSearchParams(location.hash.replace(/^#/, "")).get("k");
     let watchSecret: string | null = fragmentSecret;
 
@@ -5102,6 +5187,20 @@ async function initWatchView(streamId: string, user: User | null) {
 
       let stopped = false;
       window.addEventListener("beforeunload", () => { stopped = true; });
+
+      // Count this person while they wait.
+      //
+      // Until now a session opened only once the route resolved, so a host with forty people
+      // already sitting behind a lowered curtain saw "0 watching" — nothing, at exactly the
+      // moment they are deciding whether to start. The session opens as `waiting` and is
+      // PROMOTED in place when the curtain lifts, so somebody who waited twenty minutes and
+      // then watched the event is one row, not two.
+      //
+      // Needs a route tag, and the Worker needs a live broadcast row, which together mean this
+      // counts the CURTAIN case rather than every early arrival: before the host goes live
+      // there is nothing to prove a link against, and that gate is what stops a stranger
+      // manufacturing an audience for a guessed id.
+      if (currentTag) void openWaitingSession(currentTag);
       const teardown = () => {
         waiting.stop();
         waiting.el.remove();
@@ -6018,9 +6117,20 @@ async function initWatchView(streamId: string, user: User | null) {
 
     const startSession = async () => {
       if (watchSession) return;
-      // routeTag is the proof we hold the share link; without it the Worker will not open a
-      // session, which is what stops audience being manufactured for a guessed stream id.
-      watchSession = await logWatchStart(streamId, routeTag);
+      if (waitingSession) {
+        // ADOPT the session opened on the standby page and promote it, rather than closing it
+        // and opening a fresh row. Somebody who waited through the countdown and then watched
+        // the event was present for the whole thing; two rows would credit them for neither,
+        // and the audience page reads durations off this table.
+        stopWaitingBeat();
+        watchSession = waitingSession;
+        waitingSession = null;
+        void logWatchHeartbeat(watchSession, "watching");
+      } else {
+        // routeTag is the proof we hold the share link; without it the Worker will not open a
+        // session, which is what stops audience being manufactured for a guessed stream id.
+        watchSession = await logWatchStart(streamId, routeTag);
+      }
       if (!watchSession) return;
       stopHeartbeat();
       heartbeat = window.setInterval(async () => {
@@ -6038,6 +6148,14 @@ async function initWatchView(streamId: string, user: User | null) {
 
     const endSession = () => {
       stopHeartbeat();
+      // A viewer who closes the tab while still on the standby page has a row open too, and
+      // leaving it for the reaper would hold them in the host's "waiting" count for minutes
+      // after they had gone.
+      stopWaitingBeat();
+      if (waitingSession) {
+        logWatchEnd(waitingSession);
+        waitingSession = null;
+      }
       if (!watchSession) return;
       logWatchEnd(watchSession);
       watchSession = null;
