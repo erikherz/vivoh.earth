@@ -55,6 +55,7 @@ async function signIn() {
 }
 
 const cookie = await signIn();
+const json = { "Content-Type": "application/json", cookie };
 console.log(`\nAgainst ${ORIGIN}\n`);
 
 let event = null;
@@ -136,6 +137,109 @@ try {
     // saying so is more honest than a 200 that would make this test flaky for the wrong reason.
     check("once lifted, the curtain no longer refuses", r.status !== 425, `still ${r.status}`);
   }
+  // ── Lowering, and ending ────────────────────────────────────────────────────────────
+  //
+  // The curtain is up at this point, so these run against a stream that is genuinely routable
+  // — which is the only state in which "it stopped being routable" means anything.
+  console.log("\nLowering and ending");
+  {
+    const res = await fetch(`${ORIGIN}/api/events/${event.id}/curtain`, {
+      method: "POST", headers: json, body: JSON.stringify({ state: "down" }),
+    });
+    const data = await res.json().catch(() => null);
+    check("the curtain lowers", data?.event?.phase === "before", `got ${data?.event?.phase}`);
+
+    const r = await fetch(`${ORIGIN}/api/streams/${event.stream_id}/route`, { headers: { cookie } });
+    const body = await r.json().catch(() => null);
+    // THE HALF THAT IS ABSOLUTE. Nobody new gets a token, and this needs no cooperation from
+    // anybody's browser. Stopping people already watching is the cooperative half and lives in
+    // the client; it cannot be measured from here, and this suite does not pretend to.
+    check("and nobody new can get a token", r.status === 425, `got ${r.status}`);
+    check("the refusal says which phase", body?.phase === "before", `got ${body?.phase}`);
+  }
+  {
+    // Lifting again is the positive control for the lowering above: same request, opposite
+    // answer, seconds apart, so "425" cannot have been a Worker that had simply stopped.
+    const res = await fetch(`${ORIGIN}/api/events/${event.id}/curtain`, {
+      method: "POST", headers: json, body: JSON.stringify({ state: "up" }),
+    });
+    const data = await res.json().catch(() => null);
+    check("it lifts again", data?.event?.phase === "up", `got ${data?.event?.phase}`);
+    const r = await fetch(`${ORIGIN}/api/streams/${event.stream_id}/route`, { headers: { cookie } });
+    check("and routing resumes", r.status !== 425, `still ${r.status}`);
+  }
+  {
+    const res = await fetch(`${ORIGIN}/api/events/${event.id}/curtain`, {
+      method: "POST", headers: json, body: JSON.stringify({ state: "ended" }),
+    });
+    const data = await res.json().catch(() => null);
+    check("the event can be ended", data?.event?.phase === "ended", `got ${data?.event?.phase}`);
+    // Ending beats a lift that is still on the row — otherwise a host who ended the event
+    // would leave the doors open behind a page saying it was over.
+    check("ending outranks the lift still on the row", data?.event?.curtain === "up", `curtain ${data?.event?.curtain}`);
+    const r = await fetch(`${ORIGIN}/api/streams/${event.stream_id}/route`, { headers: { cookie } });
+    const body = await r.json().catch(() => null);
+    check("an ended event refuses new viewers", r.status === 425, `got ${r.status}`);
+    check("and says it is over, not merely early", body?.phase === "ended", `got ${body?.phase}`);
+  }
+  {
+    // A host who changes their mind. Lifting must CLEAR the end, or the doors reopen behind a
+    // page still saying the event finished.
+    const res = await fetch(`${ORIGIN}/api/events/${event.id}/curtain`, {
+      method: "POST", headers: json, body: JSON.stringify({ state: "up" }),
+    });
+    const data = await res.json().catch(() => null);
+    check("lifting after ending clears the end", data?.event?.phase === "up" && data?.event?.ended_at === null,
+      `phase ${data?.event?.phase}, ended_at ${data?.event?.ended_at}`);
+  }
+
+  // ── The ending message ──────────────────────────────────────────────────────────────
+  console.log("\nThe ending message");
+  {
+    const res = await fetch(`${ORIGIN}/api/events/${event.id}`, {
+      method: "PATCH", headers: json,
+      body: JSON.stringify({ ended: { headline: "That's a wrap", message: "Recording goes out tomorrow." } }),
+    });
+    const data = await res.json().catch(() => null);
+    check("the ending headline round-trips", data?.event?.ended?.headline === "That's a wrap", `got ${data?.event?.ended?.headline}`);
+    check("the ending message round-trips", data?.event?.ended?.message === "Recording goes out tomorrow.", `got ${data?.event?.ended?.message}`);
+  }
+  {
+    // Same convention as the standby block: a PATCH that does not mention `ended` leaves it be.
+    // Without this check, "it stored what I sent" and "it ignores the field" look identical.
+    const res = await fetch(`${ORIGIN}/api/events/${event.id}`, {
+      method: "PATCH", headers: json, body: JSON.stringify({ title: "e2e live-curtain probe" }),
+    });
+    const data = await res.json().catch(() => null);
+    check("a PATCH that omits it leaves the ending alone", data?.event?.ended?.headline === "That's a wrap",
+      `got ${data?.event?.ended?.headline}`);
+  }
+
+  // ── The settings poll carries the phase ─────────────────────────────────────────────
+  //
+  // This is what a viewer who is ALREADY WATCHING reads. Without it they would keep playing a
+  // room the host had closed, because an established session makes no other request.
+  console.log("\nWhat a watching viewer polls");
+  {
+    const up = await fetch(`${ORIGIN}/api/streams/${event.stream_id}`, { headers: { cookie } })
+      .then((r) => r.json().catch(() => null));
+    check("while up, the poll says up", up?.phase === "up", `got ${up?.phase}`);
+
+    await fetch(`${ORIGIN}/api/events/${event.id}/curtain`, {
+      method: "POST", headers: json, body: JSON.stringify({ state: "down" }),
+    });
+    const down = await fetch(`${ORIGIN}/api/streams/${event.stream_id}`, { headers: { cookie } })
+      .then((r) => r.json().catch(() => null));
+    check("lowering shows up on the same poll", down?.phase === "before", `got ${down?.phase}`);
+  }
+  {
+    // An ordinary broadcast has no curtain, and must not grow one — a null here is what stops
+    // every non-event stream tearing itself down on the first poll.
+    const plain = await fetch(`${ORIGIN}/api/streams/aaaaa`, { headers: { cookie } })
+      .then((r) => r.json().catch(() => null));
+    check("a stream with no event reports no phase", plain?.phase === null, `got ${JSON.stringify(plain?.phase)}`);
+  }
+
   // ── A stale lift does not open the next occurrence ──────────────────────────────────
   //
   // The other half of the recurrence rule, and the reason curtain_lifted_at is a timestamp

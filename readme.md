@@ -110,9 +110,27 @@ directions on the same stream id.
 a lift belongs to the occurrence it is *nearest* to, and counts while that occurrence has not
 been overtaken. A boolean set last Thursday would still read "up" this Thursday.
 
-There is no *lower*. Viewers already watching hold a relay token and a live subscription that
-nothing server-side can revoke, so a control claiming to shut the room would be lying to the
-person pressing it. What it governs is who gets in from now on.
+**Three positions since 2026-09-16** (migration `0025`): *before* the doors open, *up* while
+people watch, *ended* afterwards. Lowering puts the audience back on the standby page and
+resumes on its own when the curtain lifts again; ending shows the ending message the scheduler
+wrote, and can still be undone by lifting.
+
+**What lowering actually promises**, because the control is worded to match and not to flatter:
+
+- **Absolute** — `/route` mints no viewer token while the curtain is down, so nobody new can
+  start watching. No client cooperation is involved.
+- **Cooperative** — somebody already watching holds a relay token that stays valid until it
+  expires. Their page polls, sees the phase change and stops; a modified client would not. This
+  is exactly the guarantee the kill switch makes, and the bar says "people already watching stop
+  when their page next checks in, within a few seconds" rather than implying a sealed room.
+
+An earlier version of this file argued there should be no *lower* at all, on the grounds that it
+would be a lie. The error was in the framing: a control that states its own limit is not lying,
+and "nobody new gets in, and every ordinary client stops" is worth having.
+
+The phase rides on the settings poll that already carries `killed`, so a watching viewer learns
+about a lowering without a second poll per person. `ends_at` passing also ends an event on its
+own, because the commonest way an event ends is somebody closing their laptop.
 
 ## Breakout rooms
 

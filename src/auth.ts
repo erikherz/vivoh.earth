@@ -393,6 +393,17 @@ export interface ScheduledEvent {
    */
   curtain: "up" | "down";
   curtain_lifted_at: string | null;
+  /**
+   * The fuller answer, and the one to branch on.
+   *
+   * `before` the doors open, `up` while people watch, `ended` afterwards, `canceled` if it
+   * never happened. `curtain` above is the same fact collapsed to two values, kept for
+   * anything that only cares whether viewers may connect.
+   */
+  phase: "before" | "up" | "ended" | "canceled";
+  ended_at: string | null;
+  /** What the ended page says. Nulls mean "use the built-in wording", never "show nothing". */
+  ended: { headline: string | null; message: string | null };
 }
 
 export interface StandbyDesign {
@@ -412,6 +423,8 @@ export interface EventInput {
   recurrence?: "daily" | "weekly" | "monthly" | null;
   /** On PATCH an absent field is left alone and an explicit null clears it. */
   standby?: Partial<StandbyDesign>;
+  /** Same convention: what the page says once the event is over. */
+  ended?: { headline?: string | null; message?: string | null };
 }
 
 /** The broadcaster's own events. Empty array on any failure — a list is not worth throwing over. */
@@ -480,17 +493,29 @@ export async function updateEvent(id: number, input: Partial<EventInput>): Promi
 }
 
 /**
- * Open the doors.
+ * Move the curtain: `up` opens the doors, `down` closes them again, `ended` finishes the event.
  *
- * One direction only, which is why there is no `lower`. Viewers already watching hold a relay
- * token and a live subscription that nothing here can revoke, so a "lower" control would claim
- * to shut a room it could not empty. What this changes is who gets in from now on.
+ * WHAT LOWERING PROMISES. Refusing new viewers is absolute — /route mints no token while it is
+ * down. Stopping people already watching is COOPERATIVE: their relay token stays valid until it
+ * expires, and our client stops because it polls and complies. That is precisely the kill
+ * switch's guarantee, and the control's wording says so rather than implying a sealed room.
+ *
+ * An earlier version of this file argued there should be no `lower` at all on the grounds that
+ * it would be a lie. The error was in the framing: a control that states its own limit is not
+ * lying, and "nobody new gets in, and every ordinary client stops" is worth having.
  */
-export async function liftCurtain(id: number): Promise<{ event?: ScheduledEvent; error?: string }> {
+export async function setCurtain(
+  id: number,
+  state: "up" | "down" | "ended"
+): Promise<{ event?: ScheduledEvent; error?: string }> {
   try {
-    const res = await fetch(`/api/events/${id}/curtain`, { method: "POST" });
+    const res = await fetch(`/api/events/${id}/curtain`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state }),
+    });
     const data = await res.json().catch(() => null);
-    if (!res.ok) return { error: data?.error || `Could not lift the curtain (HTTP ${res.status}).` };
+    if (!res.ok) return { error: data?.error || `Could not move the curtain (HTTP ${res.status}).` };
     return { event: data?.event };
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
@@ -779,6 +804,14 @@ export interface StreamSettings {
    * field is what widens who may publish.
    */
   breakouts_enabled?: boolean;
+  /**
+   * The event's phase, or null on an ordinary broadcast.
+   *
+   * Rides on the poll that already carries `killed`, and for the same reason: an established
+   * viewing session makes no other request, so without it a viewer would keep playing a room
+   * whose host had lowered the curtain.
+   */
+  phase?: "before" | "up" | "ended" | "canceled" | null;
   /** Terminated by an operator. Both sides poll for this and stop; see stopForKill(). */
   killed: boolean;
 }
@@ -797,13 +830,16 @@ export async function getStreamSettings(streamId: string): Promise<StreamSetting
       // Absent reads as OFF. An older Worker does not send this field, and this is the flag
       // that decides whether attendees are offered a control that widens who may publish.
       breakouts_enabled: data.breakouts_enabled === true,
+      phase: data.phase ?? null,
       killed: data.killed ?? false,
     };
   } catch {
     // Fails to `killed: false` deliberately. A network blip must not black out a stream that
     // is running perfectly well — the real signal is an explicit `true` from the server, and
     // a poll that fails will simply be retried five seconds later.
-    return { require_auth: false, overlay_html: "", link_enc: "", encrypted: false, chat_enabled: false, room_enabled: false, breakouts_enabled: false, killed: false };
+    // phase null on failure, deliberately: a network blip must not read as "the host closed
+    // the room" and tear down a stream that is playing perfectly well.
+    return { require_auth: false, overlay_html: "", link_enc: "", encrypted: false, chat_enabled: false, room_enabled: false, breakouts_enabled: false, phase: null, killed: false };
   }
 }
 

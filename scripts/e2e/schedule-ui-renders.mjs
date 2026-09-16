@@ -140,6 +140,41 @@ try {
       check(`/schedule ${label}: the message box is 16px`, got.message?.fontSize === 16, `${got.message?.fontSize}px`);
     }
 
+    // ── The ending designer ─────────────────────────────────────────────────────────
+    {
+      const got = await page.evaluate(() => {
+        const card = document.querySelector("#sched-en-preview .standby-card");
+        const r = card?.getBoundingClientRect();
+        return {
+          visible: !!r && r.width > 0 && r.height > 0,
+          headline: document.querySelector("#sched-en-preview .standby-headline")?.textContent ?? "",
+          message: document.querySelector("#sched-en-preview .standby-message")?.textContent ?? "",
+          countdown: !!document.querySelector("#sched-en-preview .standby-countdown"),
+          // "This page will begin playing on its own" is a promise a finished event cannot keep.
+          status: !!document.querySelector("#sched-en-preview .standby-status")?.getClientRects().length,
+          placeholderHeadline: document.querySelector("#sched-en-headline")?.getAttribute("placeholder") ?? "",
+        };
+      });
+      check(`/schedule ${label}: the ending preview renders`, got.visible);
+      // The empty boxes must show what attendees will ACTUALLY see, or a scheduler who leaves
+      // them alone has no idea what they shipped.
+      check(`/schedule ${label}: it previews the default wording`, got.headline === "This event has ended", `"${got.headline}"`);
+      check(`/schedule ${label}: the placeholder matches that default`, got.placeholderHeadline === "This event has ended", `"${got.placeholderHeadline}"`);
+      check(`/schedule ${label}: no countdown on a finished event`, !got.countdown);
+      check(`/schedule ${label}: and no promise to start playing`, !got.status);
+    }
+    {
+      const before = await page.$eval("#sched-en-preview .standby-headline", (el) => el.textContent);
+      await page.type("#sched-en-headline", "That's a wrap");
+      await new Promise((r) => setTimeout(r, 120));
+      const after = await page.$eval("#sched-en-preview .standby-headline", (el) => el.textContent);
+      check(
+        `/schedule ${label}: the ending preview follows what is typed`,
+        after === "That's a wrap" && after !== before,
+        `"${before}" -> "${after}"`
+      );
+    }
+
     // The preview must actually be LIVE, not a first paint. Type a headline, watch it change.
     {
       const before = await page.$eval("#sched-sb-preview .standby-headline", (el) => el.textContent);
@@ -255,11 +290,74 @@ try {
     await page.click(".curtain-lift");
     await page.waitForFunction(
       () => document.querySelector("#curtain-bar .curtain-text strong")?.textContent === "Curtain up",
-      { timeout: 20_000 }
+      { timeout: 20_000, polling: 500 }
     ).catch(() => {});
     const after = await page.$eval("#curtain-bar .curtain-text strong", (el) => el.textContent);
     check("curtain bar: pressing it lifts the curtain", after === "Curtain up", `"${after}"`);
     await page.screenshot({ path: join(SHOTS, "curtain-bar-lifted.png") });
+  }
+
+  // ── Up: both ways back down are offered, and worded honestly ──────────────────────
+  {
+    const got = await page.evaluate(() => ({
+      buttons: [...document.querySelectorAll("#curtain-bar button")].map((b) => b.textContent),
+      detail: document.querySelector("#curtain-bar .curtain-text span")?.textContent ?? "",
+    }));
+    check("curtain bar: up offers Lower and End", got.buttons.includes("Lower the curtain") && got.buttons.includes("End the event"),
+      JSON.stringify(got.buttons));
+    // THE WORDING IS LOad-BEARING. Lowering cannot revoke a subscription somebody already
+    // holds, so the bar must not imply it can. If this ever reads as "everyone stops
+    // immediately", the control is overstating its reach.
+    check("curtain bar: it says when people already watching stop",
+      /next checks in|within a few seconds/i.test(got.detail), `"${got.detail}"`);
+    await page.screenshot({ path: join(SHOTS, "curtain-bar-up.png") });
+  }
+
+  // ── Lower, and back ───────────────────────────────────────────────────────────────
+  {
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll("#curtain-bar button")].find((x) => x.textContent === "Lower the curtain");
+      b?.click();
+    });
+    await page.waitForFunction(
+      () => document.querySelector("#curtain-bar .curtain-text strong")?.textContent === "Curtain down",
+      { timeout: 20_000, polling: 500 }
+    ).catch(() => {});
+    const after = await page.$eval("#curtain-bar .curtain-text strong", (el) => el.textContent);
+    check("curtain bar: lowering puts it back to down", after === "Curtain down", `"${after}"`);
+  }
+
+  // ── End ───────────────────────────────────────────────────────────────────────────
+  {
+    // Lifting does NOT confirm — only ending does. A `page.once("dialog")` registered here
+    // would still be pending when the End dialog arrived, and both handlers would fire on it
+    // ("Cannot accept dialog which is already handled"). Register it once, right before the
+    // click that actually raises one.
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll("#curtain-bar button")].find((x) => x.textContent === "Lift the curtain");
+      b?.click();
+    });
+    await page.waitForFunction(
+      () => document.querySelector("#curtain-bar .curtain-text strong")?.textContent === "Curtain up",
+      { timeout: 20_000, polling: 500 }
+    ).catch(() => {});
+    page.once("dialog", (d) => void d.accept());
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll("#curtain-bar button")].find((x) => x.textContent === "End the event");
+      b?.click();
+    });
+    const ended = await page.waitForFunction(
+      () => document.querySelector("#curtain-bar .curtain-text strong")?.textContent === "This event has ended",
+      { timeout: 20_000, polling: 500 }
+    ).then(() => true, () => false);
+    check("curtain bar: ending says so", ended);
+    const got = await page.evaluate(() => ({
+      links: [...document.querySelectorAll("#curtain-bar a")].map((a) => a.textContent),
+      buttons: [...document.querySelectorAll("#curtain-bar button")].map((b) => b.textContent),
+    }));
+    check("curtain bar: and offers to edit the ending message", got.links.includes("Edit ending message"), JSON.stringify(got.links));
+    check("curtain bar: with a way to carry on after all", got.buttons.includes("Lift the curtain"), JSON.stringify(got.buttons));
+    await page.screenshot({ path: join(SHOTS, "curtain-bar-ended.png") });
   }
 
   // ── The standby page, as an attendee sees it ──────────────────────────────────────

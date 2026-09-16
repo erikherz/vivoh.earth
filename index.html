@@ -2678,10 +2678,31 @@
             cursor: pointer;
         }
         /* The preview is a real standby page at a smaller size, not a picture of one. */
-        #sched-sb-preview { border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
-        #sched-sb-preview .standby { padding: 1.25rem 0.75rem; min-height: 0; }
-        #sched-sb-preview .standby-card { padding: 1.4rem 1rem; }
-        #sched-sb-preview .standby-headline { font-size: 1.35rem; }
+        #sched-sb-preview, #sched-en-preview { border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
+        #sched-sb-preview .standby, #sched-en-preview .standby { padding: 1.25rem 0.75rem; min-height: 0; }
+        #sched-sb-preview .standby-card, #sched-en-preview .standby-card { padding: 1.4rem 1rem; }
+        #sched-sb-preview .standby-headline, #sched-en-preview .standby-headline { font-size: 1.35rem; }
+        /* The ending card has no countdown and nothing to wait for, so the "this page will
+           begin playing on its own" line would be a promise it cannot keep. */
+        #sched-en-preview .standby-status { display: none; }
+
+        /* A secondary curtain action — Lower, End. Quieter than Lift, which is the one a host
+           reaches for under time pressure. */
+        .curtain-secondary {
+            padding: 0.6rem 1.1rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: transparent;
+            color: var(--text-primary);
+            font: inherit;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .curtain-secondary:hover:not(:disabled) { border-color: var(--text-secondary); }
+        .curtain-secondary:disabled { opacity: 0.6; cursor: default; }
+        /* Finished: no accent tint, because there is nothing left to act on. */
+        .curtain-bar.over { border-color: var(--border-color); background: var(--bg-secondary); }
 
         /* ── Events: list / calendar ────────────────────────────────────────────────── */
         .events-modes { display: flex; gap: 0.4rem; margin-bottom: 1.25rem; }

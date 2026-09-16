@@ -778,7 +778,7 @@ import {
   createEvent,
   cancelEvent,
   updateEvent,
-  liftCurtain,
+  setCurtain,
   type ScheduledEvent,
   type StandbyDesign,
   getLiveStats,
@@ -1168,8 +1168,10 @@ function spin(btn: Element): void {
  * list saw: no time to check framing, no time to get the deck up, no time to let the room
  * fill. Now the audience sits on the standby page until this button is pressed.
  *
- * There is no lower. See liftCurtain() in auth.ts for why a control that claimed to shut the
- * room would be lying to the person pressing it.
+ * Three positions since 2026-09-16: before, up, ended. Lowering refuses new viewers outright
+ * and asks the ones already watching to stop — see setCurtain() in auth.ts for exactly how much
+ * of that is enforced and how much is cooperative. The bar's own wording says the same, because
+ * a control that overstates its reach is worse than one that does not exist.
  */
 function mountCurtainControl(streamId: string): void {
   const bar = document.getElementById("curtain-bar");
@@ -1192,15 +1194,61 @@ function mountCurtainControl(streamId: string): void {
     const paint = () => {
       bar.replaceChildren();
       if (current.standby.accent) bar.style.setProperty("--standby-accent", current.standby.accent);
-      bar.classList.toggle("up", current.curtain === "up");
+      bar.classList.toggle("up", current.phase === "up");
+      bar.classList.toggle("over", current.phase === "ended" || current.phase === "canceled");
 
       const text = document.createElement("div");
       text.className = "curtain-text";
-
       const title = document.createElement("strong");
       const detail = document.createElement("span");
+      const actions = document.createElement("div");
+      actions.className = "curtain-actions";
 
-      if (current.canceled) {
+      /** One button, one curtain position, and the label says what happens. */
+      const move = (label: string, busy: string, state: "up" | "down" | "ended", primary: boolean) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = primary ? "curtain-lift" : "curtain-secondary";
+        b.textContent = label;
+        b.addEventListener("click", async () => {
+          // Ending is the one that cannot be walked back into the same shape — a host who ends
+          // and re-lifts has reopened the doors, but everyone was shown the ended page in
+          // between. Worth one confirm; the other two are freely reversible and get none.
+          if (state === "ended" && !window.confirm(
+            `End "${current.title}"?\n\nEveryone watching is shown your ending message, and ` +
+            `nobody new can join. You can still lift the curtain again afterwards.`
+          )) return;
+          b.disabled = true;
+          b.textContent = busy;
+          const result = await setCurtain(current.id, state);
+          if (result.event) {
+            current = result.event;
+            paint();
+            return;
+          }
+          // Say what actually refused. A button that returns to its old label having done
+          // nothing is the failure mode where a host presses it three more times and then
+          // starts the broadcast over.
+          b.disabled = false;
+          b.textContent = label;
+          const err = document.createElement("p");
+          err.className = "curtain-error";
+          err.setAttribute("role", "alert");
+          err.textContent = result.error ?? "Could not move the curtain.";
+          bar.append(err);
+        });
+        return b;
+      };
+
+      const editLink = (label: string) => {
+        const a = document.createElement("a");
+        a.className = "curtain-preview";
+        a.href = `/schedule?event=${current.id}`;
+        a.textContent = label;
+        return a;
+      };
+
+      if (current.phase === "canceled") {
         title.textContent = "This event was cancelled";
         detail.textContent = "Anyone who opens the link is told so. Schedule a replacement to run it again.";
         text.append(title, detail);
@@ -1208,54 +1256,39 @@ function mountCurtainControl(streamId: string): void {
         return;
       }
 
-      if (current.curtain === "up") {
-        title.textContent = "Curtain up";
-        detail.textContent = "Everyone holding the link can watch. New arrivals go straight to the video.";
+      if (current.phase === "ended") {
+        title.textContent = "This event has ended";
+        detail.textContent =
+          "Anyone who opens the link sees your ending message. Lift the curtain again if you " +
+          "are carrying on after all.";
         text.append(title, detail);
-        bar.append(text);
+        actions.append(editLink("Edit ending message"), move("Lift the curtain", "Lifting…", "up", true));
+        bar.append(text, actions);
         return;
       }
 
+      if (current.phase === "up") {
+        title.textContent = "Curtain up";
+        detail.textContent =
+          "Everyone holding the link can watch. Lowering it puts them back on the standby page " +
+          "and stops anyone new joining — people already watching stop when their page next " +
+          "checks in, within a few seconds.";
+        text.append(title, detail);
+        actions.append(
+          move("End the event", "Ending…", "ended", false),
+          move("Lower the curtain", "Lowering…", "down", false)
+        );
+        bar.append(text, actions);
+        return;
+      }
+
+      // before
       title.textContent = "Curtain down";
       detail.textContent =
         "Your audience is on the standby page, even while you are live. Take your time — " +
         "lift the curtain when you are ready and every one of them switches over on their own.";
       text.append(title, detail);
-
-      const actions = document.createElement("div");
-      actions.className = "curtain-actions";
-
-      const preview = document.createElement("a");
-      preview.className = "curtain-preview";
-      preview.href = `/schedule?event=${current.id}`;
-      preview.textContent = "Edit standby page";
-
-      const lift = document.createElement("button");
-      lift.type = "button";
-      lift.className = "curtain-lift";
-      lift.textContent = "Lift the curtain";
-      lift.addEventListener("click", async () => {
-        lift.disabled = true;
-        lift.textContent = "Lifting…";
-        const result = await liftCurtain(current.id);
-        if (result.event) {
-          current = result.event;
-          paint();
-          return;
-        }
-        // Say what actually refused. A button that goes back to its old label having done
-        // nothing is the failure mode where a host presses it three more times and then
-        // starts the broadcast over.
-        lift.disabled = false;
-        lift.textContent = "Lift the curtain";
-        const err = document.createElement("p");
-        err.className = "curtain-error";
-        err.setAttribute("role", "alert");
-        err.textContent = result.error ?? "Could not lift the curtain.";
-        bar.append(err);
-      });
-
-      actions.append(preview, lift);
+      actions.append(editLink("Edit standby page"), move("Lift the curtain", "Lifting…", "up", true));
       bar.append(text, actions);
     };
 
@@ -3433,6 +3466,32 @@ async function initScheduleView(user: User | null): Promise<void> {
       <div class="sched-field"><div id="sched-sb-preview"></div></div>
     </div>
 
+    <!-- The last thing anyone sees. Shown once the event is over — either because the host
+         ended it, or because its end time passed. Both fields have working defaults, so an
+         event nobody styled still closes with a sentence rather than a blank card. -->
+    <h3 class="sched-section">When it&rsquo;s over</h3>
+    <p class="sched-section-note">
+      What people see if they open the link after the event has finished &mdash; including
+      anyone still watching when you end it.
+    </p>
+    <div class="sched-row">
+      <label for="sched-en-headline">Headline</label>
+      <div class="sched-field">
+        <input type="text" id="sched-en-headline" maxlength="80" autocomplete="off" placeholder="This event has ended">
+      </div>
+    </div>
+    <div class="sched-row">
+      <label for="sched-en-message">Message</label>
+      <div class="sched-field">
+        <textarea id="sched-en-message" maxlength="600" placeholder="Thanks for coming. There is nothing more to watch here."></textarea>
+        <span class="sched-sub">A link to the recording, or where to go next.</span>
+      </div>
+    </div>
+    <div class="sched-row">
+      <label>Preview</label>
+      <div class="sched-field"><div id="sched-en-preview"></div></div>
+    </div>
+
     <div class="sched-actions">
       <a href="/events" class="sched-btn">${existing ? "Cancel" : "My events"}</a>
       <button type="button" class="sched-btn sched-btn-primary" id="sched-save">${existing ? "Save changes" : "Schedule it"}</button>
@@ -3462,6 +3521,9 @@ async function initScheduleView(user: User | null): Promise<void> {
   const sbAccent = page.querySelector("#sched-sb-accent") as HTMLInputElement;
   const sbCountdown = page.querySelector("#sched-sb-countdown") as HTMLInputElement;
   const preview = page.querySelector("#sched-sb-preview") as HTMLElement;
+  const enHeadline = page.querySelector("#sched-en-headline") as HTMLInputElement;
+  const enMessage = page.querySelector("#sched-en-message") as HTMLTextAreaElement;
+  const enPreview = page.querySelector("#sched-en-preview") as HTMLElement;
 
   if (existing) {
     titleInput.value = existing.title;
@@ -3481,6 +3543,8 @@ async function initScheduleView(user: User | null): Promise<void> {
     sbMessage.value = existing.standby.message ?? "";
     sbAccent.value = existing.standby.accent ?? STANDBY_DEFAULT_ACCENT;
     sbCountdown.checked = existing.standby.countdown;
+    enHeadline.value = existing.ended.headline ?? "";
+    enMessage.value = existing.ended.message ?? "";
   }
 
   titleCount.textContent = String(titleInput.value.length);
@@ -3490,6 +3554,7 @@ async function initScheduleView(user: User | null): Promise<void> {
   // The preview is the SAME renderer the viewer gets, not a mock-up of it. Anything that
   // drifted here would be a scheduler designing one page and shipping another.
   let livePreview: StandbyHandle | null = null;
+  let endedPreview: StandbyHandle | null = null;
   const repaint = () => {
     livePreview?.stop();
     const zone = tzSelect.value;
@@ -3507,8 +3572,26 @@ async function initScheduleView(user: User | null): Promise<void> {
       canceled: false,
     });
     preview.replaceChildren(livePreview.el);
+
+    // The ending card, through the SAME renderer, with the same defaults the viewer gets. The
+    // placeholders in the two inputs are those defaults spelled out, so what a scheduler reads
+    // in the empty boxes is exactly what their attendees will see.
+    endedPreview?.stop();
+    endedPreview = renderStandby({
+      title: titleInput.value.trim() || "Your event",
+      description: null,
+      standby: {
+        headline: enHeadline.value.trim() || "This event has ended",
+        message: enMessage.value.trim() || "Thanks for coming. There is nothing more to watch here.",
+        accent: sbAccent.value,
+        countdown: false,
+      },
+      startsAt: null,
+      canceled: false,
+    });
+    enPreview.replaceChildren(endedPreview.el);
   };
-  for (const el of [titleInput, descInput, startDate, startTime, tzSelect, sbHeadline, sbMessage, sbAccent, sbCountdown]) {
+  for (const el of [titleInput, descInput, startDate, startTime, tzSelect, sbHeadline, sbMessage, sbAccent, sbCountdown, enHeadline, enMessage]) {
     el.addEventListener("input", repaint);
     el.addEventListener("change", repaint);
   }
@@ -3554,6 +3637,13 @@ async function initScheduleView(user: User | null): Promise<void> {
         // is sent as null. Storing it would freeze this event against a future restyle.
         accent: sbAccent.value.toLowerCase() === STANDBY_DEFAULT_ACCENT ? null : sbAccent.value,
         countdown: sbCountdown.checked,
+      },
+      // Empty means "use the default wording", stored as null rather than as the default text.
+      // Storing the default would freeze this event's ending against any future rewording, and
+      // make an untouched field indistinguishable from a deliberate one.
+      ended: {
+        headline: enHeadline.value.trim() || null,
+        message: enMessage.value.trim() || null,
       },
     };
 
@@ -4137,21 +4227,54 @@ function renderStandby(spec: StandbySpec): StandbyHandle {
  * host is live but has not lifted the curtain wants to know the wait is nearly over. Passing
  * the event (or null) separates the first from the other two; setStatus() separates those.
  */
-function renderWaitingRoom(event: ScheduledEvent | null): StandbyHandle {
+function renderWaitingRoom(
+  event: ScheduledEvent | null,
+  /**
+   * Which page to draw, when the caller already knows.
+   *
+   * The waiting loop does not pass it — the event's own phase is right there. The mid-watch
+   * teardown does, because it learned the phase from the settings poll a moment before
+   * re-fetching the event, and re-deriving it here would open a window where the two disagree.
+   */
+  phase?: "before" | "up" | "ended" | "canceled"
+): StandbyHandle {
   if (!event) {
     const el = document.createElement("div");
     el.className = "watch-waiting";
     el.style.cssText = "text-align:center;padding:2rem 1.5rem;color:var(--text-muted);";
-    el.textContent = "Waiting for broadcaster…";
+    el.textContent = phase === "ended"
+      ? "This event has ended."
+      : "Waiting for broadcaster…";
     return { el, setStatus: (t) => { el.textContent = t; }, stop: () => {} };
+  }
+
+  const show = phase ?? event.phase ?? (event.canceled ? "canceled" : "before");
+
+  if (show === "ended") {
+    return renderStandby({
+      // The scheduler's own words, with a working default — the same rule the standby page
+      // follows, so an event nobody styled still gets a sentence rather than a blank card.
+      title: event.title,
+      description: null,
+      standby: {
+        headline: event.ended.headline || "This event has ended",
+        message: event.ended.message || "Thanks for coming. There is nothing more to watch here.",
+        accent: event.standby.accent,
+        // Nothing to count to. A countdown on a finished event would tick toward next week's
+        // occurrence, which reads as though this one were about to start again.
+        countdown: false,
+      },
+      startsAt: null,
+      canceled: false,
+    });
   }
 
   return renderStandby({
     title: event.title,
     description: event.description,
     standby: event.standby,
-    startsAt: event.canceled ? null : new Date(event.next_starts_at),
-    canceled: event.canceled,
+    startsAt: show === "canceled" ? null : new Date(event.next_starts_at),
+    canceled: show === "canceled",
   });
 }
 
