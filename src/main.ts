@@ -790,6 +790,7 @@ import {
   type LiveViewer,
   type StreamRoute
 } from "./auth";
+import { utcIsoToWallTime, wallTimeToUtcIso } from "./time/wall-time";
 import { renderOverlay } from "./overlay-sanitize";
 import { buildPublisherClaim } from "./publisher-claim";
 import {
@@ -3208,37 +3209,6 @@ function timezoneLabel(zone: string): string {
   }
 }
 
-/**
- * A date and a time as the broadcaster typed them, in the zone they chose, as UTC.
- *
- * `new Date("2026-10-01T09:00")` uses the BROWSER's zone, which is the bug this exists to
- * avoid: someone in London scheduling a 9am Manila town hall would have booked 9am London.
- * There is no standard API for "parse this wall time in that zone", so the offset is measured
- * — format the candidate instant in the target zone, see how far off it landed, and correct.
- * One correction is enough except within an hour of a DST transition, so it runs twice.
- */
-function wallTimeToUtcIso(date: string, time: string, zone: string): string | null {
-  if (!date || !time) return null;
-  const naive = Date.parse(`${date}T${time}:00Z`);
-  if (!Number.isFinite(naive)) return null;
-
-  let guess = naive;
-  for (let i = 0; i < 2; i++) {
-    const parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: zone, hour12: false,
-      year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit", second: "2-digit",
-    }).formatToParts(new Date(guess));
-    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? "0");
-    // Intl renders midnight as hour 24 in some engines; Date.UTC handles the rollover.
-    const asUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour") % 24, get("minute"), get("second"));
-    const drift = asUtc - guess;
-    if (drift === 0) break;
-    guess = naive - (drift - (naive - guess));
-  }
-  return new Date(guess).toISOString();
-}
-
 /** Show one of the top-level views and hide the rest. */
 function showOnly(id: string): HTMLElement | null {
   for (const v of ["landing-view", "broadcast-view", "watch-view", "schedule-view", "events-view"]) {
@@ -3279,32 +3249,6 @@ function requireBroadcaster(user: User | null, container: HTMLElement): boolean 
   panel.append(h, p, cta);
   container.replaceChildren(panel);
   return false;
-}
-
-/**
- * An instant, as the wall-clock date and time it reads in a given zone.
- *
- * The inverse of wallTimeToUtcIso(), and it exists for the edit form: an event stored as
- * 2026-10-01T01:00Z in Asia/Manila has to reappear in the boxes as 09:00 on the 1st, not as
- * whatever those boxes would show in the editor's own zone. `sv` gives exactly the
- * YYYY-MM-DD, HH:mm shapes the date and time inputs want.
- */
-function utcIsoToWallTime(iso: string | null, zone: string): { date: string; time: string } {
-  if (!iso) return { date: "", time: "" };
-  const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return { date: "", time: "" };
-  try {
-    const parts = new Intl.DateTimeFormat("sv-SE", {
-      timeZone: zone, hour12: false,
-      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
-    }).formatToParts(new Date(ms));
-    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-    // Some engines render midnight as hour 24; the date inputs will not accept it.
-    const hour = get("hour") === "24" ? "00" : get("hour");
-    return { date: `${get("year")}-${get("month")}-${get("day")}`, time: `${hour}:${get("minute")}` };
-  } catch {
-    return { date: "", time: "" };
-  }
 }
 
 /**

@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "deploy": "vite build && wrangler deploy",
     "keygen": "node scripts/moq-keygen.mjs",
-    "cf-typegen": "wrangler types"
+    "cf-typegen": "wrangler types",
+    "test:time": "node --experimental-strip-types scripts/e2e/wall-time.mjs"
   },
   "devDependencies": {
     "puppeteer": "^25.6.0",
